@@ -39,7 +39,11 @@ class NewsItemRow(Base):
     news_id: Mapped[str] = mapped_column(index=True)
     content: Mapped[str]
     urgency: Mapped[str]
-    sentiment: Mapped[float | None]
+    # Free-form categorical label from upstream ('neutral' / 'positive' / ...),
+    # treated as text like ``urgency`` — never coerced to a number. SQLite's
+    # dynamic typing stores text into this column even if an older DB created it
+    # with NUMERIC affinity, so no migration is needed.
+    sentiment: Mapped[str | None]
     published_at: Mapped[float]
     received_at: Mapped[float] = mapped_column(index=True)
 

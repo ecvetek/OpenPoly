@@ -12,7 +12,7 @@ from openpoly.news.manager import NewsSourceManager
 from openpoly.news.ring_buffer import NewsItem
 
 
-def _item(news_id: str = "n1", *, sentiment: float | None = None) -> NewsItem:
+def _item(news_id: str = "n1", *, sentiment: str | None = None) -> NewsItem:
     return NewsItem(
         id=news_id,
         content=f"content {news_id}",
@@ -30,13 +30,27 @@ def _engine(tmp_path):
 
 
 def test_news_item_to_row():
-    row = news_item_to_row(_item("abc", sentiment=0.7))
+    row = news_item_to_row(_item("abc", sentiment="positive"))
     assert row.news_id == "abc"
     assert row.content == "content abc"
     assert row.urgency == "high"
-    assert row.sentiment == 0.7
+    assert row.sentiment == "positive"
     assert row.published_at == 1.0
     assert row.received_at == 2.0
+
+
+def test_sink_persists_categorical_sentiment(tmp_path):
+    """Sentiment is a free-form categorical string ('neutral' / 'positive' /
+    ...), not a float. The sink must persist it as text — a numeric column
+    raises ``ValueError: could not convert string to float`` on every commit
+    and the write-behind writer swallows it, so news silently stops persisting."""
+    engine = _engine(tmp_path)
+    factory = make_session_factory(engine)
+    make_news_sink(factory)([_item("a", sentiment="neutral")])
+    with factory() as session:
+        rows = session.execute(select(NewsItemRow)).scalars().all()
+    assert {(r.news_id, r.sentiment) for r in rows} == {("a", "neutral")}
+    engine.dispose()
 
 
 def test_news_item_to_row_null_sentiment():

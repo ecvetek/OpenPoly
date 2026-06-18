@@ -22,7 +22,9 @@ class NewsItem:
     id: str
     content: str
     urgency: Urgency
-    sentiment: float | None
+    # Upstream-defined, free-form (tradingnews emits labels like "neutral" /
+    # "positive"); kept as-is, never coerced. See NewsItemRow.sentiment.
+    sentiment: str | None
     published_at: float  # epoch seconds (UTC); from upstream
     received_at: float  # epoch seconds (UTC); our wall clock at ingest
     raw: dict[str, Any] | None = None
