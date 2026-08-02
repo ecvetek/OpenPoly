@@ -126,6 +126,57 @@ async def test_market_autostart_uses_canvas_saved_config(
     assert captured[0].poll_interval_seconds == 120  # from canvas, not the 900 default
 
 
+async def test_embedding_autostart_uses_canvas_saved_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """embedding_manager.start() must be seeded from the persisted canvas
+    config, not bare defaults — same class of bug as market_source /
+    news_source autostart (a canvas edit to embedding_model /
+    max_question_chars / warm_interval_seconds would otherwise silently
+    have no effect until a full restart with the right timing, which
+    never actually happens since start() only ever ran with defaults)."""
+    from openpoly.embedding.manager import manager as embedding_manager_singleton
+    from openpoly.runtime.canvas_store import save_template
+
+    save_template(
+        {
+            "version": 1,
+            "name": "test",
+            "nodes": [
+                {
+                    "id": "embedding-seed",
+                    "sectionType": "embedding",
+                    "position": {"x": 0, "y": 0},
+                    "config": {
+                        "embedding_model": "custom-model",
+                        "max_question_chars": 42,
+                        "warm_interval_seconds": 999,
+                    },
+                }
+            ],
+            "edges": [],
+        }
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_start(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    async def fake_stop() -> None:
+        pass
+
+    monkeypatch.setattr(embedding_manager_singleton, "start", fake_start)
+    monkeypatch.setattr(embedding_manager_singleton, "stop", fake_stop)
+
+    async with lifespan(app):
+        pass
+
+    assert captured["model_name"] == "custom-model"
+    assert captured["max_question_chars"] == 42
+    assert captured["warm_interval_seconds"] == 999
+
+
 async def test_lifespan_calls_bootstrap_peaks_before_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

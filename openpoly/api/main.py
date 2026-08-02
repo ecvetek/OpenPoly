@@ -43,6 +43,7 @@ from openpoly.runtime import reconciliation_monitor as _recon_mod
 from openpoly.runtime.reconciliation_monitor import ReconciliationMonitor
 from openpoly.runtime.orchestrator import _canvas_config, get_orchestrator
 from openpoly.sections._registry import CatalogEntry, scan
+from openpoly.sections.embedding.minilm_v0 import EmbeddingFilterConfig
 from openpoly.sections.news_source.tradingnews_ws import TradingNewsWSConfig
 from openpoly.wallet.runtime_state import runtime_state
 
@@ -192,8 +193,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await _recon_mod.reconciliation_monitor.start()
     # Embedding warm cache — uses the engine database_manager just bootstrapped
     # (init_db has created the market_embedding table); the warm loop reloads
-    # cached vectors so a restart skips the cold recompute.
-    await embedding_manager.start(session_factory=get_session_factory())
+    # cached vectors so a restart skips the cold recompute. Seeded from the
+    # persisted canvas config (same class of bug as market/news autostart —
+    # this previously always used bare defaults for embedding_model /
+    # max_question_chars / warm_interval_seconds, ignoring anything saved
+    # in the canvas UI).
+    embedding_cfg = _canvas_config(EmbeddingFilterConfig, "embedding")
+    await embedding_manager.start(
+        session_factory=get_session_factory(),
+        model_name=embedding_cfg.embedding_model,
+        max_question_chars=embedding_cfg.max_question_chars,
+        warm_interval_seconds=embedding_cfg.warm_interval_seconds,
+    )
     market_source_manager.set_book_persist(database_manager.enqueue_order_book)
     market_source_manager.set_portfolio_store(PortfolioStore(get_session_factory()))
     news_source_manager.set_news_persist(database_manager.enqueue_news)

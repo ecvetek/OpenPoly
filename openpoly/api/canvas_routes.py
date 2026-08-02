@@ -176,6 +176,7 @@ async def _apply_canvas_reload(
         len(new_template.get("nodes") or []),
     )
     # Late import to avoid cycle at module load.
+    from openpoly.embedding.manager import manager as embedding_manager
     from openpoly.runtime import orchestrator as orch_mod
     from openpoly.runtime.exit_monitor import exit_monitor
 
@@ -205,6 +206,23 @@ async def _apply_canvas_reload(
             logger.info("canvas reload: rebuilt %s section", stype)
         except Exception:  # noqa: BLE001
             logger.exception("canvas reload: failed to swap %s section", stype)
+            continue
+        if stype == "embedding":
+            # replace_section only swaps the section instance the orchestrator
+            # calls .run() on — it doesn't push the new config into the
+            # EmbeddingManager singleton that section delegates to, so
+            # embedding_model / max_question_chars / warm_interval_seconds
+            # would otherwise silently keep using whatever was live at
+            # process boot.
+            try:
+                await embedding_manager.reconfigure(
+                    model_name=new_inst.config.embedding_model,
+                    max_question_chars=new_inst.config.max_question_chars,
+                    warm_interval_seconds=new_inst.config.warm_interval_seconds,
+                )
+                logger.info("canvas reload: reconfigured embedding manager")
+            except Exception:  # noqa: BLE001
+                logger.exception("canvas reload: failed to reconfigure embedding manager")
 
     # Exit section is held by exit_monitor, not orchestrator.
     old_exit = _section_config(old_template, "exit")

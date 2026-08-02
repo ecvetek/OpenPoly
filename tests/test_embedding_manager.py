@@ -222,3 +222,74 @@ async def test_start_stop_lifecycle() -> None:
     finally:
         await mgr.stop()
     assert mgr.status()["state"] == "stopped"
+
+
+# ---------- reconfigure (live canvas-edit application) ----------
+
+
+async def test_reconfigure_updates_fields_while_running() -> None:
+    mgr = EmbeddingManager(encoder=FakeEncoder({}))
+    await mgr.start(model_name="model-a", max_question_chars=100, warm_interval_seconds=60)
+    try:
+        await mgr.reconfigure(
+            model_name="model-a",
+            max_question_chars=250,
+            warm_interval_seconds=120,
+        )
+        assert mgr._max_question_chars == 250  # noqa: SLF001
+        assert mgr._warm_interval == 120.0  # noqa: SLF001
+        assert mgr.status()["model_name"] == "model-a"
+    finally:
+        await mgr.stop()
+
+
+async def test_reconfigure_model_change_clears_warm_cache() -> None:
+    _set_catalog([_market("m1", "alpha")])
+    fake = FakeEncoder({"alpha": [1.0, 0.0]})
+    mgr = EmbeddingManager(encoder=fake)
+    await mgr.start(model_name="model-a")
+    try:
+        mgr.refresh()
+        assert set(mgr._vectors) == {"m1"}  # noqa: SLF001
+
+        await mgr.reconfigure(
+            model_name="model-b",
+            max_question_chars=mgr._max_question_chars,  # noqa: SLF001
+            warm_interval_seconds=mgr._warm_interval,  # noqa: SLF001
+        )
+        # Different embedding space — the old-model cache must not survive
+        # to be silently compared against new-model vectors.
+        assert mgr._vectors == {}  # noqa: SLF001
+        assert mgr._text_hashes == {}  # noqa: SLF001
+        assert mgr._encoder is None  # noqa: SLF001 — forces reload on next encode()
+        assert mgr.status()["model_name"] == "model-b"
+    finally:
+        await mgr.stop()
+
+
+async def test_reconfigure_same_model_preserves_warm_cache() -> None:
+    _set_catalog([_market("m1", "alpha")])
+    fake = FakeEncoder({"alpha": [1.0, 0.0]})
+    mgr = EmbeddingManager(encoder=fake)
+    await mgr.start(model_name="model-a")
+    try:
+        mgr.refresh()
+        assert set(mgr._vectors) == {"m1"}  # noqa: SLF001
+
+        await mgr.reconfigure(
+            model_name="model-a",  # same model
+            max_question_chars=999,
+            warm_interval_seconds=mgr._warm_interval,  # noqa: SLF001
+        )
+        assert set(mgr._vectors) == {"m1"}  # noqa: SLF001 — cache preserved
+        assert mgr._encoder is fake  # noqa: SLF001 — encoder not cleared
+    finally:
+        await mgr.stop()
+
+
+async def test_reconfigure_noop_when_not_running() -> None:
+    mgr = EmbeddingManager(encoder=FakeEncoder({}))
+    assert mgr.status()["state"] == "stopped"
+    await mgr.reconfigure(model_name="model-b", max_question_chars=1, warm_interval_seconds=1)
+    # Never applied — the manager was never running.
+    assert mgr.status()["model_name"] != "model-b"

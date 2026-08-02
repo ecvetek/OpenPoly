@@ -133,6 +133,46 @@ class EmbeddingManager:
         with contextlib.suppress(Exception):
             await self.stop()
 
+    async def reconfigure(
+        self,
+        *,
+        model_name: str,
+        max_question_chars: int,
+        warm_interval_seconds: float,
+    ) -> None:
+        """Push a new config into the already-running manager.
+
+        ``start()`` is a no-op once running, so this is the only way a
+        canvas edit to ``embedding_model`` / ``max_question_chars`` /
+        ``warm_interval_seconds`` actually takes effect without a full
+        backend restart — canvas-sync v2 already hot-swaps the *section*
+        instance, but nothing previously pushed its config into this
+        singleton. No-op if not currently running (the next ``start()``
+        call will read the fresh canvas config anyway).
+
+        A ``model_name`` change forces a full re-embed: vectors from the
+        old model live in a different embedding space, so comparing them
+        against new-model news vectors would silently corrupt similarity
+        scoring rather than just being slow to catch up. ``max_question_chars``
+        needs no such invalidation — ``refresh()``'s existing text-hash
+        comparison already detects a truncation-length change as a
+        per-market cache miss and re-embeds just the affected markets.
+        ``warm_interval_seconds`` takes effect on the loop's next sleep
+        boundary — same eventually-consistent behavior as every other
+        interval config in this codebase.
+        """
+        async with self._lock:
+            if self._state != "running":
+                return
+            model_changed = model_name != self._model_name
+            self._model_name = model_name
+            self._max_question_chars = max_question_chars
+            self._warm_interval = float(warm_interval_seconds)
+            if model_changed:
+                self._encoder = None
+                self._vectors = {}
+                self._text_hashes = {}
+
     # ---------- query (called by the embedding section) ----------
 
     def match(

@@ -244,3 +244,93 @@ def test_put_preserves_unknown_top_level_fields(client: TestClient) -> None:
     client.put("/api/canvas/template", json=tpl)
     got = client.get("/api/canvas/template").json()
     assert got["custom_metadata"] == {"layout_version": 42, "favorite": True}
+
+
+# ---------- hot-reload: embedding manager reconfiguration ----------
+
+
+def _embedding_node(**config: object) -> dict:
+    return {
+        "version": 1,
+        "nodes": [
+            {"id": "e1", "sectionType": "embedding", "config": config},
+        ],
+    }
+
+
+async def test_canvas_reload_reconfigures_embedding_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PUTting a changed embedding config must push the new
+    model/max_question_chars/warm_interval_seconds into the running
+    EmbeddingManager singleton, not just swap the orchestrator's section
+    instance — replace_section alone doesn't reach the manager that
+    section delegates encoding/caching to.
+
+    ``_build_section`` (called internally by ``_apply_canvas_reload``)
+    re-reads the *persisted* canvas file, not the ``new_template`` dict
+    argument (which is only used for the old-vs-new diff check) — mirrors
+    the real PUT handler, which calls ``save_template`` before firing off
+    the reload task. So this test must persist the new template first, same
+    as that real flow."""
+    from openpoly.api.canvas_routes import _apply_canvas_reload
+    from openpoly.embedding.manager import manager as embedding_manager_singleton
+    from openpoly.runtime.canvas_store import save_template
+
+    monkeypatch.setenv("OPENPOLY_CANVAS_STORE", str(tmp_path / "canvas.json"))
+
+    old_template = _embedding_node(
+        embedding_model="old-model", max_question_chars=100, warm_interval_seconds=300
+    )
+    new_template = _embedding_node(
+        embedding_model="new-model", max_question_chars=250, warm_interval_seconds=120
+    )
+    save_template(new_template)
+
+    captured: dict[str, object] = {}
+
+    async def fake_reconfigure(
+        *, model_name: str, max_question_chars: int, warm_interval_seconds: float
+    ) -> None:
+        captured["model_name"] = model_name
+        captured["max_question_chars"] = max_question_chars
+        captured["warm_interval_seconds"] = warm_interval_seconds
+
+    monkeypatch.setattr(embedding_manager_singleton, "reconfigure", fake_reconfigure)
+
+    await _apply_canvas_reload(old_template, new_template)
+
+    assert captured == {
+        "model_name": "new-model",
+        "max_question_chars": 250,
+        "warm_interval_seconds": 120,
+    }
+
+
+async def test_canvas_reload_skips_reconfigure_when_embedding_config_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openpoly.api.canvas_routes import _apply_canvas_reload
+    from openpoly.embedding.manager import manager as embedding_manager_singleton
+    from openpoly.runtime.canvas_store import save_template
+
+    monkeypatch.setenv("OPENPOLY_CANVAS_STORE", str(tmp_path / "canvas.json"))
+
+    template = _embedding_node(
+        embedding_model="same-model", max_question_chars=100, warm_interval_seconds=300
+    )
+    save_template(template)
+
+    called = False
+
+    async def fake_reconfigure(**_kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(embedding_manager_singleton, "reconfigure", fake_reconfigure)
+
+    await _apply_canvas_reload(template, template)
+
+    assert called is False
