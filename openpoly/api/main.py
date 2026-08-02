@@ -112,7 +112,14 @@ async def _autostart_sources() -> None:
     except Exception:  # noqa: BLE001 — startup must survive a bad source
         logger.exception("market_source autostart failed")
     try:
-        news_cfg = TradingNewsWSConfig(api_key_ref=_NEWS_AUTOSTART_KEY_REF)
+        # Same fix as market_source above: seed from the persisted canvas
+        # config (freshness_seconds / urgency_filter / buffer_size /
+        # endpoint), not bare TradingNewsWSConfig() defaults. api_key_ref is
+        # the one exception — left wired to _NEWS_AUTOSTART_KEY_REF exactly
+        # as before (not sourced from canvas at all), so this fix can't
+        # disturb an already-working news connection's key resolution.
+        news_cfg = _canvas_config(TradingNewsWSConfig, "news_source")
+        news_cfg = news_cfg.model_copy(update={"api_key_ref": _NEWS_AUTOSTART_KEY_REF})
         await news_source_manager.start(news_cfg.model_dump())
     except Exception:  # noqa: BLE001 — startup must survive a bad source
         logger.exception("news_source autostart failed")
