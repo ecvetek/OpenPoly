@@ -21,9 +21,19 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
 
+from openpoly.db.engine import get_session_factory
+from openpoly.db.tables import (
+    AnalyzerCallRow,
+    EmbeddingCallRow,
+    EntryDecisionRow,
+    ExitDecisionRow,
+    SettlementDecisionRow,
+)
 from openpoly.llm import LLMClient, LLMError
 from openpoly.runtime.orchestrator import get_orchestrator
 from openpoly.runtime.section_log import (
@@ -39,6 +49,27 @@ from openpoly.runtime.settlement_monitor import settlement_monitor
 from openpoly.sections.analyzer.llm_v0 import LLMAnalyzerConfig
 
 router = APIRouter(prefix="/api", tags=["runtime"])
+
+
+def _entries_from_db(
+    factory: sessionmaker[Session], row_cls: type, limit: int
+) -> list[dict[str, Any]]:
+    """Newest ``limit`` rows from a persisted call-log table, returned
+    oldest-first — matches ``SectionLogStore.entries(limit)``'s contract
+    exactly (``limit<=0`` -> ``[]``)."""
+    limit = max(0, limit)
+    if limit == 0:
+        return []
+    with factory() as session:
+        rows = (
+            session.execute(
+                select(row_cls).order_by(row_cls.ts.desc(), row_cls.id.desc()).limit(limit)
+            )
+            .scalars()
+            .all()
+        )
+    cols = [c.name for c in row_cls.__table__.columns if c.name != "id"]
+    return [{col: getattr(r, col) for col in cols} for r in reversed(rows)]
 
 
 class SectionLogResponse(BaseModel):
@@ -59,10 +90,13 @@ class SectionLogResponse(BaseModel):
 
 
 @router.get("/embedding/log", response_model=SectionLogResponse)
-def get_embedding_log(limit: int = 200) -> SectionLogResponse:
+def get_embedding_log(
+    limit: int = 200,
+    factory: sessionmaker[Session] = Depends(get_session_factory),
+) -> SectionLogResponse:
     orch = get_orchestrator()
     return SectionLogResponse(
-        entries=[e.to_dict() for e in embedding_log.entries(limit=limit)],
+        entries=_entries_from_db(factory, EmbeddingCallRow, limit),
         counters=embedding_log.counters(),
         last_at=embedding_log.last_at,
         queue_depth=orch.queue_depth,
@@ -72,10 +106,13 @@ def get_embedding_log(limit: int = 200) -> SectionLogResponse:
 
 
 @router.get("/analyzer/log", response_model=SectionLogResponse)
-def get_analyzer_log(limit: int = 200) -> SectionLogResponse:
+def get_analyzer_log(
+    limit: int = 200,
+    factory: sessionmaker[Session] = Depends(get_session_factory),
+) -> SectionLogResponse:
     orch = get_orchestrator()
     return SectionLogResponse(
-        entries=[e.to_dict() for e in analyzer_log.entries(limit=limit)],
+        entries=_entries_from_db(factory, AnalyzerCallRow, limit),
         counters=analyzer_log.counters(),
         last_at=analyzer_log.last_at,
         queue_depth=orch.queue_depth,
@@ -135,10 +172,13 @@ def test_analyzer(req: AnalyzerTestRequest) -> AnalyzerTestResponse:
 
 
 @router.get("/entry/log", response_model=SectionLogResponse)
-def get_entry_log(limit: int = 200) -> SectionLogResponse:
+def get_entry_log(
+    limit: int = 200,
+    factory: sessionmaker[Session] = Depends(get_session_factory),
+) -> SectionLogResponse:
     orch = get_orchestrator()
     return SectionLogResponse(
-        entries=[e.to_dict() for e in entry_log.entries(limit=limit)],
+        entries=_entries_from_db(factory, EntryDecisionRow, limit),
         counters=entry_log.counters(),
         last_at=entry_log.last_at,
         queue_depth=orch.queue_depth,
@@ -147,12 +187,15 @@ def get_entry_log(limit: int = 200) -> SectionLogResponse:
 
 
 @router.get("/exit/log", response_model=SectionLogResponse)
-def get_exit_log(limit: int = 200) -> SectionLogResponse:
+def get_exit_log(
+    limit: int = 200,
+    factory: sessionmaker[Session] = Depends(get_session_factory),
+) -> SectionLogResponse:
     # The exit monitor is position-driven, not a news queue — queue_depth has
     # no meaning (always 0). state + the tick-heartbeat fields come straight
     # off the monitor singleton.
     return SectionLogResponse(
-        entries=[e.to_dict() for e in exit_log.entries(limit=limit)],
+        entries=_entries_from_db(factory, ExitDecisionRow, limit),
         counters=exit_log.counters(),
         last_at=exit_log.last_at,
         queue_depth=0,
@@ -164,11 +207,14 @@ def get_exit_log(limit: int = 200) -> SectionLogResponse:
 
 
 @router.get("/settlement/log", response_model=SectionLogResponse)
-def get_settlement_log(limit: int = 200) -> SectionLogResponse:
+def get_settlement_log(
+    limit: int = 200,
+    factory: sessionmaker[Session] = Depends(get_session_factory),
+) -> SectionLogResponse:
     # Settlement monitor mirrors the exit-monitor shape — position-driven, no
     # news queue. state surfaces whether the loop is running.
     return SectionLogResponse(
-        entries=[e.to_dict() for e in settlement_log.entries(limit=limit)],
+        entries=_entries_from_db(factory, SettlementDecisionRow, limit),
         counters=settlement_log.counters(),
         last_at=settlement_log.last_at,
         queue_depth=0,

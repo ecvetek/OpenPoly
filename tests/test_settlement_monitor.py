@@ -17,7 +17,7 @@ import pytest
 
 from openpoly.db.engine import init_db, make_engine, make_session_factory
 from openpoly.portfolio import PortfolioStore
-from openpoly.runtime.section_log import settlement_log
+from openpoly.runtime.section_log import SettlementDecision, settlement_log
 from openpoly.runtime.settlement_monitor import (
     SettlementMonitor,
     _settlement_price_for_side,
@@ -270,6 +270,46 @@ async def test_market_not_returned_by_gamma_logs_skip(store) -> None:
     entries = settlement_log.entries()
     assert entries[0].verdict == "skip"
     assert entries[0].reason == "market_not_returned_by_gamma"
+
+
+# ---------- persist hook ----------
+
+
+async def test_persist_hook_fires_on_settlement(store) -> None:
+    _open_position(store, condition_id="0xcid", side="yes", avg=0.40, qty=10.0)
+    raw = [_raw_market(condition_id="0xcid", closed=True, outcome_prices=["1", "0"])]
+    sm = SettlementMonitor(fetcher=_fetcher_returning(raw))
+    sm.configure(store)
+    persisted: list[SettlementDecision] = []
+    sm.set_settlement_persist(persisted.append)
+    await sm._tick_once()
+    assert [d.final_price for d in persisted] == [1.0]
+
+
+async def test_raising_persist_hook_is_swallowed(store) -> None:
+    _open_position(store, condition_id="0xcid", side="yes", avg=0.40, qty=10.0)
+    raw = [_raw_market(condition_id="0xcid", closed=True, outcome_prices=["1", "0"])]
+    sm = SettlementMonitor(fetcher=_fetcher_returning(raw))
+    sm.configure(store)
+
+    def _boom(_decision) -> None:
+        raise RuntimeError("persist boom")
+
+    sm.set_settlement_persist(_boom)
+    await sm._tick_once()  # must not raise
+    assert len(settlement_log.entries()) == 1
+
+
+async def test_persist_hook_cleared_via_none(store) -> None:
+    _open_position(store, condition_id="0xcid", side="yes", avg=0.40, qty=10.0)
+    raw = [_raw_market(condition_id="0xcid", closed=True, outcome_prices=["1", "0"])]
+    sm = SettlementMonitor(fetcher=_fetcher_returning(raw))
+    sm.configure(store)
+    persisted: list[SettlementDecision] = []
+    sm.set_settlement_persist(persisted.append)
+    sm.set_settlement_persist(None)
+    await sm._tick_once()
+    assert persisted == []
 
 
 async def test_tick_loop_start_stop(store) -> None:

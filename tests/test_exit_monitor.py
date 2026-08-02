@@ -20,7 +20,7 @@ from openpoly.markets.models import OrderBook
 from openpoly.markets.store import MarketStore
 from openpoly.portfolio import HeldPosition, PortfolioStore
 from openpoly.runtime.exit_monitor import ExitMonitor
-from openpoly.runtime.section_log import exit_log
+from openpoly.runtime.section_log import ExitDecision, exit_log
 from openpoly.sections.exit.threshold_v0 import (
     ThresholdExitConfig,
     ThresholdExitV0,
@@ -247,6 +247,41 @@ def test_not_configured_noop() -> None:
     )
     m._tick_once()  # no configure() — portfolio is None
     assert exit_log.entries() == []
+
+
+# ---------- persist hook ----------
+
+
+def test_persist_hook_fires_on_close() -> None:
+    market_source_manager.store.set_order_books([_book("t1", bid=0.55)])
+    monitor = _monitor(_FakePortfolio([_held(1, "t1", avg=0.40)]), _FakeExecutor())
+    persisted: list[ExitDecision] = []
+    monitor.set_exit_persist(persisted.append)
+    monitor._tick_once()
+    assert [d.trigger for d in persisted] == ["take_profit"]
+
+
+def test_raising_persist_hook_is_swallowed() -> None:
+    market_source_manager.store.set_order_books([_book("t1", bid=0.55)])
+    monitor = _monitor(_FakePortfolio([_held(1, "t1", avg=0.40)]), _FakeExecutor())
+
+    def _boom(_decision) -> None:
+        raise RuntimeError("persist boom")
+
+    monitor.set_exit_persist(_boom)
+    monitor._tick_once()  # must not raise
+    # The ring still got its entry despite the persist hook raising.
+    assert len(exit_log.entries()) == 1
+
+
+def test_persist_hook_cleared_via_none() -> None:
+    market_source_manager.store.set_order_books([_book("t1", bid=0.55)])
+    monitor = _monitor(_FakePortfolio([_held(1, "t1", avg=0.40)]), _FakeExecutor())
+    persisted: list[ExitDecision] = []
+    monitor.set_exit_persist(persisted.append)
+    monitor.set_exit_persist(None)
+    monitor._tick_once()
+    assert persisted == []
 
 
 # ---------- loop lifecycle ----------

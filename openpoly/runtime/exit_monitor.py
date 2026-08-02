@@ -27,6 +27,7 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Literal, Protocol
 
 from sqlalchemy import select
@@ -110,6 +111,10 @@ class ExitMonitor:
         self._last_tick_at: float | None = None
         self._last_tick_open: int = 0
         self._last_tick_blocked: int = 0
+        # Persist hook — optional, set by main.py's lifespan once the DB is
+        # up. None means "not wired yet"; append still happens to exit_log
+        # (the in-memory ring) regardless.
+        self._exit_persist: Callable[[ExitDecision], None] | None = None
 
     @property
     def state(self) -> State:
@@ -135,6 +140,9 @@ class ExitMonitor:
         """Inject the PortfolioStore — the FastAPI lifespan calls this once the
         DB is up. Construction itself touches no DB."""
         self._portfolio = portfolio
+
+    def set_exit_persist(self, hook: Callable[[ExitDecision], None] | None) -> None:
+        self._exit_persist = hook
 
     def bootstrap_peaks(self, session_factory: sessionmaker[Session]) -> None:
         """Rebuild per-position peaks from persisted order-book snapshots.
@@ -310,22 +318,26 @@ class ExitMonitor:
         reason: str | None = None,
         error: str | None = None,
     ) -> None:
-        exit_log.append(
-            ExitDecision(
-                ts=ts,
-                position_id=held.position_id,
-                market_id=held.market_id,
-                side=held.side,
-                verdict=verdict,  # type: ignore[arg-type]
-                trigger=trigger,
-                return_pct=return_pct,
-                peak_price=peak_price,
-                fill_price=fill_price,
-                realized_pnl=realized_pnl,
-                reason=reason,
-                error=error,
-            )
+        entry = ExitDecision(
+            ts=ts,
+            position_id=held.position_id,
+            market_id=held.market_id,
+            side=held.side,
+            verdict=verdict,  # type: ignore[arg-type]
+            trigger=trigger,
+            return_pct=return_pct,
+            peak_price=peak_price,
+            fill_price=fill_price,
+            realized_pnl=realized_pnl,
+            reason=reason,
+            error=error,
         )
+        exit_log.append(entry)
+        if self._exit_persist is not None:
+            try:
+                self._exit_persist(entry)
+            except Exception:  # noqa: BLE001 — a bad persist hook must not break the monitor
+                logger.exception("exit_persist raised; suppressing")
 
 
 # Module-level singleton — the FastAPI lifespan injects its PortfolioStore via

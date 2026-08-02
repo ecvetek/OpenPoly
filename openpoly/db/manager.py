@@ -18,15 +18,34 @@ from sqlalchemy import Engine, func, select, text
 from openpoly.db.book_store import make_order_book_sink
 from openpoly.db.engine import get_engine, init_db, make_session_factory
 from openpoly.db.news_store import make_news_sink
+from openpoly.db.section_log_store import (
+    make_analyzer_call_sink,
+    make_embedding_call_sink,
+    make_entry_decision_sink,
+    make_exit_decision_sink,
+    make_settlement_decision_sink,
+)
 from openpoly.db.tables import (
+    AnalyzerCallRow,
+    EmbeddingCallRow,
+    EntryDecisionRow,
+    ExitDecisionRow,
     FillRow,
     NewsItemRow,
     OrderBookSnapshot,
     PositionRow,
+    SettlementDecisionRow,
 )
 from openpoly.db.writer import WriteBehindWriter
 from openpoly.markets.models import OrderBook
 from openpoly.news.ring_buffer import NewsItem
+from openpoly.runtime.section_log import (
+    AnalyzerCall,
+    EmbeddingCall,
+    EntryDecision,
+    ExitDecision,
+    SettlementDecision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +86,11 @@ class DatabaseManager:
         self._engine: Engine | None = None
         self._book_writer: WriteBehindWriter | None = None
         self._news_writer: WriteBehindWriter | None = None
+        self._embedding_call_writer: WriteBehindWriter | None = None
+        self._analyzer_call_writer: WriteBehindWriter | None = None
+        self._entry_decision_writer: WriteBehindWriter | None = None
+        self._exit_decision_writer: WriteBehindWriter | None = None
+        self._settlement_decision_writer: WriteBehindWriter | None = None
 
     # ---------- lifecycle ----------
 
@@ -81,15 +105,35 @@ class DatabaseManager:
         factory = make_session_factory(self._engine)
         self._book_writer = WriteBehindWriter(make_order_book_sink(factory))
         self._news_writer = WriteBehindWriter(make_news_sink(factory))
+        self._embedding_call_writer = WriteBehindWriter(make_embedding_call_sink(factory))
+        self._analyzer_call_writer = WriteBehindWriter(make_analyzer_call_sink(factory))
+        self._entry_decision_writer = WriteBehindWriter(make_entry_decision_sink(factory))
+        self._exit_decision_writer = WriteBehindWriter(make_exit_decision_sink(factory))
+        self._settlement_decision_writer = WriteBehindWriter(make_settlement_decision_sink(factory))
         await self._book_writer.start()
         await self._news_writer.start()
+        await self._embedding_call_writer.start()
+        await self._analyzer_call_writer.start()
+        await self._entry_decision_writer.start()
+        await self._exit_decision_writer.start()
+        await self._settlement_decision_writer.start()
 
     async def stop(self) -> None:
-        """Stop both writers, flushing whatever is still queued."""
+        """Stop all writers, flushing whatever is still queued."""
         if self._book_writer is not None:
             await self._book_writer.stop()
         if self._news_writer is not None:
             await self._news_writer.stop()
+        if self._embedding_call_writer is not None:
+            await self._embedding_call_writer.stop()
+        if self._analyzer_call_writer is not None:
+            await self._analyzer_call_writer.stop()
+        if self._entry_decision_writer is not None:
+            await self._entry_decision_writer.stop()
+        if self._exit_decision_writer is not None:
+            await self._exit_decision_writer.stop()
+        if self._settlement_decision_writer is not None:
+            await self._settlement_decision_writer.stop()
 
     async def shutdown(self) -> None:
         with contextlib.suppress(Exception):
@@ -110,6 +154,36 @@ class DatabaseManager:
             return False
         return self._news_writer.enqueue(item)
 
+    def enqueue_embedding_call(self, call: EmbeddingCall) -> bool:
+        """Queue one embedding-filter call for write-behind persistence."""
+        if self._embedding_call_writer is None:
+            return False
+        return self._embedding_call_writer.enqueue(call)
+
+    def enqueue_analyzer_call(self, call: AnalyzerCall) -> bool:
+        """Queue one analyzer call for write-behind persistence."""
+        if self._analyzer_call_writer is None:
+            return False
+        return self._analyzer_call_writer.enqueue(call)
+
+    def enqueue_entry_decision(self, call: EntryDecision) -> bool:
+        """Queue one entry decision for write-behind persistence."""
+        if self._entry_decision_writer is None:
+            return False
+        return self._entry_decision_writer.enqueue(call)
+
+    def enqueue_exit_decision(self, call: ExitDecision) -> bool:
+        """Queue one exit-monitor decision for write-behind persistence."""
+        if self._exit_decision_writer is None:
+            return False
+        return self._exit_decision_writer.enqueue(call)
+
+    def enqueue_settlement_decision(self, call: SettlementDecision) -> bool:
+        """Queue one settlement-monitor decision for write-behind persistence."""
+        if self._settlement_decision_writer is None:
+            return False
+        return self._settlement_decision_writer.enqueue(call)
+
     # ---------- status (powers the database section inspector) ----------
 
     def status(self) -> dict[str, Any]:
@@ -119,6 +193,11 @@ class DatabaseManager:
             "writers": {
                 "order_book": self._writer_stats(self._book_writer),
                 "news": self._writer_stats(self._news_writer),
+                "embedding_call": self._writer_stats(self._embedding_call_writer),
+                "analyzer_call": self._writer_stats(self._analyzer_call_writer),
+                "entry_decision": self._writer_stats(self._entry_decision_writer),
+                "exit_decision": self._writer_stats(self._exit_decision_writer),
+                "settlement_decision": self._writer_stats(self._settlement_decision_writer),
             },
         }
 
@@ -136,6 +215,21 @@ class DatabaseManager:
                 "fill": session.execute(select(func.count()).select_from(FillRow)).scalar_one(),
                 "position": session.execute(
                     select(func.count()).select_from(PositionRow)
+                ).scalar_one(),
+                "embedding_call": session.execute(
+                    select(func.count()).select_from(EmbeddingCallRow)
+                ).scalar_one(),
+                "analyzer_call": session.execute(
+                    select(func.count()).select_from(AnalyzerCallRow)
+                ).scalar_one(),
+                "entry_decision": session.execute(
+                    select(func.count()).select_from(EntryDecisionRow)
+                ).scalar_one(),
+                "exit_decision": session.execute(
+                    select(func.count()).select_from(ExitDecisionRow)
+                ).scalar_one(),
+                "settlement_decision": session.execute(
+                    select(func.count()).select_from(SettlementDecisionRow)
                 ).scalar_one(),
             }
 
