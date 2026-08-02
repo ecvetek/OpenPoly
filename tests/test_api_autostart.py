@@ -126,6 +126,97 @@ async def test_market_autostart_uses_canvas_saved_config(
     assert captured[0].poll_interval_seconds == 120  # from canvas, not the 900 default
 
 
+async def test_lifespan_calls_bootstrap_peaks_before_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """exit_monitor.bootstrap_peaks() must run before exit_monitor.start() —
+    it reconstructs each open position's true historical peak price, which
+    the tick loop needs seeded before it starts evaluating stop-loss."""
+    from openpoly.runtime.exit_monitor import exit_monitor
+
+    order: list[str] = []
+
+    def fake_bootstrap_peaks(session_factory: Any) -> None:
+        order.append("bootstrap_peaks")
+
+    async def fake_start() -> None:
+        order.append("start")
+
+    async def fake_stop() -> None:
+        pass
+
+    monkeypatch.setattr(exit_monitor, "bootstrap_peaks", fake_bootstrap_peaks)
+    monkeypatch.setattr(exit_monitor, "start", fake_start)
+    monkeypatch.setattr(exit_monitor, "stop", fake_stop)
+
+    async with lifespan(app):
+        pass
+
+    assert order == ["bootstrap_peaks", "start"]
+
+
+async def test_lifespan_shutdown_stops_monitors_before_database_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every consumer/producer loop must be fully stopped before
+    database_manager.stop() tears down the write-behind writers —
+    otherwise anything still in flight during that window would silently
+    lose its persist call (the original bug: this used to run in the
+    opposite order, contradicting the shutdown block's own comment)."""
+    from openpoly.db.manager import manager as database_manager
+    from openpoly.embedding.manager import manager as embedding_manager_singleton
+    from openpoly.markets.manager import manager as market_manager_singleton
+    from openpoly.news.manager import manager as news_manager_singleton
+    from openpoly.runtime.exit_monitor import exit_monitor
+    from openpoly.runtime.orchestrator import PipelineOrchestrator
+    from openpoly.runtime.settlement_monitor import settlement_monitor
+
+    order: list[str] = []
+
+    async def fake_settlement_stop() -> None:
+        order.append("settlement_monitor.stop")
+
+    async def fake_exit_stop() -> None:
+        order.append("exit_monitor.stop")
+
+    async def fake_embedding_stop() -> None:
+        order.append("embedding_manager.stop")
+
+    async def fake_orch_stop(self: PipelineOrchestrator) -> None:
+        order.append("orchestrator.stop")
+
+    async def fake_news_shutdown() -> None:
+        order.append("news_source_manager.shutdown")
+
+    async def fake_market_shutdown() -> None:
+        order.append("market_source_manager.shutdown")
+
+    async def fake_db_stop() -> None:
+        order.append("database_manager.stop")
+
+    monkeypatch.setattr(exit_monitor, "bootstrap_peaks", lambda session_factory: None)
+    monkeypatch.setattr(settlement_monitor, "stop", fake_settlement_stop)
+    monkeypatch.setattr(exit_monitor, "stop", fake_exit_stop)
+    monkeypatch.setattr(embedding_manager_singleton, "stop", fake_embedding_stop)
+    monkeypatch.setattr(PipelineOrchestrator, "stop", fake_orch_stop)
+    monkeypatch.setattr(news_manager_singleton, "shutdown", fake_news_shutdown)
+    monkeypatch.setattr(market_manager_singleton, "shutdown", fake_market_shutdown)
+    monkeypatch.setattr(database_manager, "stop", fake_db_stop)
+
+    async with lifespan(app):
+        pass
+
+    assert order[-1] == "database_manager.stop"
+    assert set(order[:-1]) == {
+        "settlement_monitor.stop",
+        "exit_monitor.stop",
+        "embedding_manager.stop",
+        "orchestrator.stop",
+        "news_source_manager.shutdown",
+        "market_source_manager.shutdown",
+    }
+
+
 async def test_market_autostart_falls_back_to_defaults_when_no_canvas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

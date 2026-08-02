@@ -160,6 +160,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Exit monitor — the timer-driven close loop; shares the executor with the
     # orchestrator. Configure with its own PortfolioStore, then start ticking.
     exit_monitor.configure(PortfolioStore(get_session_factory()))
+    # Rebuild each open position's true historical peak price from
+    # order_book_snapshot before the tick loop starts — otherwise every
+    # restart silently seeds each position's peak at its *current* price
+    # instead of its real high, disabling drawdown-based stop protection
+    # until a new peak organically forms.
+    exit_monitor.bootstrap_peaks(get_session_factory())
     await exit_monitor.start()
     # Settlement monitor (slice E) — closes resolved-market positions at 0/1
     # directly via PortfolioStore (no broker tx). Independent from exit_monitor
@@ -205,8 +211,30 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if _autostart_enabled():
         await _autostart_sources()
     yield
-    # Shutdown (reverse order): drain orchestrator first so it doesn't try
-    # to enqueue against a torn-down manager, then stop the WS source.
+    # Shutdown — two phases. Phase 1 stops every consumer/producer loop
+    # first, so nothing can still be mid-flight (enqueuing into a writer, or
+    # about to call a persist hook) once phase 2 tears those down. This used
+    # to null the persist hooks and stop database_manager *before*
+    # orch.stop() / news_source_manager's pipeline hook were cleared —
+    # contradicting this comment's own stated intent — so any pipeline call
+    # or news item still in flight during that window was silently lost
+    # with zero trace. orch.stop() itself is cooperative (waits for any
+    # item already dispatched to a worker thread to actually finish, and
+    # logs — rather than silently drops — anything left queued), so by the
+    # time this phase returns, nothing can call a persist hook anymore.
+    if _recon_mod.reconciliation_monitor is not None:
+        await _recon_mod.reconciliation_monitor.stop()
+    await settlement_monitor.stop()
+    await exit_monitor.stop()
+    await embedding_manager.stop()
+    await orch.stop()
+    news_source_manager.set_pipeline_hook(None)
+    await news_source_manager.shutdown()
+    await market_source_manager.shutdown()
+
+    # Phase 2 — nothing above can call a persist hook or enqueue into a
+    # writer anymore, so it's now safe to null the hooks and tear down the
+    # database manager.
     orch.set_embedding_persist(None)
     orch.set_analyzer_persist(None)
     orch.set_entry_persist(None)
@@ -215,16 +243,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     market_source_manager.set_book_persist(None)
     market_source_manager.set_portfolio_store(None)
     news_source_manager.set_news_persist(None)
-    if _recon_mod.reconciliation_monitor is not None:
-        await _recon_mod.reconciliation_monitor.stop()
-    await settlement_monitor.stop()
-    await exit_monitor.stop()
-    await embedding_manager.stop()
     await database_manager.stop()
-    await orch.stop()
-    news_source_manager.set_pipeline_hook(None)
-    await news_source_manager.shutdown()
-    await market_source_manager.shutdown()
 
 
 app = FastAPI(title="openPoly", version="0.0.0", lifespan=lifespan)
