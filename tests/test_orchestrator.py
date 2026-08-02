@@ -8,6 +8,7 @@ its own log stores so state doesn't leak between cases.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 from openpoly.embedding.models import MarketCandidate, MarketCandidates
@@ -267,6 +268,70 @@ async def test_stop_when_stopped_is_noop() -> None:
     orch, _, _, _ = make_orchestrator()
     await orch.stop()
     assert orch.state == "stopped"
+
+
+class _BlockingAnalyzer:
+    """Blocks in run() (on a real threading.Event, since analyzer.run() is
+    dispatched to a worker thread via asyncio.to_thread) until released —
+    simulates an in-flight LLM call during shutdown."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.call_count = 0
+
+    def run(self, input: SectionInput) -> SectionOutput:
+        self.call_count += 1
+        self.started.set()
+        self.release.wait(timeout=5)
+        return SectionOutput(
+            payload=AnalysisResult(market_id="m1", p_model=0.55, confidence="medium"),
+            verdict="ok",
+        )
+
+
+async def test_stop_waits_for_in_flight_item_before_returning() -> None:
+    """stop() must not return until an item already dispatched to a worker
+    thread has actually finished — proving no task.cancel() race can
+    silently drop its persist call (the bug this cooperative-shutdown
+    rewrite fixes)."""
+    analyzer = _BlockingAnalyzer()
+    entry = FakeEntry()
+    orch, _, a_log, _ = make_orchestrator(analyzer=analyzer, entry=entry)
+    await orch.start()
+    orch.enqueue(_item("n1"))
+
+    await asyncio.to_thread(analyzer.started.wait, 5)
+
+    stop_task = asyncio.create_task(orch.stop())
+    await asyncio.sleep(0.05)  # give a buggy stop() a chance to return early
+    assert not stop_task.done()
+
+    analyzer.release.set()
+    await asyncio.wait_for(stop_task, timeout=5)
+
+    assert orch.state == "stopped"
+    assert len(a_log.entries()) == 1  # in-flight item's persist call landed
+    assert entry.call_count == 1  # pipeline continued through to entry
+
+
+async def test_stop_logs_discarded_items_left_in_queue() -> None:
+    """Items still queued (never picked up by the worker) at shutdown are
+    logged as discarded, not silently dropped — and not processed through
+    the real pipeline (which could dispatch a live trade mid-shutdown)."""
+    orch, emb_log, _, _ = make_orchestrator()
+    # Never start()ed — items just sit in the queue.
+    orch.enqueue(_item("n1"))
+    orch.enqueue(_item("n2"))
+    assert orch.queue_depth == 2
+
+    await orch.stop()
+
+    assert orch.queue_depth == 0
+    entries = emb_log.entries()
+    assert [e.news_id for e in entries] == ["n1", "n2"]
+    assert all(e.verdict == "error" for e in entries)
+    assert all("discarded_at_shutdown" in (e.error or "") for e in entries)
 
 
 # ---------- happy path ----------

@@ -88,6 +88,12 @@ class PipelineOrchestrator:
         self._queue: asyncio.Queue[NewsItem] = asyncio.Queue(maxsize=queue_maxsize)
         self._worker_task: asyncio.Task[None] | None = None
         self._state: State = "stopped"
+        # Set by stop() to ask the worker loop to exit; checked only between
+        # items (never mid-item) so an item already dispatched to a worker
+        # thread (analyzer/entry's asyncio.to_thread calls) always finishes —
+        # and gets its persist hook called — before stop() returns. Mirrors
+        # openpoly.db.writer.WriteBehindWriter's exact shutdown discipline.
+        self._stopping = asyncio.Event()
         # canvas-sync v2: lock for atomic section swap (called from
         # /api/canvas/template PUT handler when a section's config changes).
         # In-flight section.run(...) keeps its own reference; Python GC holds
@@ -148,21 +154,57 @@ class PipelineOrchestrator:
     async def start(self) -> None:
         if self._worker_task is not None and not self._worker_task.done():
             return
+        # Fresh Event each start — this instance may be started once after a
+        # prior stop() (or, in tests, across distinct event loops).
+        self._stopping = asyncio.Event()
         self._state = "running"
         self._worker_task = asyncio.create_task(self._worker())
 
     async def stop(self) -> None:
-        if self._worker_task is None:
-            self._state = "stopped"
-            return
-        self._worker_task.cancel()
-        try:
+        """Signal the worker loop to stop, then await its natural exit —
+        never ``task.cancel()`` here. Cancelling while the worker is inside
+        ``await asyncio.to_thread(...)`` (the analyzer's LLM call, or the
+        entry section's late-buy-veto HTTP fetch) would return before that
+        item's persist hook is guaranteed to have run, silently dropping it.
+        The loop only checks ``_stopping`` between items, so this always
+        waits for whatever item is already in flight to actually finish.
+        Whatever is still queued afterward is logged (not processed) by
+        ``_drain_queue_at_shutdown`` — running the real pipeline post-stop
+        could dispatch a live trade mid-shutdown."""
+        self._stopping.set()
+        if self._worker_task is not None:
             await self._worker_task
-        except asyncio.CancelledError:
-            pass
-        finally:
             self._worker_task = None
-            self._state = "stopped"
+        self._state = "stopped"
+        self._drain_queue_at_shutdown()
+
+    def _drain_queue_at_shutdown(self) -> None:
+        """Log (not process) every item still queued once the worker has
+        exited — mirrors ``enqueue()``'s queue-overflow logging so both loss
+        paths are symmetric and visible on the Calls tab, instead of a
+        silent drop."""
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            depth = self._queue.qsize()
+            self._append_embedding(
+                EmbeddingCall(
+                    ts=time.time(),
+                    news_id=item.id,
+                    news_content_preview=item.content[:80],
+                    urgency=item.urgency,
+                    verdict="error",
+                    candidate_count=0,
+                    top_market_id=None,
+                    top_score=None,
+                    catalog_size=0,
+                    latency_ms=0,
+                    error=f"discarded_at_shutdown (depth={depth})",
+                )
+            )
+            logger.warning("orchestrator stop(): discarded queued news_id=%s", item.id)
 
     # ---------- enqueue (sync, called from ws_client hook) ----------
 
@@ -200,8 +242,11 @@ class PipelineOrchestrator:
     # ---------- internals ----------
 
     async def _worker(self) -> None:
-        while True:
-            item = await self._queue.get()
+        while not self._stopping.is_set():
+            try:
+                item = await asyncio.wait_for(self._queue.get(), timeout=0.1)
+            except TimeoutError:
+                continue
             try:
                 await self._process(item)
             except Exception:  # noqa: BLE001 — defense-in-depth; _process catches
