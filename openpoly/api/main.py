@@ -169,6 +169,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     market_source_manager.set_book_persist(database_manager.enqueue_order_book)
     market_source_manager.set_portfolio_store(PortfolioStore(get_session_factory()))
     news_source_manager.set_news_persist(database_manager.enqueue_news)
+    # Pipeline call-log persistence — durable mirrors of the in-memory rings
+    # (embedding_log / analyzer_log / entry_log / exit_log / settlement_log)
+    # so PositionDetail rationale + the News tab survive a restart.
+    orch.set_embedding_persist(database_manager.enqueue_embedding_call)
+    orch.set_analyzer_persist(database_manager.enqueue_analyzer_call)
+    orch.set_entry_persist(database_manager.enqueue_entry_decision)
+    exit_monitor.set_exit_persist(database_manager.enqueue_exit_decision)
+    settlement_monitor.set_settlement_persist(database_manager.enqueue_settlement_decision)
     # Auto-start both sources so a fresh process is already streaming — no
     # manual Start needed after a restart. Runs last so the persist hooks
     # above are in place before the first poll / message arrives.
@@ -177,6 +185,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
     # Shutdown (reverse order): drain orchestrator first so it doesn't try
     # to enqueue against a torn-down manager, then stop the WS source.
+    orch.set_embedding_persist(None)
+    orch.set_analyzer_persist(None)
+    orch.set_entry_persist(None)
+    exit_monitor.set_exit_persist(None)
+    settlement_monitor.set_settlement_persist(None)
     market_source_manager.set_book_persist(None)
     market_source_manager.set_portfolio_store(None)
     news_source_manager.set_news_persist(None)

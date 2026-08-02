@@ -522,6 +522,73 @@ async def test_queue_overflow_drops_newest_and_logs() -> None:
 # ---------- defensive: invalid payload from analyzer ----------
 
 
+# ---------- persist hooks ----------
+
+
+async def test_persist_hooks_fire_with_appended_objects() -> None:
+    orch, _, _, _ = make_orchestrator()
+    embedding_calls: list[EmbeddingCall] = []
+    analyzer_calls: list[AnalyzerCall] = []
+    entry_calls: list[EntryDecision] = []
+    orch.set_embedding_persist(embedding_calls.append)
+    orch.set_analyzer_persist(analyzer_calls.append)
+    orch.set_entry_persist(entry_calls.append)
+    await orch.start()
+    try:
+        orch.enqueue(_item("n1"))
+        await _drain(orch)
+    finally:
+        await orch.stop()
+    assert [c.news_id for c in embedding_calls] == ["n1"]
+    assert [c.news_id for c in analyzer_calls] == ["n1"]
+    assert [c.news_id for c in entry_calls] == ["n1"]
+
+
+async def test_persist_hook_fires_on_queue_overflow() -> None:
+    orch, _, _, _ = make_orchestrator(queue_maxsize=1)
+    embedding_calls: list[EmbeddingCall] = []
+    orch.set_embedding_persist(embedding_calls.append)
+    orch.enqueue(_item("n1"))
+    orch.enqueue(_item("n2"))  # overflow — never started, so n1 never drains
+    assert [c.news_id for c in embedding_calls] == ["n2"]
+    assert embedding_calls[0].error is not None and "queue_overflow" in embedding_calls[0].error
+
+
+async def test_raising_persist_hook_is_swallowed_pipeline_continues() -> None:
+    orch, emb_log, a_log, e_log = make_orchestrator()
+
+    def _boom(_call) -> None:
+        raise RuntimeError("persist boom")
+
+    orch.set_embedding_persist(_boom)
+    orch.set_analyzer_persist(_boom)
+    orch.set_entry_persist(_boom)
+    await orch.start()
+    try:
+        orch.enqueue(_item("n1"))
+        await _drain(orch)
+    finally:
+        await orch.stop()
+    # The ring logs still got their entries despite every persist hook raising.
+    assert len(emb_log.entries()) == 1
+    assert len(a_log.entries()) == 1
+    assert len(e_log.entries()) == 1
+
+
+async def test_persist_hook_cleared_via_none() -> None:
+    orch, _, _, _ = make_orchestrator()
+    calls: list[EmbeddingCall] = []
+    orch.set_embedding_persist(calls.append)
+    orch.set_embedding_persist(None)
+    await orch.start()
+    try:
+        orch.enqueue(_item("n1"))
+        await _drain(orch)
+    finally:
+        await orch.stop()
+    assert calls == []
+
+
 async def test_analyzer_returns_ok_but_non_AR_payload_skips_entry() -> None:
     class Weird:
         def run(self, input: SectionInput) -> SectionOutput:

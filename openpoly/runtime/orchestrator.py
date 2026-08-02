@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from typing import Literal, Protocol, TypeVar
 
 from pydantic import BaseModel
@@ -78,6 +79,12 @@ class PipelineOrchestrator:
         self._embedding_log = embedding_log_store
         self._analyzer_log = analyzer_log_store
         self._entry_log = entry_log_store
+        # Persist hooks — optional, set by main.py's lifespan once the DB is
+        # up. None means "not wired yet" (e.g. before startup / after
+        # shutdown); append still happens to the in-memory ring regardless.
+        self._embedding_persist: Callable[[EmbeddingCall], None] | None = None
+        self._analyzer_persist: Callable[[AnalyzerCall], None] | None = None
+        self._entry_persist: Callable[[EntryDecision], None] | None = None
         self._queue: asyncio.Queue[NewsItem] = asyncio.Queue(maxsize=queue_maxsize)
         self._worker_task: asyncio.Task[None] | None = None
         self._state: State = "stopped"
@@ -100,6 +107,41 @@ class PipelineOrchestrator:
     @property
     def queue_depth(self) -> int:
         return self._queue.qsize()
+
+    # ---------- persist hooks (wired into database_manager by main.py) ----------
+
+    def set_embedding_persist(self, hook: Callable[[EmbeddingCall], None] | None) -> None:
+        self._embedding_persist = hook
+
+    def set_analyzer_persist(self, hook: Callable[[AnalyzerCall], None] | None) -> None:
+        self._analyzer_persist = hook
+
+    def set_entry_persist(self, hook: Callable[[EntryDecision], None] | None) -> None:
+        self._entry_persist = hook
+
+    def _append_embedding(self, call: EmbeddingCall) -> None:
+        self._embedding_log.append(call)
+        if self._embedding_persist is not None:
+            try:
+                self._embedding_persist(call)
+            except Exception:  # noqa: BLE001 — a bad persist hook must not break the pipeline
+                logger.exception("embedding_persist raised; suppressing")
+
+    def _append_analyzer(self, call: AnalyzerCall) -> None:
+        self._analyzer_log.append(call)
+        if self._analyzer_persist is not None:
+            try:
+                self._analyzer_persist(call)
+            except Exception:  # noqa: BLE001 — a bad persist hook must not break the pipeline
+                logger.exception("analyzer_persist raised; suppressing")
+
+    def _append_entry(self, call: EntryDecision) -> None:
+        self._entry_log.append(call)
+        if self._entry_persist is not None:
+            try:
+                self._entry_persist(call)
+            except Exception:  # noqa: BLE001 — a bad persist hook must not break the pipeline
+                logger.exception("entry_persist raised; suppressing")
 
     # ---------- lifecycle ----------
 
@@ -137,7 +179,7 @@ class PipelineOrchestrator:
             self._queue.put_nowait(item)
             return True
         except asyncio.QueueFull:
-            self._embedding_log.append(
+            self._append_embedding(
                 EmbeddingCall(
                     ts=time.time(),
                     news_id=item.id,
@@ -206,7 +248,7 @@ class PipelineOrchestrator:
         signals = out.signals if out is not None else {}
         top = candidates.candidates[0] if candidates is not None and candidates.candidates else None
 
-        self._embedding_log.append(
+        self._append_embedding(
             EmbeddingCall(
                 ts=ts,
                 news_id=item.id,
@@ -258,7 +300,7 @@ class PipelineOrchestrator:
 
         ar = out.payload if out is not None and isinstance(out.payload, AnalysisResult) else None
 
-        self._analyzer_log.append(
+        self._append_analyzer(
             AnalyzerCall(
                 ts=ts,
                 news_id=item.id,
@@ -333,7 +375,7 @@ class PipelineOrchestrator:
 
         latency_ms = int((time.monotonic() - start) * 1000)
 
-        self._entry_log.append(
+        self._append_entry(
             EntryDecision(
                 ts=ts,
                 news_id=item.id,

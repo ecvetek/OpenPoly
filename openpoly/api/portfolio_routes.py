@@ -15,9 +15,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.db.engine import get_session_factory
+from openpoly.db.tables import AnalyzerCallRow
 from openpoly.execution import executor
 from openpoly.portfolio import PortfolioStore
 from openpoly.portfolio.equity import build_equity_curve
@@ -42,16 +44,15 @@ def _clamp(limit: int) -> int:
 def list_positions(
     limit: int = LIMIT_DEFAULT,
     store: PortfolioStore = Depends(get_portfolio_store),
+    factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> dict[str, Any]:
     """Recent positions (open + closed), newest first.
 
     Each row is augmented with ``market_question`` + ``analyzer_decisions``
     (same shape and fallback semantics as ``/positions/{id}`` — see that
-    route's docstring). Cost: N catalog scans (O(~50) each) + N+1 SQLite
-    queries for news_id + N analyzer_log scans (O(~200) each); at the
-    LIMIT_DEFAULT=100 cap, well under 10ms total. Card-style UI relies on
-    these being available list-wide so it can render question / rationale
-    without fanning out to /positions/{id} per row.
+    route's docstring). Card-style UI relies on these being available
+    list-wide so it can render question / rationale without fanning out to
+    /positions/{id} per row.
     """
     rows = store.list_positions(_clamp(limit))
     positions: list[dict[str, Any]] = []
@@ -59,7 +60,7 @@ def list_positions(
         body = asdict(record)
         body["market_question"] = _lookup_market_question(record.condition_id)
         news_id = store.news_id_for_position(record.id)
-        body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id)
+        body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id, factory)
         positions.append(body)
     return {"positions": positions}
 
@@ -161,6 +162,7 @@ async def close_all_positions(
 def get_position_by_id(
     position_id: int,
     store: PortfolioStore = Depends(get_portfolio_store),
+    factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> dict[str, Any]:
     """One position (open or closed) by id. 404 if no such position.
 
@@ -173,8 +175,8 @@ def get_position_by_id(
     - ``analyzer_decisions``: list (newest-first) of every ``verdict=ok``
       analyzer call whose ``news_id`` matches this position's news_id.
       Each element carries rationale / p_model / confidence / ts. Empty
-      list when the analyzer_log ring has evicted the original call
-      (common for positions older than ~200 news events).
+      list when ``news_id`` is None (paper / manual position with no news
+      linkage), or the analyzer never hit ``verdict=ok`` on it.
     """
     record = store.get_position(position_id)
     if record is None:
@@ -182,9 +184,9 @@ def get_position_by_id(
     body = asdict(record)
     body["market_question"] = _lookup_market_question(record.condition_id)
     # PositionRecord doesn't carry news_id (it lives on the BUY fill row).
-    # Look it up via the store + then scan analyzer_log.
+    # Look it up via the store + then query the persisted analyzer_call table.
     news_id = store.news_id_for_position(position_id)
-    body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id)
+    body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id, factory)
     return body
 
 
@@ -199,13 +201,15 @@ def _lookup_market_question(condition_id: str) -> str | None:
     return market.question if market is not None else None
 
 
-def _lookup_analyzer_decisions(news_id: str | None) -> list[dict[str, Any]]:
+def _lookup_analyzer_decisions(
+    news_id: str | None, factory: sessionmaker[Session]
+) -> list[dict[str, Any]]:
     """All ``verdict=ok`` analyzer calls whose news_id matches, newest first.
 
-    Scans the in-memory analyzer_log ring (default ~200 entries). Returns
-    empty list when:
+    Queries the persisted ``analyzer_call`` table (durable — survives a
+    restart and the in-memory ring's ~200-entry eviction). Returns empty list
+    when:
     - ``news_id`` is None (paper / manual position with no news linkage)
-    - The matching call has been evicted from the ring (long-held positions)
     - The analyzer hit only errored or skipped on this news_id
 
     Returned dicts are flattened to UI-friendly shape: rationale, p_model,
@@ -214,24 +218,25 @@ def _lookup_analyzer_decisions(news_id: str | None) -> list[dict[str, Any]]:
     PositionDetail panel)."""
     if news_id is None:
         return []
-    from openpoly.runtime.section_log import analyzer_log
-
-    matches: list[dict[str, Any]] = []
-    # analyzer_log.entries() returns oldest-first; reverse for newest-first.
-    for entry in reversed(analyzer_log.entries()):
-        if entry.verdict != "ok":
-            continue
-        if entry.news_id != news_id:
-            continue
-        matches.append(
-            {
-                "rationale": entry.rationale,
-                "p_model": entry.p_model,
-                "confidence": entry.confidence,
-                "ts": entry.ts,
-            }
+    with factory() as session:
+        rows = (
+            session.execute(
+                select(AnalyzerCallRow)
+                .where(AnalyzerCallRow.news_id == news_id, AnalyzerCallRow.verdict == "ok")
+                .order_by(AnalyzerCallRow.ts.desc())
+            )
+            .scalars()
+            .all()
         )
-    return matches
+    return [
+        {
+            "rationale": r.rationale,
+            "p_model": r.p_model,
+            "confidence": r.confidence,
+            "ts": r.ts,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/portfolio/equity")

@@ -13,6 +13,14 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from openpoly.api.main import app, lifespan
+from openpoly.db.engine import get_session_factory, init_db, make_engine, make_session_factory
+from openpoly.db.tables import (
+    AnalyzerCallRow,
+    EmbeddingCallRow,
+    EntryDecisionRow,
+    ExitDecisionRow,
+    SettlementDecisionRow,
+)
 from openpoly.news.manager import NewsSourceManager, manager
 from openpoly.runtime import orchestrator as orch_module
 from openpoly.runtime.exit_monitor import exit_monitor
@@ -63,6 +71,21 @@ async def _client() -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
+@pytest.fixture
+def db(tmp_path) -> Any:
+    """A throwaway per-test DB, overriding the app's session-factory
+    dependency — ``entries`` is now DB-sourced (durable), so tests that seed
+    call-log rows need isolation from the shared session-wide DB, same as
+    ``test_api_portfolio.py``'s ``env`` fixture."""
+    engine = make_engine(f"sqlite:///{tmp_path / 'runtime_log.db'}")
+    init_db(engine)
+    factory = make_session_factory(engine)
+    app.dependency_overrides[get_session_factory] = lambda: factory
+    yield factory
+    app.dependency_overrides.pop(get_session_factory, None)
+    engine.dispose()
+
+
 # ---------- shape ----------
 
 
@@ -108,7 +131,10 @@ async def test_embedding_log_empty_initially() -> None:
     assert body["state"] == "stopped"
 
 
-async def test_embedding_log_returns_appended_entries() -> None:
+async def test_embedding_log_returns_appended_entries(db) -> None:
+    # Real production behavior: every call lands in *both* the ring
+    # (counters/last_at) and the DB (durable entries) via the orchestrator's
+    # persist hook — mirror both here.
     embedding_log.append(
         EmbeddingCall(
             ts=10.0,
@@ -137,6 +163,38 @@ async def test_embedding_log_returns_appended_entries() -> None:
             latency_ms=3,
         )
     )
+    with db() as session:
+        session.add_all(
+            [
+                EmbeddingCallRow(
+                    ts=10.0,
+                    news_id="n1",
+                    news_content_preview="fed news",
+                    urgency="high",
+                    verdict="ok",
+                    candidate_count=2,
+                    top_market_id="m1",
+                    top_score=0.92,
+                    catalog_size=88,
+                    latency_ms=7,
+                    error=None,
+                ),
+                EmbeddingCallRow(
+                    ts=11.0,
+                    news_id="n2",
+                    news_content_preview="noise",
+                    urgency="low",
+                    verdict="skip",
+                    candidate_count=0,
+                    top_market_id=None,
+                    top_score=None,
+                    catalog_size=88,
+                    latency_ms=3,
+                    error=None,
+                ),
+            ]
+        )
+        session.commit()
     client = await _client()
     try:
         r = await client.get("/api/embedding/log")
@@ -151,8 +209,14 @@ async def test_embedding_log_returns_appended_entries() -> None:
     assert body["last_at"] == 11.0
 
 
-async def test_analyzer_log_returns_appended_entries() -> None:
-    analyzer_log.append(
+def _seed_analyzer_rows(db, *rows: AnalyzerCall) -> None:
+    with db() as session:
+        session.add_all([AnalyzerCallRow(**r.to_dict()) for r in rows])
+        session.commit()
+
+
+async def test_analyzer_log_returns_appended_entries(db) -> None:
+    calls = [
         AnalyzerCall(
             ts=10.0,
             news_id="n1",
@@ -163,9 +227,7 @@ async def test_analyzer_log_returns_appended_entries() -> None:
             confidence="medium",
             market_id="m1",
             latency_ms=42,
-        )
-    )
-    analyzer_log.append(
+        ),
         AnalyzerCall(
             ts=11.0,
             news_id="n2",
@@ -176,8 +238,11 @@ async def test_analyzer_log_returns_appended_entries() -> None:
             confidence=None,
             market_id=None,
             latency_ms=3,
-        )
-    )
+        ),
+    ]
+    for c in calls:
+        analyzer_log.append(c)
+    _seed_analyzer_rows(db, *calls)
 
     client = await _client()
     try:
@@ -191,21 +256,23 @@ async def test_analyzer_log_returns_appended_entries() -> None:
     assert body["last_at"] == 11.0
 
 
-async def test_entry_log_returns_appended_entries() -> None:
-    entry_log.append(
-        EntryDecision(
-            ts=10.0,
-            news_id="n1",
-            ar_p_model=0.6,
-            ar_market_id="m1",
-            verdict="ok",
-            side="yes",
-            qty=20.0,
-            price=0.5,
-            reason=None,
-            latency_ms=15,
-        )
+async def test_entry_log_returns_appended_entries(db) -> None:
+    decision = EntryDecision(
+        ts=10.0,
+        news_id="n1",
+        ar_p_model=0.6,
+        ar_market_id="m1",
+        verdict="ok",
+        side="yes",
+        qty=20.0,
+        price=0.5,
+        reason=None,
+        latency_ms=15,
     )
+    entry_log.append(decision)
+    with db() as session:
+        session.add(EntryDecisionRow(**decision.to_dict()))
+        session.commit()
     client = await _client()
     try:
         r = await client.get("/api/entry/log")
@@ -217,24 +284,59 @@ async def test_entry_log_returns_appended_entries() -> None:
     assert body["counters"]["ok"] == 1
 
 
+# ---------- read-path split: entries is DB-sourced, counters/last_at is ring-sourced ----------
+
+
+async def test_entries_and_counters_are_independently_sourced(db) -> None:
+    """A push into the ring only (no DB row) must still update counters /
+    last_at, but must NOT appear in entries — proving entries reads the DB,
+    not the ring, while counters/last_at still read the ring. This is the
+    split the read-path refactor depends on."""
+    analyzer_log.append(
+        AnalyzerCall(
+            ts=10.0,
+            news_id="ring-only",
+            news_content_preview="x",
+            urgency="high",
+            verdict="ok",
+            p_model=0.5,
+            confidence="medium",
+            market_id="m",
+            latency_ms=1,
+        )
+    )
+    client = await _client()
+    try:
+        r = await client.get("/api/analyzer/log")
+    finally:
+        await client.aclose()
+    body = r.json()
+    assert body["entries"] == []  # DB is empty — ring push alone doesn't appear here
+    assert body["counters"]["ok"] == 1  # but counters/last_at still reflect the ring
+    assert body["last_at"] == 10.0
+
+
 # ---------- limit query ----------
 
 
-async def test_analyzer_log_limit() -> None:
-    for i in range(5):
-        analyzer_log.append(
-            AnalyzerCall(
-                ts=float(i),
-                news_id=f"n{i}",
-                news_content_preview="x",
-                urgency="high",
-                verdict="ok",
-                p_model=0.5,
-                confidence="medium",
-                market_id="m",
-                latency_ms=1,
-            )
+async def test_analyzer_log_limit(db) -> None:
+    calls = [
+        AnalyzerCall(
+            ts=float(i),
+            news_id=f"n{i}",
+            news_content_preview="x",
+            urgency="high",
+            verdict="ok",
+            p_model=0.5,
+            confidence="medium",
+            market_id="m",
+            latency_ms=1,
         )
+        for i in range(5)
+    ]
+    for c in calls:
+        analyzer_log.append(c)
+    _seed_analyzer_rows(db, *calls)
     client = await _client()
     try:
         r = await client.get("/api/analyzer/log", params={"limit": 2})
@@ -325,8 +427,8 @@ async def test_exit_log_empty_initially() -> None:
     assert body["blocked"] == 0
 
 
-async def test_exit_log_returns_appended_entries() -> None:
-    exit_log.append(
+async def test_exit_log_returns_appended_entries(db) -> None:
+    decisions = [
         ExitDecision(
             ts=10.0,
             position_id=1,
@@ -338,9 +440,7 @@ async def test_exit_log_returns_appended_entries() -> None:
             fill_price=0.62,
             realized_pnl=2.1,
             reason="take_profit",
-        )
-    )
-    exit_log.append(
+        ),
         ExitDecision(
             ts=11.0,
             position_id=2,
@@ -352,8 +452,13 @@ async def test_exit_log_returns_appended_entries() -> None:
             fill_price=None,
             realized_pnl=None,
             reason="within thresholds",
-        )
-    )
+        ),
+    ]
+    for d in decisions:
+        exit_log.append(d)
+    with db() as session:
+        session.add_all([ExitDecisionRow(**d.to_dict()) for d in decisions])
+        session.commit()
     client = await _client()
     try:
         r = await client.get("/api/exit/log")
@@ -387,8 +492,8 @@ async def test_settlement_log_empty_initially() -> None:
     assert body["state"] == "stopped"
 
 
-async def test_settlement_log_returns_appended_entries() -> None:
-    settlement_log.append(
+async def test_settlement_log_returns_appended_entries(db) -> None:
+    decisions = [
         SettlementDecision(
             ts=10.0,
             position_id=1,
@@ -399,9 +504,7 @@ async def test_settlement_log_returns_appended_entries() -> None:
             realized_pnl=6.0,
             reason="settlement",
             error=None,
-        )
-    )
-    settlement_log.append(
+        ),
         SettlementDecision(
             ts=11.0,
             position_id=2,
@@ -412,8 +515,13 @@ async def test_settlement_log_returns_appended_entries() -> None:
             realized_pnl=None,
             reason="no_outcome_prices",
             error=None,
-        )
-    )
+        ),
+    ]
+    for d in decisions:
+        settlement_log.append(d)
+    with db() as session:
+        session.add_all([SettlementDecisionRow(**d.to_dict()) for d in decisions])
+        session.commit()
     client = await _client()
     try:
         r = await client.get("/api/settlement/log")

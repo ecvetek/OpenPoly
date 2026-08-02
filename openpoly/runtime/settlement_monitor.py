@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Callable
 from typing import Awaitable, Literal, Protocol
 
 from openpoly.markets.models import normalize_gamma_market
@@ -80,6 +81,10 @@ class SettlementMonitor:
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._state: State = "stopped"
+        # Persist hook — optional, set by main.py's lifespan once the DB is
+        # up. None means "not wired yet"; append still happens to
+        # settlement_log (the in-memory ring) regardless.
+        self._settlement_persist: Callable[[SettlementDecision], None] | None = None
 
     @property
     def state(self) -> State:
@@ -88,6 +93,9 @@ class SettlementMonitor:
     def configure(self, portfolio: PortfolioStore) -> None:
         """Inject PortfolioStore — FastAPI lifespan calls once DB is up."""
         self._portfolio = portfolio
+
+    def set_settlement_persist(self, hook: Callable[[SettlementDecision], None] | None) -> None:
+        self._settlement_persist = hook
 
     # ---------- lifecycle ----------
 
@@ -275,19 +283,23 @@ class SettlementMonitor:
         reason: str | None = None,
         error: str | None = None,
     ) -> None:
-        settlement_log.append(
-            SettlementDecision(
-                ts=ts,
-                position_id=held.position_id,
-                market_id=held.market_id,
-                side=held.side,
-                verdict=verdict,  # type: ignore[arg-type]
-                final_price=final_price,
-                realized_pnl=realized_pnl,
-                reason=reason,
-                error=error,
-            )
+        entry = SettlementDecision(
+            ts=ts,
+            position_id=held.position_id,
+            market_id=held.market_id,
+            side=held.side,
+            verdict=verdict,  # type: ignore[arg-type]
+            final_price=final_price,
+            realized_pnl=realized_pnl,
+            reason=reason,
+            error=error,
         )
+        settlement_log.append(entry)
+        if self._settlement_persist is not None:
+            try:
+                self._settlement_persist(entry)
+            except Exception:  # noqa: BLE001 — a bad persist hook must not break the monitor
+                logger.exception("settlement_persist raised; suppressing")
 
 
 # Module-level singleton — FastAPI lifespan calls configure() + start().

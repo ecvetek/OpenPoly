@@ -98,6 +98,114 @@ class FillRow(Base):
     tx_hash: Mapped[str | None] = mapped_column(default=None)  # NEW (slice C)
 
 
+class EmbeddingCallRow(Base):
+    """One persisted embedding-filter call — durable mirror of the in-memory
+    ``embedding_log`` ring (``openpoly.runtime.section_log``).
+
+    Surrogate ``id`` PK, event-log style like ``NewsItemRow``: one row per
+    call, never updated, duplicates tolerated.
+    """
+
+    __tablename__ = "embedding_call"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[float] = mapped_column(index=True)
+    news_id: Mapped[str] = mapped_column(index=True)
+    news_content_preview: Mapped[str]
+    urgency: Mapped[str]
+    verdict: Mapped[str]
+    candidate_count: Mapped[int]
+    top_market_id: Mapped[str | None]
+    top_score: Mapped[float | None]
+    catalog_size: Mapped[int]
+    latency_ms: Mapped[int]
+    error: Mapped[str | None]
+
+
+class AnalyzerCallRow(Base):
+    """One persisted analyzer call — durable mirror of the in-memory
+    ``analyzer_log`` ring. ``news_id`` is the column ``PositionDetail``'s
+    rationale lookup filters on."""
+
+    __tablename__ = "analyzer_call"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[float] = mapped_column(index=True)
+    news_id: Mapped[str] = mapped_column(index=True)
+    news_content_preview: Mapped[str]
+    urgency: Mapped[str]
+    verdict: Mapped[str]
+    p_model: Mapped[float | None]
+    confidence: Mapped[str | None]
+    market_id: Mapped[str | None]
+    latency_ms: Mapped[int]
+    error: Mapped[str | None]
+    rationale: Mapped[str | None]
+
+
+class EntryDecisionRow(Base):
+    """One persisted entry decision — durable mirror of the in-memory
+    ``entry_log`` ring."""
+
+    __tablename__ = "entry_decision"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[float] = mapped_column(index=True)
+    news_id: Mapped[str] = mapped_column(index=True)
+    ar_p_model: Mapped[float | None]
+    ar_market_id: Mapped[str | None]
+    verdict: Mapped[str]
+    side: Mapped[str | None]
+    qty: Mapped[float | None]
+    price: Mapped[float | None]
+    reason: Mapped[str | None]
+    latency_ms: Mapped[int]
+    error: Mapped[str | None]
+    fill_status: Mapped[str | None]
+    fill_price: Mapped[float | None]
+    fill_qty: Mapped[float | None]
+    position_id: Mapped[int | None] = mapped_column(index=True)
+
+
+class ExitDecisionRow(Base):
+    """One persisted exit-monitor evaluation — durable mirror of the
+    in-memory ``exit_log`` ring."""
+
+    __tablename__ = "exit_decision"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[float] = mapped_column(index=True)
+    position_id: Mapped[int] = mapped_column(index=True)
+    market_id: Mapped[str] = mapped_column(index=True)
+    side: Mapped[str]
+    verdict: Mapped[str]
+    trigger: Mapped[str | None]
+    return_pct: Mapped[float | None]
+    fill_price: Mapped[float | None]
+    realized_pnl: Mapped[float | None]
+    reason: Mapped[str | None]
+    error: Mapped[str | None]
+    peak_price: Mapped[float | None]
+
+
+class SettlementDecisionRow(Base):
+    """One persisted settlement-monitor evaluation — durable mirror of the
+    in-memory ``settlement_log`` ring."""
+
+    __tablename__ = "settlement_decision"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[float] = mapped_column(index=True)
+    position_id: Mapped[int] = mapped_column(index=True)
+    market_id: Mapped[str] = mapped_column(index=True)
+    side: Mapped[str]
+    verdict: Mapped[str]
+    final_price: Mapped[float | None]
+    realized_pnl: Mapped[float | None]
+    reason: Mapped[str | None]
+    error: Mapped[str | None]
+
+
 class PositionRow(Base):
     """One position — a materialized projection of the ``fill`` ledger.
 

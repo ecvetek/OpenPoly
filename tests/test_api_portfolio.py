@@ -7,19 +7,25 @@ from fastapi.testclient import TestClient
 
 from openpoly.api.main import app
 from openpoly.api.portfolio_routes import get_portfolio_store
-from openpoly.db.engine import init_db, make_engine, make_session_factory
+from openpoly.db.engine import get_session_factory, init_db, make_engine, make_session_factory
+from openpoly.db.tables import AnalyzerCallRow
 from openpoly.portfolio import PortfolioStore
 
 
 @pytest.fixture
 def env(tmp_path):
-    """A PortfolioStore on a throwaway DB, wired into the app via dependency
-    override, plus a TestClient."""
+    """A PortfolioStore + session factory on the same throwaway DB, both
+    wired into the app via dependency override, plus a TestClient.
+    ``analyzer_decisions`` is DB-sourced (the ``AnalyzerCallRow`` table), so
+    the injected ``get_session_factory`` dependency must point at the same
+    engine as ``store`` or the two would see different databases."""
     engine = make_engine(f"sqlite:///{tmp_path}/portfolio.db")
     init_db(engine)
-    store = PortfolioStore(make_session_factory(engine))
+    factory = make_session_factory(engine)
+    store = PortfolioStore(factory)
     app.dependency_overrides[get_portfolio_store] = lambda: store
-    yield store, TestClient(app)
+    app.dependency_overrides[get_session_factory] = lambda: factory
+    yield store, TestClient(app), factory
     app.dependency_overrides.clear()
     engine.dispose()
 
@@ -38,17 +44,17 @@ def _open(store: PortfolioStore, market_id: str, side: str, token_id: str, ts: f
 
 
 def test_positions_empty(env) -> None:
-    _store, client = env
+    _store, client, _factory = env
     assert client.get("/api/positions").json() == {"positions": []}
 
 
 def test_fills_empty(env) -> None:
-    _store, client = env
+    _store, client, _factory = env
     assert client.get("/api/fills").json() == {"fills": []}
 
 
 def test_positions_returns_open_and_closed(env) -> None:
-    store, client = env
+    store, client, _factory = env
     _open(store, "m1", "yes", "ty1", ts=100.0)
     h2 = _open(store, "m2", "no", "tn2", ts=101.0)
     store.close_position(
@@ -72,7 +78,7 @@ def test_positions_returns_open_and_closed(env) -> None:
 
 
 def test_fills_returns_ledger(env) -> None:
-    store, client = env
+    store, client, _factory = env
     h1 = _open(store, "m1", "yes", "ty1")
     store.close_position(
         h1.position_id,
@@ -92,7 +98,7 @@ def test_fills_returns_ledger(env) -> None:
 
 
 def test_limit_param_honored(env) -> None:
-    store, client = env
+    store, client, _factory = env
     for i in range(5):
         _open(store, f"m{i}", "yes", f"ty{i}", ts=float(i))
     assert len(client.get("/api/positions?limit=2").json()["positions"]) == 2
@@ -161,7 +167,7 @@ def test_equity_endpoint_with_position(tmp_path) -> None:
 
 
 def test_get_position_by_id(env) -> None:
-    store, client = env
+    store, client, _factory = env
     h = _open(store, "m1", "yes", "ty1", ts=100.0)
     body = client.get(f"/api/positions/{h.position_id}").json()
     assert body["id"] == h.position_id
@@ -172,7 +178,7 @@ def test_get_position_by_id(env) -> None:
 
 
 def test_get_position_by_id_404(env) -> None:
-    _store, client = env
+    _store, client, _factory = env
     assert client.get("/api/positions/99999").status_code == 404
 
 
@@ -187,7 +193,7 @@ def test_get_position_includes_market_question_when_catalogued(env) -> None:
     from openpoly.markets.models import normalize_gamma_market
     from openpoly.markets.store import MarketStore, PollSummary
 
-    store, client = env
+    store, client, _factory = env
     h = _open(store, "m1", "yes", "ty1")  # _open uses condition_id="0xm1"
     # Populate catalog with a market whose conditionId matches.
     raw = {
@@ -215,7 +221,7 @@ def test_get_position_market_question_null_when_not_catalogued(env) -> None:
     from openpoly.markets.manager import manager as msm
     from openpoly.markets.store import MarketStore
 
-    store, client = env
+    store, client, _factory = env
     h = _open(store, "m1", "yes", "ty1")
     saved_store = msm.store
     try:
@@ -230,78 +236,69 @@ def test_get_position_market_question_null_when_not_catalogued(env) -> None:
 
 
 def test_get_position_includes_analyzer_decisions_when_log_has_match(env) -> None:
-    """analyzer_log carries one or more verdict=ok entries for our news_id →
-    response surfaces them newest-first with the flattened shape."""
-    from openpoly.runtime.section_log import AnalyzerCall, analyzer_log
+    """The persisted analyzer_call table carries one or more verdict=ok rows
+    for our news_id → response surfaces them newest-first with the
+    flattened shape."""
+    from openpoly.runtime.section_log import AnalyzerCall
 
-    store, client = env
+    store, client, factory = env
     h = _open(store, "m1", "yes", "ty1")  # _open uses news_id="n1"
-    saved_entries = list(analyzer_log.entries())
-    try:
-        analyzer_log.reset()
-        # Push two ok calls + one unrelated + one error (latter two must be filtered out).
-        analyzer_log.append(
-            AnalyzerCall(
-                ts=100.0,
-                news_id="n1",
-                news_content_preview="x",
-                urgency="high",
-                verdict="ok",
-                p_model=0.55,
-                confidence="medium",
-                market_id="m1",
-                latency_ms=20,
-                rationale="first attempt rationale",
-            )
-        )
-        analyzer_log.append(
-            AnalyzerCall(
-                ts=101.0,
-                news_id="n1",
-                news_content_preview="x",
-                urgency="high",
-                verdict="ok",
-                p_model=0.60,
-                confidence="high",
-                market_id="m1",
-                latency_ms=18,
-                rationale="second attempt rationale",
-            )
-        )
-        analyzer_log.append(
-            AnalyzerCall(
-                ts=102.0,
-                news_id="other-news",
-                news_content_preview="y",
-                urgency="high",
-                verdict="ok",
-                p_model=0.7,
-                confidence="high",
-                market_id="m9",
-                latency_ms=15,
-                rationale="unrelated news — must not appear",
-            )
-        )
-        analyzer_log.append(
-            AnalyzerCall(
-                ts=103.0,
-                news_id="n1",
-                news_content_preview="x",
-                urgency="high",
-                verdict="error",
-                p_model=None,
-                confidence=None,
-                market_id=None,
-                latency_ms=2,
-                error="LLM down",
-                rationale=None,
-            )
-        )
-        body = client.get(f"/api/positions/{h.position_id}").json()
-    finally:
-        analyzer_log.reset()
-        for e in saved_entries:
-            analyzer_log.append(e)
+    # Two ok calls + one unrelated + one error (latter two must be filtered out).
+    calls = [
+        AnalyzerCall(
+            ts=100.0,
+            news_id="n1",
+            news_content_preview="x",
+            urgency="high",
+            verdict="ok",
+            p_model=0.55,
+            confidence="medium",
+            market_id="m1",
+            latency_ms=20,
+            rationale="first attempt rationale",
+        ),
+        AnalyzerCall(
+            ts=101.0,
+            news_id="n1",
+            news_content_preview="x",
+            urgency="high",
+            verdict="ok",
+            p_model=0.60,
+            confidence="high",
+            market_id="m1",
+            latency_ms=18,
+            rationale="second attempt rationale",
+        ),
+        AnalyzerCall(
+            ts=102.0,
+            news_id="other-news",
+            news_content_preview="y",
+            urgency="high",
+            verdict="ok",
+            p_model=0.7,
+            confidence="high",
+            market_id="m9",
+            latency_ms=15,
+            rationale="unrelated news — must not appear",
+        ),
+        AnalyzerCall(
+            ts=103.0,
+            news_id="n1",
+            news_content_preview="x",
+            urgency="high",
+            verdict="error",
+            p_model=None,
+            confidence=None,
+            market_id=None,
+            latency_ms=2,
+            error="LLM down",
+            rationale=None,
+        ),
+    ]
+    with factory() as session:
+        session.add_all([AnalyzerCallRow(**c.to_dict()) for c in calls])
+        session.commit()
+    body = client.get(f"/api/positions/{h.position_id}").json()
 
     decisions = body["analyzer_decisions"]
     assert isinstance(decisions, list)
@@ -317,27 +314,74 @@ def test_get_position_includes_analyzer_decisions_when_log_has_match(env) -> Non
 
 
 def test_get_position_analyzer_decisions_empty_when_no_match(env) -> None:
-    """Common case for old positions: ring has been evicted → empty list
-    (UI shows 'rationale unavailable')."""
-    from openpoly.runtime.section_log import analyzer_log
-
-    store, client = env
+    """No analyzer_call row for this position's news_id → empty list
+    (UI shows 'rationale unavailable'). The fresh throwaway DB has no rows
+    at all, so this is the natural default — no seeding needed."""
+    store, client, _factory = env
     h = _open(store, "m1", "yes", "ty1")
-    saved_entries = list(analyzer_log.entries())
-    try:
-        analyzer_log.reset()  # nothing matches
-        body = client.get(f"/api/positions/{h.position_id}").json()
-    finally:
-        analyzer_log.reset()
-        for e in saved_entries:
-            analyzer_log.append(e)
+    body = client.get(f"/api/positions/{h.position_id}").json()
     assert body["analyzer_decisions"] == []
+
+
+def test_get_position_analyzer_decisions_survives_ring_eviction(env) -> None:
+    """The direct regression test for the reported bug: a position whose
+    originating analyzer call is long gone from the in-memory ring (>200
+    newer calls since) must still resolve its rationale, because the lookup
+    is now DB-backed rather than a ring scan."""
+    from openpoly.runtime.section_log import AnalyzerCall
+
+    store, client, factory = env
+    h = _open(store, "m1", "yes", "ty1")  # _open uses news_id="n1"
+    rows = [
+        AnalyzerCallRow(
+            **AnalyzerCall(
+                ts=100.0,
+                news_id="n1",
+                news_content_preview="x",
+                urgency="high",
+                verdict="ok",
+                p_model=0.55,
+                confidence="medium",
+                market_id="m1",
+                latency_ms=20,
+                rationale="the original, long-evicted rationale",
+            ).to_dict()
+        )
+    ]
+    # 250 unrelated rows — comfortably more than the in-memory ring's 200-slot
+    # capacity, simulating everything that would have evicted the original
+    # call from analyzer_log by the time this position is later inspected.
+    rows.extend(
+        AnalyzerCallRow(
+            **AnalyzerCall(
+                ts=200.0 + i,
+                news_id=f"later-{i}",
+                news_content_preview="y",
+                urgency="high",
+                verdict="ok",
+                p_model=0.5,
+                confidence="medium",
+                market_id="m2",
+                latency_ms=10,
+                rationale="noise",
+            ).to_dict()
+        )
+        for i in range(250)
+    )
+    with factory() as session:
+        session.add_all(rows)
+        session.commit()
+
+    body = client.get(f"/api/positions/{h.position_id}").json()
+    decisions = body["analyzer_decisions"]
+    assert len(decisions) == 1
+    assert decisions[0]["rationale"] == "the original, long-evicted rationale"
 
 
 def test_get_position_analyzer_decisions_empty_when_news_id_null(env) -> None:
     """Paper / manual positions may have news_id=None — lookup must skip
     cleanly without scanning the ring."""
-    store, client = env
+    store, client, _factory = env
     # Create position with news_id=None explicitly.
     h = store.open_position(
         market_id="m1",
@@ -365,9 +409,9 @@ def test_list_positions_includes_market_question_and_analyzer_decisions(env) -> 
     from openpoly.markets.manager import manager as msm
     from openpoly.markets.models import normalize_gamma_market
     from openpoly.markets.store import MarketStore, PollSummary
-    from openpoly.runtime.section_log import AnalyzerCall, analyzer_log
+    from openpoly.runtime.section_log import AnalyzerCall
 
-    store, client = env
+    store, client, factory = env
     _open(store, "m1", "yes", "ty1", ts=100.0)
     _open(store, "m2", "no", "tn2", ts=101.0)  # no catalog entry — must be None
 
@@ -381,32 +425,28 @@ def test_list_positions_includes_market_question_and_analyzer_decisions(env) -> 
     market = normalize_gamma_market(raw, event={"id": "e", "title": "E"})
 
     saved_store = msm.store
-    saved_entries = list(analyzer_log.entries())
     try:
         fresh = MarketStore()
         fresh.replace([market], PollSummary(ts=1.0, fetched=1, kept=1, reason_counts={}))
         msm.store = fresh
-        analyzer_log.reset()
-        analyzer_log.append(
-            AnalyzerCall(
-                ts=99.0,
-                news_id="n1",
-                news_content_preview="x",
-                urgency="high",
-                verdict="ok",
-                p_model=0.55,
-                confidence="medium",
-                market_id="m1",
-                latency_ms=20,
-                rationale="opened m1 because reasons",
-            )
+        call = AnalyzerCall(
+            ts=99.0,
+            news_id="n1",
+            news_content_preview="x",
+            urgency="high",
+            verdict="ok",
+            p_model=0.55,
+            confidence="medium",
+            market_id="m1",
+            latency_ms=20,
+            rationale="opened m1 because reasons",
         )
+        with factory() as session:
+            session.add(AnalyzerCallRow(**call.to_dict()))
+            session.commit()
         positions = client.get("/api/positions").json()["positions"]
     finally:
         msm.store = saved_store
-        analyzer_log.reset()
-        for e in saved_entries:
-            analyzer_log.append(e)
 
     assert len(positions) == 2
     # newest-first: m2 opened at ts=101
@@ -434,7 +474,7 @@ def test_list_positions_market_question_null_when_no_catalog(env) -> None:
     from openpoly.markets.manager import manager as msm
     from openpoly.markets.store import MarketStore
 
-    store, client = env
+    store, client, _factory = env
     _open(store, "m1", "yes", "ty1", ts=100.0)
     _open(store, "m2", "no", "tn2", ts=101.0)
 
