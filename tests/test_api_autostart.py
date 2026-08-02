@@ -53,8 +53,9 @@ async def test_lifespan_autostarts_both_sources(
 
     assert len(market_calls) == 1
     assert len(news_calls) == 1
-    # News autostart passes the full config dict with the local key ref.
-    assert news_calls[0]["api_key_ref"] == "local:tradingnews-key"
+    # No canvas saved and no override env var → TradingNewsWSConfig()'s own
+    # default, not a hardcoded guess.
+    assert news_calls[0]["api_key_ref"] == "env:OPENPOLY_TRADINGNEWS_KEY"
     assert "endpoint" in news_calls[0]
 
 
@@ -143,9 +144,11 @@ async def test_market_autostart_falls_back_to_defaults_when_no_canvas(
 
 
 # ---------- news_source autostart uses the persisted canvas config ----------
-# (same underlying bug/fix as market_source above — see that section's
-# docstring — except api_key_ref is deliberately NOT sourced from canvas,
-# to avoid disturbing an already-working key resolution.)
+# Same underlying bug/fix as market_source above. api_key_ref is now
+# ALSO canvas-sourced (matching what a manual Start/Resume already does) —
+# the previous hardcoded "local:tradingnews-key" guess broke autostart with
+# SecretNotFound for anyone whose real key wasn't filed under exactly that
+# name; canvas already had the correct value the whole time.
 
 
 def _template_with_news_source(**config_overrides: Any) -> dict[str, Any]:
@@ -174,9 +177,7 @@ async def test_news_autostart_uses_canvas_saved_config(
             buffer_size=5000,
             freshness_seconds=600,
             urgency_filter="high",
-            # Deliberately saved as something else, to prove the autostart
-            # override below still wins for this one field.
-            api_key_ref="local:should-be-overridden",
+            api_key_ref="env:REAL_KEY_FROM_CANVAS",
         )
     )
 
@@ -193,8 +194,8 @@ async def test_news_autostart_uses_canvas_saved_config(
     assert cfg["buffer_size"] == 5000  # from canvas, not the 1000 default
     assert cfg["freshness_seconds"] == 600  # from canvas, not the 1800 default
     assert cfg["urgency_filter"] == "high"  # from canvas, not "all"
-    # api_key_ref is NOT sourced from canvas — still the autostart override.
-    assert cfg["api_key_ref"] == "local:tradingnews-key"
+    # api_key_ref is canvas-sourced too now — honored as-is, no override.
+    assert cfg["api_key_ref"] == "env:REAL_KEY_FROM_CANVAS"
 
 
 async def test_news_autostart_falls_back_to_defaults_when_no_canvas(
@@ -213,24 +214,20 @@ async def test_news_autostart_falls_back_to_defaults_when_no_canvas(
     assert cfg["buffer_size"] == 1000
     assert cfg["freshness_seconds"] == 1800
     assert cfg["urgency_filter"] == "all"
-    assert cfg["api_key_ref"] == "local:tradingnews-key"
+    assert cfg["api_key_ref"] == "env:OPENPOLY_TRADINGNEWS_KEY"  # TradingNewsWSConfig's own default
 
 
 async def test_news_autostart_respects_explicit_env_key_ref_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OPENPOLY_NEWS_API_KEY_REF must still win over whatever's in canvas —
-    the escape hatch for remote deploys where the secret is already in
-    process env. _NEWS_AUTOSTART_KEY_REF is resolved once at import time
-    from that env var, so simulate "it resolved differently" by patching
-    the already-resolved module constant directly, rather than reloading
-    the module (which would re-run its FastAPI app construction / logging
-    setup side effects)."""
-    import openpoly.api.main as main_module
+    """OPENPOLY_NEWS_API_KEY_REF, when explicitly set, still wins over
+    canvas — the escape hatch for remote deploys where the secret is
+    already in process env and the operator would rather not touch the
+    canvas config to match."""
     from openpoly.runtime.canvas_store import save_template
 
-    save_template(_template_with_news_source(api_key_ref="local:from-canvas"))
-    monkeypatch.setattr(main_module, "_NEWS_AUTOSTART_KEY_REF", "env:FROM_ENV_OVERRIDE")
+    save_template(_template_with_news_source(api_key_ref="env:REAL_KEY_FROM_CANVAS"))
+    monkeypatch.setenv("OPENPOLY_NEWS_API_KEY_REF", "env:FROM_ENV_OVERRIDE")
 
     captured: list[Any] = []
 
@@ -238,6 +235,6 @@ async def test_news_autostart_respects_explicit_env_key_ref_override(
         captured.append(config)
 
     monkeypatch.setattr(news_manager, "start", fake_news_start)
-    await main_module._autostart_sources()
+    await _autostart_sources()
 
     assert captured[0]["api_key_ref"] == "env:FROM_ENV_OVERRIDE"

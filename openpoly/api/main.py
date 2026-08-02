@@ -77,11 +77,16 @@ _openpoly_logger.setLevel(logging.INFO)
 # to opt out (tests do, so the lifespan never opens real connections).
 _AUTOSTART_ENV = "OPENPOLY_AUTOSTART_SOURCES"
 
-# api_key_ref the autostart uses for the news WS. Default reads from the
-# local secret store; OPENPOLY_NEWS_API_KEY_REF lets an operator point at
-# an env: or other scheme without needing a secret store entry (e.g. for
-# remote-VPS deploys where the secret is already in process env).
-_NEWS_AUTOSTART_KEY_REF = os.environ.get("OPENPOLY_NEWS_API_KEY_REF", "local:tradingnews-key")
+# Optional override for the news WS's api_key_ref on autostart — for
+# remote-VPS deploys where the secret is already in process env and the
+# operator would rather not touch the canvas config to match. When unset
+# (the common case), autostart uses whatever api_key_ref is already saved
+# in the canvas config, same as a manual Start/Resume. (Previously this
+# defaulted to a hardcoded "local:tradingnews-key" guess when unset, which
+# broke autostart with SecretNotFound for anyone whose real key wasn't
+# filed under exactly that name — canvas already had the correct value the
+# whole time, since that's what Resume/Start read.)
+_NEWS_KEY_REF_OVERRIDE_ENV = "OPENPOLY_NEWS_API_KEY_REF"
 
 
 def _autostart_enabled() -> bool:
@@ -113,13 +118,12 @@ async def _autostart_sources() -> None:
         logger.exception("market_source autostart failed")
     try:
         # Same fix as market_source above: seed from the persisted canvas
-        # config (freshness_seconds / urgency_filter / buffer_size /
-        # endpoint), not bare TradingNewsWSConfig() defaults. api_key_ref is
-        # the one exception — left wired to _NEWS_AUTOSTART_KEY_REF exactly
-        # as before (not sourced from canvas at all), so this fix can't
-        # disturb an already-working news connection's key resolution.
+        # config (api_key_ref included — see _NEWS_KEY_REF_OVERRIDE_ENV's
+        # comment for why that's now canvas-sourced too, not hardcoded).
         news_cfg = _canvas_config(TradingNewsWSConfig, "news_source")
-        news_cfg = news_cfg.model_copy(update={"api_key_ref": _NEWS_AUTOSTART_KEY_REF})
+        key_ref_override = os.environ.get(_NEWS_KEY_REF_OVERRIDE_ENV)
+        if key_ref_override:
+            news_cfg = news_cfg.model_copy(update={"api_key_ref": key_ref_override})
         await news_source_manager.start(news_cfg.model_dump())
     except Exception:  # noqa: BLE001 — startup must survive a bad source
         logger.exception("news_source autostart failed")
