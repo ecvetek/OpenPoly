@@ -215,7 +215,15 @@ def test_inspect_db_status_unstarted_manager():
     finally:
         app.dependency_overrides.clear()
     assert body["tables"] == {}
-    assert body["writers"] == {"order_book": None, "news": None}
+    assert body["writers"] == {
+        "order_book": None,
+        "news": None,
+        "embedding_call": None,
+        "analyzer_call": None,
+        "entry_decision": None,
+        "exit_decision": None,
+        "settlement_decision": None,
+    }
 
 
 # ---------- /api/inspect/order-books/{token_id} ----------
