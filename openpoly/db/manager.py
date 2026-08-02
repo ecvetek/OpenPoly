@@ -119,21 +119,26 @@ class DatabaseManager:
         await self._settlement_decision_writer.start()
 
     async def stop(self) -> None:
-        """Stop all writers, flushing whatever is still queued."""
-        if self._book_writer is not None:
-            await self._book_writer.stop()
-        if self._news_writer is not None:
-            await self._news_writer.stop()
-        if self._embedding_call_writer is not None:
-            await self._embedding_call_writer.stop()
-        if self._analyzer_call_writer is not None:
-            await self._analyzer_call_writer.stop()
-        if self._entry_decision_writer is not None:
-            await self._entry_decision_writer.stop()
-        if self._exit_decision_writer is not None:
-            await self._exit_decision_writer.stop()
-        if self._settlement_decision_writer is not None:
-            await self._settlement_decision_writer.stop()
+        """Stop all writers, flushing whatever is still queued.
+
+        Each writer is stopped independently — one raising must not skip the
+        rest, or their still-queued rows would never get flushed either."""
+        writers: tuple[tuple[str, WriteBehindWriter | None], ...] = (
+            ("book", self._book_writer),
+            ("news", self._news_writer),
+            ("embedding_call", self._embedding_call_writer),
+            ("analyzer_call", self._analyzer_call_writer),
+            ("entry_decision", self._entry_decision_writer),
+            ("exit_decision", self._exit_decision_writer),
+            ("settlement_decision", self._settlement_decision_writer),
+        )
+        for name, writer in writers:
+            if writer is None:
+                continue
+            try:
+                await writer.stop()
+            except Exception:  # noqa: BLE001 — one writer's failure must not skip the rest
+                logger.exception("database manager: %s writer stop() failed", name)
 
     async def shutdown(self) -> None:
         with contextlib.suppress(Exception):
@@ -241,6 +246,7 @@ class DatabaseManager:
             "written": writer.written,
             "dropped": writer.dropped,
             "pending": writer.pending,
+            "sink_errors": writer.sink_errors,
         }
 
 

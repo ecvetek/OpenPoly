@@ -169,6 +169,7 @@ async def test_status_reports_writer_stats(tmp_path):
         "written": 1,
         "dropped": 0,
         "pending": 0,
+        "sink_errors": 0,
     }
 
 

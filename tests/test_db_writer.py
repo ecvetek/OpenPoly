@@ -46,22 +46,62 @@ async def test_stop_flushes_remaining():
     assert sorted(received) == [0, 1, 2, 3, 4, 5]
 
 
-async def test_sink_error_does_not_kill_loop():
+async def test_sink_error_retries_once_then_succeeds():
+    """A transient failure (fails once, then succeeds) is retried within the
+    same batch — the row is NOT dropped, and sink_errors stays 0."""
     received: list = []
     calls = {"n": 0}
 
-    def flaky(batch: list) -> None:
+    def flaky_once(batch: list) -> None:
         calls["n"] += 1
         if calls["n"] == 1:
+            raise RuntimeError("transient db lock")
+        received.extend(batch)
+
+    writer = WriteBehindWriter(flaky_once, batch_size=1)
+    await writer.start()
+    writer.enqueue("x")
+    await _wait_until(lambda: received == ["x"])
+    assert writer.written == 1
+    assert writer.sink_errors == 0
+    await writer.stop()
+
+
+async def test_sink_error_after_retry_exhausted_does_not_kill_loop():
+    """A sink that fails both attempts for a batch drops that batch (counted
+    via sink_errors) but the drain loop survives to process the next one."""
+    received: list = []
+    calls = {"n": 0}
+
+    def flaky_always_for_first_batch(batch: list) -> None:
+        calls["n"] += 1
+        if calls["n"] <= 2:  # both attempts of the first batch fail
             raise RuntimeError("db down")
         received.extend(batch)
 
-    writer = WriteBehindWriter(flaky, batch_size=1)
+    writer = WriteBehindWriter(flaky_always_for_first_batch, batch_size=1)
     await writer.start()
-    writer.enqueue("x")  # batch 1 -> sink raises, loop must survive
-    await _wait_until(lambda: calls["n"] >= 1)
-    writer.enqueue("y")  # batch 2 -> sink ok
+    writer.enqueue("x")  # both attempts fail -> dropped
+    await _wait_until(lambda: calls["n"] >= 2)
+    writer.enqueue("y")  # next batch's sink call succeeds
     await _wait_until(lambda: received == ["y"])
+    assert writer.sink_errors == 1
+    await writer.stop()
+
+
+async def test_enqueue_from_worker_thread_is_safe():
+    """enqueue() called off the owning loop's thread (e.g. an
+    asyncio.to_thread-offloaded caller) must not touch asyncio.Queue
+    directly — it hops back onto the owning loop via call_soon_threadsafe
+    instead, so the row still lands."""
+    received: list = []
+    writer = WriteBehindWriter(received.extend, batch_size=10)
+    await writer.start()
+
+    result = await asyncio.to_thread(writer.enqueue, "from-thread")
+
+    assert result is True
+    await _wait_until(lambda: received == ["from-thread"])
     await writer.stop()
 
 
