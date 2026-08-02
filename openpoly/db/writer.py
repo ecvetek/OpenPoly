@@ -13,7 +13,6 @@ the same discipline as the pipeline orchestrator's queue.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -47,6 +46,10 @@ class WriteBehindWriter:
         self._task: asyncio.Task[None] | None = None
         self._dropped = 0
         self._written = 0
+        # Set by stop() to ask the drain loop to exit; checked only between
+        # writes (never mid-write) so a write already dispatched to the
+        # thread pool always finishes before stop() returns.
+        self._stopping = asyncio.Event()
 
     @property
     def dropped(self) -> int:
@@ -73,22 +76,35 @@ class WriteBehindWriter:
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
+        # Fresh Event each start — this instance may be started once after a
+        # prior stop() (or, in tests, across distinct event loops).
+        self._stopping = asyncio.Event()
         self._task = asyncio.create_task(self._drain_loop())
 
     async def stop(self) -> None:
-        """Cancel the drain loop, then flush whatever is still queued."""
+        """Signal the drain loop to stop, then await its natural exit —
+        never ``task.cancel()`` here. Cancelling while the loop is inside
+        ``await self._write(batch)`` (dispatched to a worker thread) would
+        return before that thread's ``session.commit()`` is guaranteed to
+        have run, silently racing a real write against ``stop()`` returning.
+        The loop only checks ``_stopping`` between writes, so this always
+        waits for any write already in flight to actually finish. Whatever
+        is still queued afterward is caught by the final flush."""
+        self._stopping.set()
         if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+            await self._task
             self._task = None
         await self._flush()
 
     # ---------- internals ----------
 
     async def _drain_loop(self) -> None:
-        while True:
-            batch = [await self._queue.get()]
+        while not self._stopping.is_set():
+            try:
+                item = await asyncio.wait_for(self._queue.get(), timeout=0.1)
+            except TimeoutError:
+                continue
+            batch = [item]
             while len(batch) < self._batch_size:
                 try:
                     batch.append(self._queue.get_nowait())
