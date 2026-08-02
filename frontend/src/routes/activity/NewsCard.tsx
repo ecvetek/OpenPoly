@@ -183,7 +183,7 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
           </span>
           {news.sentiment !== null && (
             <span className="ml-2 text-neutral-500">
-              sentiment {news.sentiment.toFixed(2)}
+              sentiment {news.sentiment}
             </span>
           )}
         </div>

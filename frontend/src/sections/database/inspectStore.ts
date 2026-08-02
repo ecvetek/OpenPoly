@@ -29,7 +29,7 @@ export type NewsRow = {
   news_id: string
   content: string
   urgency: string
-  sentiment: number | null
+  sentiment: string | null
   published_at: number
   received_at: number
 }
