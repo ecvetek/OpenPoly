@@ -117,6 +117,8 @@ def test_no_payload_skips() -> None:
     assert out.verdict == "skip"
     assert out.reason == "no market candidates"
     assert fake.call_count == 0
+    # No LLM call happened, so there's nothing to carry as a rationale.
+    assert out.signals.get("rationale") is None
 
 
 def test_empty_candidates_skips() -> None:
@@ -128,6 +130,7 @@ def test_empty_candidates_skips() -> None:
     )
     assert out.verdict == "skip"
     assert fake.call_count == 0  # no LLM call on the skip path
+    assert out.signals.get("rationale") is None
 
 
 # ---------- ok path ----------
@@ -189,6 +192,9 @@ def test_abstain_index_zero_skips() -> None:
     out = _run(LLMAnalyzerConfig(), fake, _candidates("m-a"))
     assert out.verdict == "skip"
     assert out.reason == "no actionable market"
+    # The LLM was called and returned a rationale even though it abstained —
+    # that explanation must not be discarded.
+    assert out.signals["rationale"] == "none apply."
 
 
 def test_index_out_of_range_skips() -> None:
@@ -203,6 +209,7 @@ def test_index_out_of_range_skips() -> None:
     out = _run(LLMAnalyzerConfig(), fake, _candidates("m-a"))
     assert out.verdict == "skip"
     assert out.reason == "no actionable market"
+    assert out.signals["rationale"] == "r"
 
 
 def test_below_min_confidence_skips() -> None:
@@ -218,6 +225,7 @@ def test_below_min_confidence_skips() -> None:
     out = _run(LLMAnalyzerConfig(), fake, _candidates("m-a"))
     assert out.verdict == "skip"
     assert out.reason == "below min_confidence"
+    assert out.signals["rationale"] == "r"
 
 
 def test_low_confidence_ok_when_min_is_low() -> None:
@@ -242,6 +250,8 @@ def test_llm_error_yields_error_verdict() -> None:
     out = _run(LLMAnalyzerConfig(), fake, _candidates("m-a"))
     assert out.verdict == "error"
     assert "api down" in (out.reason or "")
+    # The client itself raised — no response to pull a rationale from.
+    assert out.signals.get("rationale") is None
 
 
 def test_malformed_p_yes_yields_error() -> None:
@@ -255,6 +265,7 @@ def test_malformed_p_yes_yields_error() -> None:
     )
     out = _run(LLMAnalyzerConfig(), fake, _candidates("m-a"))
     assert out.verdict == "error"
+    assert out.signals["rationale"] == "r"
 
 
 def test_malformed_confidence_yields_error() -> None:
@@ -268,6 +279,7 @@ def test_malformed_confidence_yields_error() -> None:
     )
     out = _run(LLMAnalyzerConfig(), fake, _candidates("m-a"))
     assert out.verdict == "error"
+    assert out.signals["rationale"] == "r"
 
 
 # ---------- base_url / third-party gateway config ----------

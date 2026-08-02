@@ -300,6 +300,20 @@ class PipelineOrchestrator:
 
         ar = out.payload if out is not None and isinstance(out.payload, AnalysisResult) else None
 
+        # PD1: surface the LLM's stated reason for the decision so
+        # PositionDetail UI can show it next to the position. The model is
+        # required to return a rationale on every tool call, including
+        # abstains/filtered-out decisions, so a skip verdict with `out`
+        # still set (the LLM was actually called) also carries one via
+        # `out.signals["rationale"]` — only a pre-filter skip or an
+        # LLM-client exception (no `out` at all) has nothing to report.
+        if ar is not None:
+            rationale = ar.rationale
+        elif out is not None:
+            rationale = out.signals.get("rationale")
+        else:
+            rationale = None
+
         self._append_analyzer(
             AnalyzerCall(
                 ts=ts,
@@ -312,11 +326,7 @@ class PipelineOrchestrator:
                 market_id=ar.market_id if ar is not None else None,
                 latency_ms=latency_ms,
                 error=error,
-                # PD1: surface the LLM's stated reason for the decision so
-                # PositionDetail UI can show it next to the position. Empty
-                # string from the model is also informative ("intentionally
-                # said nothing") — keep it; only None when ar itself is None.
-                rationale=ar.rationale if ar is not None else None,
+                rationale=rationale,
             )
         )
 

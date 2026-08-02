@@ -93,9 +93,13 @@ class AnalyzerCall:
     """One analyzer invocation. ``error`` only set when verdict==error.
 
     ``rationale`` is the LLM's stated reason for the decision (the
-    ``rationale`` field of the forced ``submit_analysis`` tool call). It is
-    set on ok / fail_open outcomes when the model returned one, otherwise
-    None. Surfaced in the PositionDetail UI by name-matching ``news_id``.
+    ``rationale`` field of the forced ``submit_analysis`` tool call, which is
+    required on every call). It is set whenever the LLM actually responded —
+    ok/fail_open outcomes, and skip/error verdicts reached after a successful
+    call (abstain, below-min-confidence, malformed-field responses). It is
+    only None when no LLM call happened (e.g. no market candidates) or the
+    LLM client itself raised. Surfaced in the PositionDetail UI by
+    name-matching ``news_id``.
     """
 
     ts: float

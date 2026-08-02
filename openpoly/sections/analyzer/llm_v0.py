@@ -218,6 +218,12 @@ class LLMAnalyzerV0:
         except LLMError as exc:
             return SectionOutput(payload=None, verdict="error", reason=repr(exc)[:200])
 
+        # The tool schema marks rationale as required, so the model always
+        # returns one — including on abstain / filtered-out decisions. Carry
+        # it via signals on every branch below so it isn't lost just because
+        # the decision wasn't an actionable pick.
+        rationale_text = str(result.get("rationale", "") or "")
+
         idx = result.get("selected_index")
         if not isinstance(idx, int) or isinstance(idx, bool) or not (1 <= idx <= len(cands)):
             # 0 = explicit abstain; out-of-range / non-int = treat the same.
@@ -225,7 +231,7 @@ class LLMAnalyzerV0:
                 payload=None,
                 verdict="skip",
                 reason="no actionable market",
-                signals={"selected_index": idx},
+                signals={"selected_index": idx, "rationale": rationale_text},
             )
 
         confidence = result.get("confidence")
@@ -234,13 +240,14 @@ class LLMAnalyzerV0:
                 payload=None,
                 verdict="error",
                 reason=f"malformed confidence: {confidence!r}",
+                signals={"rationale": rationale_text},
             )
         if _CONFIDENCE_RANK[confidence] < _CONFIDENCE_RANK[self.config.min_confidence]:
             return SectionOutput(
                 payload=None,
                 verdict="skip",
                 reason="below min_confidence",
-                signals={"confidence": confidence},
+                signals={"confidence": confidence, "rationale": rationale_text},
             )
 
         p_yes = result.get("p_yes")
@@ -253,6 +260,7 @@ class LLMAnalyzerV0:
                 payload=None,
                 verdict="error",
                 reason=f"malformed p_yes: {p_yes!r}",
+                signals={"rationale": rationale_text},
             )
 
         market = cands[idx - 1].market
@@ -260,7 +268,7 @@ class LLMAnalyzerV0:
             market_id=market.market_id,
             p_model=float(p_yes),
             confidence=confidence,  # type: ignore[arg-type]
-            rationale=str(result.get("rationale", "")),
+            rationale=rationale_text,
         )
         return SectionOutput(
             payload=ar,

@@ -97,10 +97,12 @@ class FakeAnalyzer:
         verdict: str = "ok",
         p_model: float = 0.55,
         raise_exc: Exception | None = None,
+        signals: dict[str, Any] | None = None,
     ) -> None:
         self._verdict = verdict
         self._p_model = p_model
         self._raise = raise_exc
+        self._signals = signals or {}
         self.call_count = 0
 
     def run(self, input: SectionInput) -> SectionOutput:
@@ -120,6 +122,7 @@ class FakeAnalyzer:
             payload=None,
             verdict=self._verdict,  # type: ignore[arg-type]
             reason="canned reason",
+            signals=self._signals,
         )
 
 
@@ -373,6 +376,22 @@ async def test_analyzer_skip_no_entry_call() -> None:
     assert len(a_log.entries()) == 1
     assert a_log.entries()[0].verdict == "skip"
     assert len(e_log.entries()) == 0
+
+
+async def test_analyzer_skip_preserves_rationale_signal() -> None:
+    """A skip verdict reached after a real LLM call (abstain / filtered
+    below min_confidence) still carries the model's stated reason via
+    signals — it must not be dropped just because there's no AnalysisResult."""
+    analyzer = FakeAnalyzer(verdict="skip", signals={"rationale": "abstained: no clear match."})
+    orch, _, a_log, _ = make_orchestrator(analyzer=analyzer)
+    await orch.start()
+    try:
+        orch.enqueue(_item("n1"))
+        await _drain(orch)
+    finally:
+        await orch.stop()
+    assert a_log.entries()[0].verdict == "skip"
+    assert a_log.entries()[0].rationale == "abstained: no clear match."
 
 
 async def test_analyzer_fail_open_no_entry_call() -> None:
