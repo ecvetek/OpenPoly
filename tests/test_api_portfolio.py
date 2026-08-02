@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from openpoly.api.main import app
 from openpoly.api.portfolio_routes import get_portfolio_store
 from openpoly.db.engine import get_session_factory, init_db, make_engine, make_session_factory
-from openpoly.db.tables import AnalyzerCallRow
+from openpoly.db.tables import AnalyzerCallRow, ExitDecisionRow, NewsItemRow
 from openpoly.portfolio import PortfolioStore
 
 
@@ -490,3 +490,190 @@ def test_list_positions_market_question_null_when_no_catalog(env) -> None:
         assert p["market_question"] is None
         # analyzer_decisions still present (empty list when no log match)
         assert isinstance(p["analyzer_decisions"], list)
+
+
+# ---------- polymarket_url ----------
+
+
+def test_get_position_includes_polymarket_url_when_catalogued(env) -> None:
+    """market_question and polymarket_url share the same catalog lookup —
+    both populated together. No event slug supplied here, so the url falls
+    back to the market's own slug."""
+    import json
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.models import normalize_gamma_market
+    from openpoly.markets.store import MarketStore, PollSummary
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    raw = {
+        "id": "m1",
+        "conditionId": "0xm1",
+        "question": "Will the U.S. invade Iran before 2027?",
+        "slug": "iran-2027",
+        "clobTokenIds": json.dumps(["yes-tok", "no-tok"]),
+    }
+    market = normalize_gamma_market(raw, event={"id": "e", "title": "E"})
+    saved_store = msm.store
+    try:
+        fresh = MarketStore()
+        fresh.replace([market], PollSummary(ts=1.0, fetched=1, kept=1, reason_counts={}))
+        msm.store = fresh
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["polymarket_url"] == "https://polymarket.com/event/iran-2027"
+
+
+def test_get_position_polymarket_url_null_when_not_catalogued(env) -> None:
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.store import MarketStore
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    saved_store = msm.store
+    try:
+        msm.store = MarketStore()  # empty catalog
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["polymarket_url"] is None
+
+
+# ---------- news_id + news summary ----------
+
+
+def test_get_position_includes_news_id(env) -> None:
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")  # _open uses news_id="n1"
+    body = client.get(f"/api/positions/{h.position_id}").json()
+    assert body["news_id"] == "n1"
+
+
+def test_get_position_news_id_null_when_no_linkage(env) -> None:
+    store, client, _factory = env
+    h = store.open_position(
+        market_id="m1", side="yes", token_id="ty1", condition_id="0xm1",
+        price=0.42, qty=10.0, ts=100.0, news_id=None,
+    )
+    body = client.get(f"/api/positions/{h.position_id}").json()
+    assert body["news_id"] is None
+    assert body["news"] is None
+
+
+def test_get_position_includes_news_summary_when_persisted(env) -> None:
+    """The triggering NewsItemRow is persisted → response inlines its full
+    content/urgency/sentiment/published_at, not just the news_id."""
+    store, client, factory = env
+    h = _open(store, "m1", "yes", "ty1")  # _open uses news_id="n1"
+    with factory() as session:
+        session.add(
+            NewsItemRow(
+                news_id="n1",
+                content="Some breaking headline about m1's market.",
+                urgency="high",
+                sentiment="negative",
+                published_at=90.0,
+                received_at=91.0,
+            )
+        )
+        session.commit()
+    body = client.get(f"/api/positions/{h.position_id}").json()
+    assert body["news"] == {
+        "content": "Some breaking headline about m1's market.",
+        "urgency": "high",
+        "sentiment": "negative",
+        "published_at": 90.0,
+    }
+
+
+def test_get_position_news_null_when_not_persisted(env) -> None:
+    """news_id exists (via the fill) but no matching NewsItemRow was ever
+    persisted — news must be None, not a crash."""
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    body = client.get(f"/api/positions/{h.position_id}").json()
+    assert body["news_id"] == "n1"
+    assert body["news"] is None
+
+
+# ---------- exit_decision ----------
+
+
+def test_get_position_exit_decision_null_when_open(env) -> None:
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    body = client.get(f"/api/positions/{h.position_id}").json()
+    assert body["exit_decision"] is None
+
+
+def test_get_position_includes_exit_decision_when_closed(env) -> None:
+    """A persisted verdict=ok ExitDecision for this position_id surfaces its
+    trigger/return_pct/peak_price/reason — richer than the coarse
+    close_reason enum alone."""
+    from openpoly.runtime.section_log import ExitDecision
+
+    store, client, factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    store.close_position(
+        h.position_id, sell_price=0.30, ts=200.0,
+        close_reason="stop_loss", trigger="stop_loss",
+    )
+    decision = ExitDecision(
+        ts=200.0,
+        position_id=h.position_id,
+        market_id="m1",
+        side="yes",
+        verdict="ok",
+        trigger="stop_loss",
+        return_pct=-0.15,
+        fill_price=0.30,
+        realized_pnl=-2.4,
+        reason="stop_loss threshold breached",
+        peak_price=0.48,
+    )
+    with factory() as session:
+        session.add(ExitDecisionRow(**decision.to_dict()))
+        session.commit()
+    body = client.get(f"/api/positions/{h.position_id}").json()
+    assert body["exit_decision"] == {
+        "trigger": "stop_loss",
+        "return_pct": -0.15,
+        "fill_price": 0.30,
+        "realized_pnl": -2.4,
+        "reason": "stop_loss threshold breached",
+        "peak_price": 0.48,
+        "ts": 200.0,
+    }
+
+
+def test_get_position_exit_decision_ignores_other_positions_and_skips(env) -> None:
+    """Filters by this exact position_id and verdict=ok — a skip/error row
+    for the same position, or an ok row for a *different* position, must
+    not leak in."""
+    from openpoly.runtime.section_log import ExitDecision
+
+    store, client, factory = env
+    h1 = _open(store, "m1", "yes", "ty1", ts=100.0)
+    h2 = _open(store, "m2", "no", "tn2", ts=101.0)
+    rows = [
+        ExitDecisionRow(
+            **ExitDecision(
+                ts=150.0, position_id=h1.position_id, market_id="m1", side="yes",
+                verdict="skip", trigger=None, return_pct=0.01, fill_price=None,
+                realized_pnl=None, reason="within threshold",
+            ).to_dict()
+        ),
+        ExitDecisionRow(
+            **ExitDecision(
+                ts=200.0, position_id=h2.position_id, market_id="m2", side="no",
+                verdict="ok", trigger="take_profit", return_pct=0.2, fill_price=0.6,
+                realized_pnl=3.0, reason="tp hit",
+            ).to_dict()
+        ),
+    ]
+    with factory() as session:
+        session.add_all(rows)
+        session.commit()
+    body = client.get(f"/api/positions/{h1.position_id}").json()
+    assert body["exit_decision"] is None

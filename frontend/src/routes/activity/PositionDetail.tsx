@@ -12,6 +12,7 @@
  */
 import { useRef } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { formatRelativeAgo, formatUTC } from '../../sections/news_source/time'
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import { OrderBookChart } from './OrderBookChart'
 import { fetchOrderBookHistory, type OrderBookHistory } from './orderBookClient'
@@ -85,14 +86,29 @@ export function PositionDetail() {
       {/* Header row: id, market identity, side, qty/price, status, PnL */}
       <div className="flex items-baseline gap-3 flex-wrap font-mono text-[12px]">
         <span className="text-neutral-100 font-semibold">#{p.id}</span>
-        {/* PD2: market question, with condition_id truncation as fallback. */}
+        {/* PD2: market question, with condition_id truncation as fallback.
+            Linked to the real Polymarket page when the market is still in
+            the live catalog (question and url share the same lookup, so
+            one is available iff the other is). */}
         {p.market_question ? (
-          <span
-            className="text-neutral-200 truncate max-w-[60ch]"
-            title={`${p.market_question}\n\nmarket_id: ${p.market_id}\ncondition_id: ${p.condition_id}`}
-          >
-            {p.market_question}
-          </span>
+          p.polymarket_url ? (
+            <a
+              href={p.polymarket_url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sky-400 hover:text-sky-300 underline truncate max-w-[60ch]"
+              title={`${p.market_question}\n\nmarket_id: ${p.market_id}\ncondition_id: ${p.condition_id}`}
+            >
+              {p.market_question}
+            </a>
+          ) : (
+            <span
+              className="text-neutral-200 truncate max-w-[60ch]"
+              title={`${p.market_question}\n\nmarket_id: ${p.market_id}\ncondition_id: ${p.condition_id}`}
+            >
+              {p.market_question}
+            </span>
+          )
         ) : (
           <span
             className="text-neutral-500"
@@ -112,18 +128,101 @@ export function PositionDetail() {
         >
           {p.status}
         </span>
+        {p.status === 'closed' && p.close_reason !== null && (
+          <span className="text-neutral-500 text-[11px]">
+            ({p.close_reason})
+          </span>
+        )}
         {p.realized_pnl !== null && (
           <span className={pnlClass(p.realized_pnl)}>
             {formatPnl(p.realized_pnl)}
           </span>
         )}
+        <span
+          className="ml-auto text-neutral-600 text-[10px]"
+          title={formatUTC(p.opened_at)}
+        >
+          opened {formatRelativeAgo(p.opened_at)}
+        </span>
+        {p.closed_at !== null && (
+          <span
+            className="text-neutral-600 text-[10px]"
+            title={formatUTC(p.closed_at)}
+          >
+            closed {formatRelativeAgo(p.closed_at)}
+          </span>
+        )}
       </div>
+
+      {/* The news item that triggered this position's entry. Inline rather
+         than a link — there's no per-item News route to link to. Omitted
+         entirely for a paper/manual position (no news_id) or one that
+         predates the news persistence rollout. */}
+      {p.news && (
+        <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-1.5">
+          <div className="flex items-baseline gap-2 flex-wrap text-[11px]">
+            <span className="text-neutral-400">Triggering news</span>
+            <span className="px-1.5 py-0.5 text-[10px] uppercase font-mono rounded border bg-neutral-800 text-neutral-400 border-neutral-700/50">
+              {p.news.urgency}
+            </span>
+            {p.news.sentiment !== null && (
+              <span className="text-neutral-500">
+                sentiment {p.news.sentiment}
+              </span>
+            )}
+            <span
+              className="ml-auto text-neutral-600"
+              title={formatUTC(p.news.published_at)}
+            >
+              {formatRelativeAgo(p.news.published_at)}
+            </span>
+          </div>
+          <div className="text-[12px] text-neutral-200 leading-relaxed whitespace-pre-wrap break-words">
+            {p.news.content}
+          </div>
+        </div>
+      )}
 
       {/* PD3+PD5: analyzer rationale block (LLM's stated reason for the
          decision). Empty list when no persisted analyzer_call row matches
          this position's news_id — rendered as "unavailable" rather than an
          error. */}
       <AnalyzerRationaleBlock decisions={p.analyzer_decisions ?? []} />
+
+      {/* Exit-monitor decision that actually closed this position — richer
+         than the coarse close_reason badge above (trigger detail,
+         return_pct, peak_price). Omitted while open, or if closed before
+         the exit_decision persistence rollout. */}
+      {p.exit_decision && (
+        <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-1.5">
+          <div className="text-[11px] text-neutral-400">Exit</div>
+          <div className="flex items-baseline gap-3 flex-wrap font-mono text-[12px]">
+            {p.exit_decision.trigger !== null && (
+              <span className="text-neutral-300">
+                trigger{' '}
+                <span className="text-neutral-100">
+                  {p.exit_decision.trigger}
+                </span>
+              </span>
+            )}
+            {p.exit_decision.return_pct !== null && (
+              <span className={pnlClass(p.exit_decision.return_pct)}>
+                {(p.exit_decision.return_pct * 100).toFixed(2)}%
+              </span>
+            )}
+            {p.exit_decision.peak_price !== null && (
+              <span className="text-neutral-500">
+                peak {p.exit_decision.peak_price.toFixed(3)}
+              </span>
+            )}
+          </div>
+          {p.exit_decision.reason && (
+            <div className="text-[11px] text-neutral-400">
+              {p.exit_decision.reason}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="rounded border border-neutral-800 p-3">
         {status === 'error' && (

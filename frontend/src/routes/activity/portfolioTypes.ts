@@ -11,6 +11,27 @@ export type AnalyzerDecision = {
   ts: number
 }
 
+// The news item that triggered a position's entry — shown inline on
+// PositionDetail rather than as a link (no per-item News route exists).
+export type PositionNews = {
+  content: string
+  urgency: string
+  sentiment: string | null
+  published_at: number
+}
+
+// The exit-monitor decision that actually closed a position — richer than
+// the coarse `close_reason` enum (trigger detail, return_pct, peak_price).
+export type PositionExitDecision = {
+  trigger: string | null
+  return_pct: number | null
+  fill_price: number | null
+  realized_pnl: number | null
+  reason: string | null
+  peak_price: number | null
+  ts: number
+}
+
 export type PositionRecord = {
   id: number
   market_id: string
@@ -31,6 +52,16 @@ export type PositionRecord = {
   // for tolerance — older test fixtures or partial mocks may omit them.
   market_question?: string | null
   analyzer_decisions?: AnalyzerDecision[]
+  // Resolved from the live catalog — null when the market has been evicted.
+  polymarket_url?: string | null
+  // The news_id backing analyzer_decisions; null for a paper/manual
+  // position with no news linkage. news is the full triggering item
+  // (only populated on /api/positions/{id}, not the list route).
+  news_id?: string | null
+  news?: PositionNews | null
+  // Only /api/positions/{id} populates this; null while open or if the
+  // position closed before the exit_decision persistence rollout.
+  exit_decision?: PositionExitDecision | null
 }
 
 export type Fill = {

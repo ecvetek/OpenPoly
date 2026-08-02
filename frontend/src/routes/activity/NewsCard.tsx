@@ -217,10 +217,22 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
             {embedding.top_market_id !== null && embedding.top_score !== null && (
               <div className="font-mono text-[11px] text-neutral-500">
                 top market{' '}
-                <span className="text-neutral-300">
-                  {embedding.top_market_id.slice(0, 20)}
-                  {embedding.top_market_id.length > 20 ? '…' : ''}
-                </span>{' '}
+                {embedding.top_market_polymarket_url ? (
+                  <a
+                    href={embedding.top_market_polymarket_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sky-400 hover:text-sky-300 underline"
+                  >
+                    {embedding.top_market_id.slice(0, 20)}
+                    {embedding.top_market_id.length > 20 ? '…' : ''}
+                  </a>
+                ) : (
+                  <span className="text-neutral-300">
+                    {embedding.top_market_id.slice(0, 20)}
+                    {embedding.top_market_id.length > 20 ? '…' : ''}
+                  </span>
+                )}{' '}
                 score={' '}
                 <span className="text-neutral-300">
                   {embedding.top_score.toFixed(3)}
@@ -275,10 +287,22 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
               {analyzer.market_id !== null && (
                 <span className="text-neutral-500">
                   → market{' '}
-                  <span className="text-neutral-300">
-                    {analyzer.market_id.slice(0, 16)}
-                    {analyzer.market_id.length > 16 ? '…' : ''}
-                  </span>
+                  {analyzer.market_polymarket_url ? (
+                    <a
+                      href={analyzer.market_polymarket_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-sky-400 hover:text-sky-300 underline"
+                    >
+                      {analyzer.market_id.slice(0, 16)}
+                      {analyzer.market_id.length > 16 ? '…' : ''}
+                    </a>
+                  ) : (
+                    <span className="text-neutral-300">
+                      {analyzer.market_id.slice(0, 16)}
+                      {analyzer.market_id.length > 16 ? '…' : ''}
+                    </span>
+                  )}
                 </span>
               )}
               <span className="ml-auto text-neutral-600 text-[10px]">

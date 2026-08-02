@@ -40,6 +40,7 @@ class Market:
     event_id: str | None
     event_title: str | None
     event_tags: tuple[str, ...]
+    event_slug: str | None = None
     neg_risk: bool = False  # slice C — Gamma's `negRisk` field
     # Slice E: when the market resolves, Gamma stamps outcomePrices as a
     # 2-string array — ``["1", "0"]`` (YES wins) / ``["0", "1"]`` (NO wins) /
@@ -60,6 +61,21 @@ class Market:
         """Best available YES price estimate: mid, falling back to last trade."""
         mid = self.mid
         return mid if mid is not None else self.last_trade_price
+
+
+def polymarket_url(market: Market | None) -> str | None:
+    """The real polymarket.com page for this market, or None when neither
+    slug is known (e.g. ``fetch_market_by_id`` synced this market without its
+    parent event, so ``event_slug`` was never captured).
+
+    Prefers the event slug — Polymarket's real URL scheme is
+    ``/event/{event-slug}`` — falling back to the market's own slug, which
+    resolves for many single-outcome markets too.
+    """
+    if market is None:
+        return None
+    slug = market.event_slug or market.slug
+    return f"https://polymarket.com/event/{slug}" if slug else None
 
 
 def _parse_json_array(value: Any) -> list[Any]:
@@ -154,6 +170,7 @@ def normalize_gamma_market(
         event_id=str(event["id"]) if event.get("id") else None,
         event_title=str(title) if title else None,
         event_tags=tags,
+        event_slug=str(event["slug"]) if event.get("slug") else None,
         neg_risk=bool(raw.get("negRisk", False)),
         outcome_prices=_parse_outcome_prices(raw.get("outcomePrices")),
     )

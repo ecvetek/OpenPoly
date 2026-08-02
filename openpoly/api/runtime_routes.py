@@ -35,6 +35,8 @@ from openpoly.db.tables import (
     SettlementDecisionRow,
 )
 from openpoly.llm import LLMClient, LLMError
+from openpoly.markets.manager import manager as market_source_manager
+from openpoly.markets.models import polymarket_url
 from openpoly.runtime.orchestrator import get_orchestrator
 from openpoly.runtime.section_log import (
     analyzer_log,
@@ -72,6 +74,19 @@ def _entries_from_db(
     return [{col: getattr(r, col) for col in cols} for r in reversed(rows)]
 
 
+def _attach_polymarket_links(
+    entries: list[dict[str, Any]], market_id_key: str, link_key: str
+) -> None:
+    """Mutates ``entries`` in place, resolving ``market_id_key`` against the
+    live catalog and adding ``link_key``. ``None`` when the id is absent or
+    the market has since been evicted from the catalog (closed / filtered) —
+    same graceful-degradation behavior as ``market_question`` elsewhere."""
+    for entry in entries:
+        market_id = entry.get(market_id_key)
+        market = market_source_manager.store.get(market_id) if market_id else None
+        entry[link_key] = polymarket_url(market)
+
+
 class SectionLogResponse(BaseModel):
     entries: list[dict[str, Any]]
     counters: dict[str, int]
@@ -95,8 +110,10 @@ def get_embedding_log(
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> SectionLogResponse:
     orch = get_orchestrator()
+    entries = _entries_from_db(factory, EmbeddingCallRow, limit)
+    _attach_polymarket_links(entries, "top_market_id", "top_market_polymarket_url")
     return SectionLogResponse(
-        entries=_entries_from_db(factory, EmbeddingCallRow, limit),
+        entries=entries,
         counters=embedding_log.counters(),
         last_at=embedding_log.last_at,
         queue_depth=orch.queue_depth,
@@ -111,8 +128,10 @@ def get_analyzer_log(
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> SectionLogResponse:
     orch = get_orchestrator()
+    entries = _entries_from_db(factory, AnalyzerCallRow, limit)
+    _attach_polymarket_links(entries, "market_id", "market_polymarket_url")
     return SectionLogResponse(
-        entries=_entries_from_db(factory, AnalyzerCallRow, limit),
+        entries=entries,
         counters=analyzer_log.counters(),
         last_at=analyzer_log.last_at,
         queue_depth=orch.queue_depth,

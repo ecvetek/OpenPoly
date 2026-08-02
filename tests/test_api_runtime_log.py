@@ -209,6 +209,112 @@ async def test_embedding_log_returns_appended_entries(db) -> None:
     assert body["last_at"] == 11.0
 
 
+async def test_embedding_log_includes_polymarket_url_when_catalogued(db) -> None:
+    """top_market_id resolves against the live catalog into a real
+    Polymarket link."""
+    import json
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.models import normalize_gamma_market
+    from openpoly.markets.store import MarketStore, PollSummary
+
+    embedding_log.append(
+        EmbeddingCall(
+            ts=10.0,
+            news_id="n1",
+            news_content_preview="fed news",
+            urgency="high",
+            verdict="ok",
+            candidate_count=1,
+            top_market_id="m1",
+            top_score=0.9,
+            catalog_size=10,
+            latency_ms=5,
+        )
+    )
+    with db() as session:
+        session.add(
+            EmbeddingCallRow(
+                ts=10.0,
+                news_id="n1",
+                news_content_preview="fed news",
+                urgency="high",
+                verdict="ok",
+                candidate_count=1,
+                top_market_id="m1",
+                top_score=0.9,
+                catalog_size=10,
+                latency_ms=5,
+                error=None,
+            )
+        )
+        session.commit()
+
+    raw = {
+        "id": "m1",
+        "conditionId": "0xm1",
+        "question": "Q?",
+        "slug": "q-slug",
+        "clobTokenIds": json.dumps(["yes-tok", "no-tok"]),
+    }
+    market = normalize_gamma_market(raw, event={"id": "e", "title": "E", "slug": "event-slug"})
+    saved_store = msm.store
+    try:
+        fresh = MarketStore()
+        fresh.replace([market], PollSummary(ts=1.0, fetched=1, kept=1, reason_counts={}))
+        msm.store = fresh
+        client = await _client()
+        try:
+            r = await client.get("/api/embedding/log")
+        finally:
+            await client.aclose()
+    finally:
+        msm.store = saved_store
+    assert (
+        r.json()["entries"][0]["top_market_polymarket_url"]
+        == "https://polymarket.com/event/event-slug"
+    )
+
+
+async def test_embedding_log_polymarket_url_null_when_not_catalogued(db) -> None:
+    embedding_log.append(
+        EmbeddingCall(
+            ts=10.0,
+            news_id="n1",
+            news_content_preview="fed news",
+            urgency="high",
+            verdict="ok",
+            candidate_count=1,
+            top_market_id="m1",
+            top_score=0.9,
+            catalog_size=10,
+            latency_ms=5,
+        )
+    )
+    with db() as session:
+        session.add(
+            EmbeddingCallRow(
+                ts=10.0,
+                news_id="n1",
+                news_content_preview="fed news",
+                urgency="high",
+                verdict="ok",
+                candidate_count=1,
+                top_market_id="m1",
+                top_score=0.9,
+                catalog_size=10,
+                latency_ms=5,
+                error=None,
+            )
+        )
+        session.commit()
+    client = await _client()
+    try:
+        r = await client.get("/api/embedding/log")
+    finally:
+        await client.aclose()
+    assert r.json()["entries"][0]["top_market_polymarket_url"] is None
+
+
 def _seed_analyzer_rows(db, *rows: AnalyzerCall) -> None:
     with db() as session:
         session.add_all([AnalyzerCallRow(**r.to_dict()) for r in rows])
@@ -254,6 +360,98 @@ async def test_analyzer_log_returns_appended_entries(db) -> None:
     assert body["counters"]["ok"] == 1
     assert body["counters"]["skip"] == 1
     assert body["last_at"] == 11.0
+
+
+async def test_analyzer_log_includes_polymarket_url_when_catalogued(db) -> None:
+    import json
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.models import normalize_gamma_market
+    from openpoly.markets.store import MarketStore, PollSummary
+
+    call = AnalyzerCall(
+        ts=10.0,
+        news_id="n1",
+        news_content_preview="hello",
+        urgency="high",
+        verdict="ok",
+        p_model=0.55,
+        confidence="medium",
+        market_id="m1",
+        latency_ms=42,
+    )
+    analyzer_log.append(call)
+    _seed_analyzer_rows(db, call)
+
+    raw = {
+        "id": "m1",
+        "conditionId": "0xm1",
+        "question": "Q?",
+        "slug": "q-slug",
+        "clobTokenIds": json.dumps(["yes-tok", "no-tok"]),
+    }
+    market = normalize_gamma_market(raw, event={"id": "e", "title": "E", "slug": "event-slug"})
+    saved_store = msm.store
+    try:
+        fresh = MarketStore()
+        fresh.replace([market], PollSummary(ts=1.0, fetched=1, kept=1, reason_counts={}))
+        msm.store = fresh
+        client = await _client()
+        try:
+            r = await client.get("/api/analyzer/log")
+        finally:
+            await client.aclose()
+    finally:
+        msm.store = saved_store
+    assert (
+        r.json()["entries"][0]["market_polymarket_url"]
+        == "https://polymarket.com/event/event-slug"
+    )
+
+
+async def test_analyzer_log_polymarket_url_null_when_not_catalogued(db) -> None:
+    call = AnalyzerCall(
+        ts=10.0,
+        news_id="n1",
+        news_content_preview="hello",
+        urgency="high",
+        verdict="ok",
+        p_model=0.55,
+        confidence="medium",
+        market_id="m1",
+        latency_ms=42,
+    )
+    analyzer_log.append(call)
+    _seed_analyzer_rows(db, call)
+    client = await _client()
+    try:
+        r = await client.get("/api/analyzer/log")
+    finally:
+        await client.aclose()
+    assert r.json()["entries"][0]["market_polymarket_url"] is None
+
+
+async def test_analyzer_log_polymarket_url_null_when_no_market_id(db) -> None:
+    """A skip verdict with market_id=None must not attempt a catalog lookup
+    (and stays None)."""
+    call = AnalyzerCall(
+        ts=10.0,
+        news_id="n2",
+        news_content_preview="bye",
+        urgency="low",
+        verdict="skip",
+        p_model=None,
+        confidence=None,
+        market_id=None,
+        latency_ms=3,
+    )
+    analyzer_log.append(call)
+    _seed_analyzer_rows(db, call)
+    client = await _client()
+    try:
+        r = await client.get("/api/analyzer/log")
+    finally:
+        await client.aclose()
+    assert r.json()["entries"][0]["market_polymarket_url"] is None
 
 
 async def test_entry_log_returns_appended_entries(db) -> None:

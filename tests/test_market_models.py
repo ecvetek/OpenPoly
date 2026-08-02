@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openpoly.markets.models import Market, normalize_gamma_market
+from openpoly.markets.models import Market, normalize_gamma_market, polymarket_url
 
 
 def _raw(**overrides):
@@ -104,6 +104,41 @@ def test_no_event_means_empty_tags():
     m = normalize_gamma_market(_raw())
     assert m.event_tags == ()
     assert m.event_id is None
+
+
+def test_event_slug_captured():
+    event = {"id": "30615", "title": "2026 FIFA World Cup", "slug": "world-cup-2026", "tags": []}
+    m = normalize_gamma_market(_raw(), event=event)
+    assert m.event_slug == "world-cup-2026"
+
+
+def test_no_event_slug_when_absent():
+    m = normalize_gamma_market(_raw(), event={"id": "e", "title": "E", "tags": []})
+    assert m.event_slug is None
+    m2 = normalize_gamma_market(_raw())  # no event at all (fetch_market_by_id path)
+    assert m2.event_slug is None
+
+
+def test_polymarket_url_prefers_event_slug():
+    m = normalize_gamma_market(_raw(), event={"id": "e", "title": "E", "slug": "world-cup-2026", "tags": []})
+    assert polymarket_url(m) == "https://polymarket.com/event/world-cup-2026"
+
+
+def test_polymarket_url_falls_back_to_market_slug():
+    # No event slug (e.g. fetch_market_by_id never passes an event) — falls
+    # back to the market's own slug ("will-x-win" per the _raw() fixture).
+    m = normalize_gamma_market(_raw())
+    assert m.event_slug is None
+    assert polymarket_url(m) == "https://polymarket.com/event/will-x-win"
+
+
+def test_polymarket_url_none_when_no_slug_at_all():
+    m = normalize_gamma_market(_raw(slug=""))
+    assert polymarket_url(m) is None
+
+
+def test_polymarket_url_none_for_none_market():
+    assert polymarket_url(None) is None
 
 
 def test_mid_and_reference_price():

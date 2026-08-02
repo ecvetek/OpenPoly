@@ -19,8 +19,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.db.engine import get_session_factory
-from openpoly.db.tables import AnalyzerCallRow
+from openpoly.db.tables import AnalyzerCallRow, ExitDecisionRow, NewsItemRow
 from openpoly.execution import executor
+from openpoly.markets.manager import manager as market_source_manager
+from openpoly.markets.models import Market, polymarket_url
 from openpoly.portfolio import PortfolioStore
 from openpoly.portfolio.equity import build_equity_curve
 
@@ -58,8 +60,11 @@ def list_positions(
     positions: list[dict[str, Any]] = []
     for record in rows:
         body = asdict(record)
-        body["market_question"] = _lookup_market_question(record.condition_id)
+        market = _lookup_market(record.condition_id)
+        body["market_question"] = market.question if market is not None else None
+        body["polymarket_url"] = polymarket_url(market)
         news_id = store.news_id_for_position(record.id)
+        body["news_id"] = news_id
         body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id, factory)
         positions.append(body)
     return {"positions": positions}
@@ -166,39 +171,51 @@ def get_position_by_id(
 ) -> dict[str, Any]:
     """One position (open or closed) by id. 404 if no such position.
 
-    Augments the raw PositionRecord with two best-effort lookups so the
+    Augments the raw PositionRecord with several best-effort lookups so the
     PositionDetail UI doesn't have to fan out to additional endpoints:
 
-    - ``market_question``: catalog lookup by condition_id. ``None`` when
-      the market is no longer catalogued (filtered out or resolved). UI
-      falls back to displaying the condition_id.
+    - ``market_question`` / ``polymarket_url``: catalog lookup by
+      condition_id. Both ``None`` when the market is no longer catalogued
+      (filtered out or resolved). UI falls back to displaying the
+      condition_id / a plain (non-link) label.
+    - ``news_id`` / ``news``: the news item that triggered this position.
+      ``news_id`` is ``None`` for a paper/manual position with no news
+      linkage. ``news`` (content/urgency/sentiment/published_at) is
+      ``None`` when ``news_id`` is None, or that news row was never
+      persisted.
     - ``analyzer_decisions``: list (newest-first) of every ``verdict=ok``
       analyzer call whose ``news_id`` matches this position's news_id.
       Each element carries rationale / p_model / confidence / ts. Empty
-      list when ``news_id`` is None (paper / manual position with no news
-      linkage), or the analyzer never hit ``verdict=ok`` on it.
+      list when ``news_id`` is None, or the analyzer never hit
+      ``verdict=ok`` on it.
+    - ``exit_decision``: the exit-monitor decision that actually closed
+      this position (trigger/return_pct/peak_price/reason), or ``None``
+      for an open position or one closed before persistence went live.
     """
     record = store.get_position(position_id)
     if record is None:
         raise HTTPException(status_code=404, detail="position not found")
     body = asdict(record)
-    body["market_question"] = _lookup_market_question(record.condition_id)
+    market = _lookup_market(record.condition_id)
+    body["market_question"] = market.question if market is not None else None
+    body["polymarket_url"] = polymarket_url(market)
     # PositionRecord doesn't carry news_id (it lives on the BUY fill row).
     # Look it up via the store + then query the persisted analyzer_call table.
     news_id = store.news_id_for_position(position_id)
+    body["news_id"] = news_id
+    body["news"] = _lookup_news_summary(news_id, factory)
     body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id, factory)
+    body["exit_decision"] = _lookup_exit_decision(position_id, factory)
     return body
 
 
-def _lookup_market_question(condition_id: str) -> str | None:
-    """Resolve PositionRecord.condition_id → Market.question via the live
-    catalog. Best-effort: returns ``None`` when the market is no longer
-    catalogued (filtered or resolved). Frontend renders condition_id
-    truncation as fallback."""
-    from openpoly.markets.manager import manager as market_source_manager
-
-    market = market_source_manager.store.get_by_condition(condition_id)
-    return market.question if market is not None else None
+def _lookup_market(condition_id: str) -> Market | None:
+    """Resolve PositionRecord.condition_id → Market via the live catalog.
+    Best-effort: returns ``None`` when the market is no longer catalogued
+    (filtered or resolved). Callers derive ``market_question`` /
+    ``polymarket_url`` from this; frontend renders condition_id truncation
+    as fallback."""
+    return market_source_manager.store.get_by_condition(condition_id)
 
 
 def _lookup_analyzer_decisions(
@@ -237,6 +254,64 @@ def _lookup_analyzer_decisions(
         }
         for r in rows
     ]
+
+
+def _lookup_news_summary(
+    news_id: str | None, factory: sessionmaker[Session]
+) -> dict[str, Any] | None:
+    """The triggering news item's content/urgency/sentiment/published_at, or
+    ``None`` when ``news_id`` is None or that item was never persisted (the
+    write-behind news sink is best-effort, same eviction story as any other
+    persisted call-log row)."""
+    if news_id is None:
+        return None
+    with factory() as session:
+        row = (
+            session.execute(select(NewsItemRow).where(NewsItemRow.news_id == news_id))
+            .scalars()
+            .first()
+        )
+    if row is None:
+        return None
+    return {
+        "content": row.content,
+        "urgency": row.urgency,
+        "sentiment": row.sentiment,
+        "published_at": row.published_at,
+    }
+
+
+def _lookup_exit_decision(
+    position_id: int, factory: sessionmaker[Session]
+) -> dict[str, Any] | None:
+    """The exit-monitor decision that actually closed this position
+    (verdict=ok, newest first) — ``None`` for a still-open position, or one
+    closed before persistence went live."""
+    with factory() as session:
+        row = (
+            session.execute(
+                select(ExitDecisionRow)
+                .where(
+                    ExitDecisionRow.position_id == position_id,
+                    ExitDecisionRow.verdict == "ok",
+                )
+                .order_by(ExitDecisionRow.ts.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+    if row is None:
+        return None
+    return {
+        "trigger": row.trigger,
+        "return_pct": row.return_pct,
+        "fill_price": row.fill_price,
+        "realized_pnl": row.realized_pnl,
+        "reason": row.reason,
+        "peak_price": row.peak_price,
+        "ts": row.ts,
+    }
 
 
 @router.get("/portfolio/equity")

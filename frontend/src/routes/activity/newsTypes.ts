@@ -37,6 +37,10 @@ export type EmbeddingCall = {
   catalog_size: number
   latency_ms: number
   error: string | null
+  // Resolved from the live catalog at response time — null when the market
+  // has since been evicted (closed / filtered), same as top_market_id being
+  // unresolvable to a question elsewhere.
+  top_market_polymarket_url: string | null
 }
 
 // One row in `/api/analyzer/log.entries[]` — a superset of
@@ -56,6 +60,9 @@ export type AnalyzerCallEntry = {
   latency_ms: number
   error: string | null
   rationale: string | null
+  // Resolved from the live catalog at response time — null when the market
+  // has since been evicted (closed / filtered).
+  market_polymarket_url: string | null
 }
 
 // One row in `/api/entry/log.entries[]`. `fill_*` and `position_id` are
