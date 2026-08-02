@@ -41,7 +41,7 @@ from openpoly.runtime.exit_monitor import exit_monitor
 from openpoly.runtime.settlement_monitor import settlement_monitor
 from openpoly.runtime import reconciliation_monitor as _recon_mod
 from openpoly.runtime.reconciliation_monitor import ReconciliationMonitor
-from openpoly.runtime.orchestrator import get_orchestrator
+from openpoly.runtime.orchestrator import _canvas_config, get_orchestrator
 from openpoly.sections._registry import CatalogEntry, scan
 from openpoly.sections.news_source.tradingnews_ws import TradingNewsWSConfig
 from openpoly.wallet.runtime_state import runtime_state
@@ -95,9 +95,20 @@ def _autostart_enabled() -> bool:
 
 async def _autostart_sources() -> None:
     """Best-effort start of both sources. A failure is logged and surfaced via
-    the source's own status snapshot; it never aborts app startup."""
+    the source's own status snapshot; it never aborts app startup.
+
+    ``market_source`` starts from the *persisted canvas config*, not bare
+    ``MarketSourceConfig()`` defaults — the manager's ``start()`` is a no-op
+    once already running (including this autostart itself), so if it were
+    ever seeded with defaults, no later call (Resume, or the node's own
+    Start button) can actually replace them short of an explicit Stop first.
+    That was a real bug: a fresh backend boot silently ran market discovery
+    against the bare-default filter (24h min-expiry, sports excluded, etc.)
+    instead of the operator's saved one, until they noticed the catalog size
+    was wrong and did a manual Stop+Start."""
     try:
-        await market_source_manager.start(MarketSourceConfig())
+        cfg = _canvas_config(MarketSourceConfig, "market_source")
+        await market_source_manager.start(cfg)
     except Exception:  # noqa: BLE001 — startup must survive a bad source
         logger.exception("market_source autostart failed")
     try:
