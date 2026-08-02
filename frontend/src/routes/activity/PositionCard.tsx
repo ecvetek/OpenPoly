@@ -101,6 +101,11 @@ export function PositionCard({ p }: { p: PositionRecord }) {
             {p.qty.toFixed(2)} @ {p.avg_entry_price.toFixed(3)}
           </span>
           <span className="text-neutral-500">(${cost.toFixed(2)})</span>
+          {p.status === 'open' && p.unrealized_pnl != null && (
+            <span className={pnlClass(p.unrealized_pnl)}>
+              {formatPnl(p.unrealized_pnl)}
+            </span>
+          )}
           <span
             className="ml-auto text-[10px] text-neutral-500"
             title={formatUTC(p.opened_at)}

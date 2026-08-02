@@ -525,6 +525,105 @@ def test_get_position_includes_polymarket_url_when_catalogued(env) -> None:
     assert body["polymarket_url"] == "https://polymarket.com/event/iran-2027"
 
 
+def _book(token_id: str, *, bids: list[tuple[float, float]]):
+    from openpoly.markets.models import OrderBook
+
+    return OrderBook(token_id=token_id, ts=100.0, bids=bids, asks=[])
+
+
+def test_get_position_unrealized_pnl_when_open_with_book_gain(env) -> None:
+    """Open position, live book has a better bid than entry → positive
+    mark-to-market P&L, marked at the level-1 bid (not mid/ask)."""
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.store import MarketStore
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")  # avg_entry_price=0.42, qty=20.0
+    saved_store = msm.store
+    try:
+        fresh = MarketStore()
+        fresh.set_order_books([_book("ty1", bids=[(0.50, 100.0), (0.49, 50.0)])])
+        msm.store = fresh
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["unrealized_pnl"] == pytest.approx((0.50 - 0.42) * 20.0)
+
+
+def test_get_position_unrealized_pnl_when_open_with_book_loss(env) -> None:
+    """Bid below entry → negative unrealized P&L."""
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.store import MarketStore
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    saved_store = msm.store
+    try:
+        fresh = MarketStore()
+        fresh.set_order_books([_book("ty1", bids=[(0.30, 100.0)])])
+        msm.store = fresh
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["unrealized_pnl"] == pytest.approx((0.30 - 0.42) * 20.0)
+
+
+def test_get_position_unrealized_pnl_null_when_no_book(env) -> None:
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.store import MarketStore
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    saved_store = msm.store
+    try:
+        msm.store = MarketStore()  # no order books at all
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["unrealized_pnl"] is None
+
+
+def test_get_position_unrealized_pnl_null_when_closed(env) -> None:
+    """Even if a live book exists, a closed position reports None — use
+    realized_pnl instead."""
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.store import MarketStore
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    store.close_position(
+        h.position_id, sell_price=0.55, ts=200.0,
+        close_reason="take_profit", trigger="take_profit",
+    )
+    saved_store = msm.store
+    try:
+        fresh = MarketStore()
+        fresh.set_order_books([_book("ty1", bids=[(0.55, 100.0)])])
+        msm.store = fresh
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["unrealized_pnl"] is None
+    assert body["realized_pnl"] is not None
+
+
+def test_list_positions_includes_unrealized_pnl(env) -> None:
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.store import MarketStore
+
+    store, client, _factory = env
+    _open(store, "m1", "yes", "ty1", ts=100.0)
+    saved_store = msm.store
+    try:
+        fresh = MarketStore()
+        fresh.set_order_books([_book("ty1", bids=[(0.50, 100.0)])])
+        msm.store = fresh
+        positions = client.get("/api/positions").json()["positions"]
+    finally:
+        msm.store = saved_store
+    assert positions[0]["unrealized_pnl"] == pytest.approx((0.50 - 0.42) * 20.0)
+
+
 def test_get_position_polymarket_url_null_when_not_catalogued(env) -> None:
     from openpoly.markets.manager import manager as msm
     from openpoly.markets.store import MarketStore

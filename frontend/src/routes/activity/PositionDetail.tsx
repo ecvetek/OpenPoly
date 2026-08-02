@@ -138,6 +138,11 @@ export function PositionDetail() {
             {formatPnl(p.realized_pnl)}
           </span>
         )}
+        {p.status === 'open' && p.unrealized_pnl != null && (
+          <span className={pnlClass(p.unrealized_pnl)}>
+            {formatPnl(p.unrealized_pnl)}
+          </span>
+        )}
         <span
           className="ml-auto text-neutral-600 text-[10px]"
           title={formatUTC(p.opened_at)}

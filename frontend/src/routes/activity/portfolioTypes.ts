@@ -62,6 +62,11 @@ export type PositionRecord = {
   // Only /api/positions/{id} populates this; null while open or if the
   // position closed before the exit_decision persistence rollout.
   exit_decision?: PositionExitDecision | null
+  // Mark-to-market P&L for an OPEN position (marked at the live level-1
+  // bid) — the "if I closed this right now" number. Always null while
+  // closed (use realized_pnl instead), and null if there's no live order
+  // book yet for the token.
+  unrealized_pnl?: number | null
 }
 
 export type Fill = {

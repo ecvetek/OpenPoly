@@ -25,6 +25,7 @@ from openpoly.markets.manager import manager as market_source_manager
 from openpoly.markets.models import Market, polymarket_url
 from openpoly.portfolio import PortfolioStore
 from openpoly.portfolio.equity import build_equity_curve
+from openpoly.portfolio.models import PositionRecord
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -51,10 +52,10 @@ def list_positions(
     """Recent positions (open + closed), newest first.
 
     Each row is augmented with ``market_question`` + ``analyzer_decisions``
-    (same shape and fallback semantics as ``/positions/{id}`` — see that
-    route's docstring). Card-style UI relies on these being available
-    list-wide so it can render question / rationale without fanning out to
-    /positions/{id} per row.
+    + ``unrealized_pnl`` (same shape and fallback semantics as
+    ``/positions/{id}`` — see that route's docstring). Card-style UI relies
+    on these being available list-wide so it can render question / rationale
+    / live P&L without fanning out to /positions/{id} per row.
     """
     rows = store.list_positions(_clamp(limit))
     positions: list[dict[str, Any]] = []
@@ -66,6 +67,7 @@ def list_positions(
         news_id = store.news_id_for_position(record.id)
         body["news_id"] = news_id
         body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id, factory)
+        body["unrealized_pnl"] = _unrealized_pnl(record)
         positions.append(body)
     return {"positions": positions}
 
@@ -191,6 +193,11 @@ def get_position_by_id(
     - ``exit_decision``: the exit-monitor decision that actually closed
       this position (trigger/return_pct/peak_price/reason), or ``None``
       for an open position or one closed before persistence went live.
+    - ``unrealized_pnl``: "if I closed this right now" P&L for an **open**
+      position, marked at the live level-1 bid (same convention the exit
+      monitor uses to evaluate stop-loss/take-profit) — ``None`` while
+      closed (use ``realized_pnl`` instead), or if there's no live order
+      book for the token yet.
     """
     record = store.get_position(position_id)
     if record is None:
@@ -206,6 +213,7 @@ def get_position_by_id(
     body["news"] = _lookup_news_summary(news_id, factory)
     body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id, factory)
     body["exit_decision"] = _lookup_exit_decision(position_id, factory)
+    body["unrealized_pnl"] = _unrealized_pnl(record)
     return body
 
 
@@ -312,6 +320,24 @@ def _lookup_exit_decision(
         "peak_price": row.peak_price,
         "ts": row.ts,
     }
+
+
+def _unrealized_pnl(record: PositionRecord) -> float | None:
+    """Mark-to-market P&L for an open position — what closing it right now
+    would realize, marked at the live level-1 bid. Same convention
+    ``ExitMonitor._evaluate`` uses to decide stop-loss/take-profit
+    (openpoly/runtime/exit_monitor.py), not ``build_equity_curve``'s
+    persisted-snapshot hold-last mark (which is for historical
+    reconstruction, not a live single-position read).
+
+    ``None`` for a closed position (use ``realized_pnl`` instead), or when
+    there's no live order book yet for the token / it has no bids."""
+    if record.status != "open":
+        return None
+    book = market_source_manager.store.get_order_book(record.token_id)
+    if book is None or book.best_bid is None:
+        return None
+    return (book.best_bid - record.avg_entry_price) * record.qty
 
 
 @router.get("/portfolio/equity")
