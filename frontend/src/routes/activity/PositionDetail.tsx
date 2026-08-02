@@ -120,9 +120,9 @@ export function PositionDetail() {
       </div>
 
       {/* PD3+PD5: analyzer rationale block (LLM's stated reason for the
-         decision). Empty list when the analyzer_log ring has evicted the
-         original call — rendered as "unavailable" so the operator knows
-         it's a data-retention gap, not a system bug. */}
+         decision). Empty list when no persisted analyzer_call row matches
+         this position's news_id — rendered as "unavailable" rather than an
+         error. */}
       <AnalyzerRationaleBlock decisions={p.analyzer_decisions ?? []} />
 
       <div className="rounded border border-neutral-800 p-3">

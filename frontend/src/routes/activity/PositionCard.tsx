@@ -137,7 +137,8 @@ export function PositionCard({ p }: { p: PositionRecord }) {
       {/* Footer: LLM rationale — OUTSIDE the Link so its toggle buttons
           don't get hijacked by navigation. Rendered whenever the backend
           provided the field (even as []), so the "unavailable" fallback
-          surfaces when the analyzer_log ring has evicted the call. */}
+          surfaces when no persisted analyzer_call row matches this
+          position's news_id. */}
       {p.analyzer_decisions !== undefined && (
         <>
           <hr className="border-neutral-800" />

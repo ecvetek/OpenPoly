@@ -7,9 +7,12 @@
  * thing N times collapses to one row with a ×N count. Newest group is
  * expanded by default; older groups hide behind "Show N earlier attempts".
  *
- * Empty list (decisions.length === 0) → "unavailable" fallback that tells
- * the operator this is a data-retention gap (ring buffer evicted the call),
- * not a system bug.
+ * Empty list (decisions.length === 0) → "unavailable" fallback. Analyzer
+ * calls are persisted to the DB (survive restarts), so this means: no
+ * news_id linkage on this position (paper/manual open), the analyzer never
+ * reached verdict=ok for that news_id, or the position predates the
+ * persistence rollout (its analyzer call only ever lived in the in-memory
+ * ring, which has since been recycled).
  */
 import { useMemo, useState } from 'react'
 import type { AnalyzerDecision } from './portfolioTypes'
@@ -83,9 +86,10 @@ export function AnalyzerRationaleBlock({
       <div className="rounded border border-neutral-800/70 bg-neutral-950 p-3 text-[11px] text-neutral-500 leading-relaxed">
         <div className="text-neutral-400 mb-0.5">Analyzer rationale</div>
         <div>
-          Unavailable — the LLM call that opened this position has been evicted
-          from the in-memory analyzer log (retains only the most recent ~200
-          analyzer calls; persist-to-DB is a planned follow-up).
+          Unavailable — no persisted analyzer call matches this position.
+          Either it predates DB persistence going live, it has no news
+          linkage (paper/manual open), or the analyzer never reached
+          verdict=ok for it.
         </div>
       </div>
     )
