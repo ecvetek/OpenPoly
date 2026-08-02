@@ -19,7 +19,7 @@ export type NewsItem = {
   news_id: string
   content: string
   urgency: Urgency
-  sentiment: number | null
+  sentiment: string | null
   published_at: number
   received_at: number
 }

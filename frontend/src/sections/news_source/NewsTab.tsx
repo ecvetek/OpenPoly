@@ -9,8 +9,8 @@ import { formatRelativeAgo, formatUTC } from './time'
 
 const POLL_MS = 5000
 
-function fmtSentiment(v: number | null): string {
-  return v === null ? '—' : v.toFixed(2)
+function fmtSentiment(v: string | null): string {
+  return v === null ? '—' : v
 }
 
 export function NewsSourceNewsTab() {

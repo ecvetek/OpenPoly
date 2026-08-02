@@ -101,9 +101,10 @@ class LLMClient:
         """
         client = self._ensure_client()
         tool_name = str(tool["name"])
-        # temperature is rejected by claude-opus-4-7; omit it for that model.
+        # temperature is rejected/deprecated by some model ids; omit it for those.
+        _NO_TEMPERATURE_MODELS = {"claude-opus-4-7", "claude-sonnet-5"}
         extra: dict[str, Any] = (
-            {} if self._model == "claude-opus-4-7" else {"temperature": self._temperature}
+            {} if self._model in _NO_TEMPERATURE_MODELS else {"temperature": self._temperature}
         )
 
         last_error: str | None = None
