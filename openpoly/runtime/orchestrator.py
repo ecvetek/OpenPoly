@@ -422,11 +422,11 @@ class PipelineOrchestrator:
                 result = await asyncio.to_thread(
                     self._executor.execute_buy, intent, news_id=item.id, ts=ts
                 )
+                position_id = result.position_id
                 if result.filled:
                     fill_status = "filled"
                     fill_price = result.price
                     fill_qty = result.qty
-                    position_id = result.position_id
                 else:
                     fill_status = result.skip_reason
             except Exception as exc:  # noqa: BLE001 — DB write may raise

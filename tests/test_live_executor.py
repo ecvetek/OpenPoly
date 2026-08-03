@@ -197,7 +197,7 @@ def test_buy_market_not_in_catalog_skips(store) -> None:
 def test_buy_duplicate_position_skips(store) -> None:
     m = _market("m1")
     _populate(m)
-    store.open_position(
+    held = store.open_position(
         market_id="m1",
         side="yes",
         token_id=m.yes_token_id,
@@ -211,6 +211,7 @@ def test_buy_duplicate_position_skips(store) -> None:
     le = LiveExecutor(portfolio=store, clob_client=clob)
     r = le.execute_buy(_intent(), news_id="n", ts=100.0)
     assert r.filled is False and r.skip_reason == "position_exists"
+    assert r.position_id == held.position_id
     assert clob.posted == []
 
 

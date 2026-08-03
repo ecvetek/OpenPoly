@@ -69,8 +69,9 @@ class PaperExecutor:
         if not book.asks:
             return ExecResult.skip("no_ask_liquidity")
 
-        if self._store.get_open_position(intent.market_id, intent.side) is not None:
-            return ExecResult.skip("position_exists")
+        existing = self._store.get_open_position(intent.market_id, intent.side)
+        if existing is not None:
+            return ExecResult.skip("position_exists", position_id=existing.position_id)
 
         ask_price, ask_size = book.asks[0]
         qty = min(intent.qty, ask_size)

@@ -232,8 +232,9 @@ class LiveExecutor:
         if token_id is None:
             return ExecResult.skip("no_token")
 
-        if self._store.get_open_position(intent.market_id, intent.side) is not None:
-            return ExecResult.skip("position_exists")
+        existing = self._store.get_open_position(intent.market_id, intent.side)
+        if existing is not None:
+            return ExecResult.skip("position_exists", position_id=existing.position_id)
 
         # Quantize qty + check min notional against server rules verified
         # 2026-05-24. Both are pre-flight: cheaper to skip locally than to

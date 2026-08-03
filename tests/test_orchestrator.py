@@ -168,10 +168,12 @@ class FakeExecutor:
         *,
         filled: bool = True,
         skip_reason: str = "skipped",
+        skip_position_id: int | None = None,
         raise_exc: Exception | None = None,
     ) -> None:
         self._filled = filled
         self._skip_reason = skip_reason
+        self._skip_position_id = skip_position_id
         self._raise = raise_exc
         self.call_count = 0
 
@@ -181,7 +183,7 @@ class FakeExecutor:
             raise self._raise
         if self._filled:
             return ExecResult.ok(price=0.43, qty=intent.qty, position_id=1)
-        return ExecResult.skip(self._skip_reason)
+        return ExecResult.skip(self._skip_reason, position_id=self._skip_position_id)
 
 
 class _BlockingExecutor:
@@ -585,9 +587,12 @@ async def test_entry_raises_logs_error() -> None:
 
 
 async def test_entry_fill_skipped_records_skip_reason() -> None:
-    # Section decided ok, but the executor skipped (e.g. position already open).
+    # Section decided ok, but the executor skipped (e.g. position already open) —
+    # the skip still carries the blocking position's id through.
     orch, _, _, e_log = make_orchestrator(
-        executor=FakeExecutor(filled=False, skip_reason="position_exists")
+        executor=FakeExecutor(
+            filled=False, skip_reason="position_exists", skip_position_id=49
+        )
     )
     await orch.start()
     try:
@@ -599,7 +604,7 @@ async def test_entry_fill_skipped_records_skip_reason() -> None:
     assert e_entry.verdict == "ok"  # the decision itself was ok
     assert e_entry.fill_status == "position_exists"
     assert e_entry.fill_price is None
-    assert e_entry.position_id is None
+    assert e_entry.position_id == 49
 
 
 async def test_executor_raises_logs_error() -> None:
