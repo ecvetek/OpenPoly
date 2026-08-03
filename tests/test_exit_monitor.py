@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 
@@ -108,6 +109,31 @@ class _FakeExecutor:
         return self._result or ExecResult.ok(
             price=0.55, qty=position.qty, position_id=position.position_id
         )
+
+
+class _BlockingExecutor:
+    """Blocks in execute_sell() (on a real threading.Event) until released —
+    proves _tick_loop offloads _tick_once to a worker thread via
+    asyncio.to_thread (D20), not run inline (a live-broker order submit +
+    fill poll would otherwise stall the event loop for the whole tick)."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def execute_sell(
+        self,
+        position: HeldPosition,
+        *,
+        close_reason: str,
+        ts: float,
+        trigger: str | None,
+    ) -> ExecResult:
+        self.calls += 1
+        self.started.set()
+        self.release.wait(timeout=5)
+        return ExecResult.ok(price=0.55, qty=position.qty, position_id=position.position_id)
 
 
 def _monitor(portfolio: _FakePortfolio, executor: _FakeExecutor) -> ExitMonitor:
@@ -301,6 +327,33 @@ async def test_stop_before_start_is_safe() -> None:
     m = _monitor(_FakePortfolio([]), _FakeExecutor())
     await m.stop()  # never started
     assert m.state == "stopped"
+
+
+async def test_tick_loop_offloads_slow_execute_sell_without_blocking() -> None:
+    """A slow execute_sell (e.g. a live-broker order submit + fill poll) must
+    not stall the event loop — _tick_loop offloads _tick_once via
+    asyncio.to_thread specifically so other concurrently-scheduled coroutines
+    keep making progress during it (D20)."""
+    market_source_manager.store.set_order_books([_book("t1", bid=0.55)])
+    executor = _BlockingExecutor()
+    m = _monitor(_FakePortfolio([_held(1, "t1", avg=0.40)]), executor)  # type: ignore[arg-type]
+    await m.start()
+    try:
+        await asyncio.to_thread(executor.started.wait, 5)
+
+        # If _tick_once ran inline on the event loop, this concurrently
+        # scheduled sleep loop could never make progress until it returned.
+        ticks = 0
+        for _ in range(5):
+            await asyncio.wait_for(asyncio.sleep(0.01), timeout=1)
+            ticks += 1
+        assert ticks == 5
+
+        executor.release.set()
+    finally:
+        executor.release.set()
+        await m.stop()
+    assert executor.calls == 1
 
 
 # ---------- peak tracking ----------

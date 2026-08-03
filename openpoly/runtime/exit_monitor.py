@@ -207,7 +207,7 @@ class ExitMonitor:
     async def _tick_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self._tick_once()
+                await asyncio.to_thread(self._tick_once)
             except Exception:  # noqa: BLE001 — the loop must survive any tick error
                 logger.exception("exit monitor: tick failed")
             # Cooperative yield, then sleep the interval — waking early on stop.
@@ -219,9 +219,11 @@ class ExitMonitor:
 
     def _tick_once(self) -> None:
         """One sweep — evaluate every open position. Sync; tests drive it
-        directly. Records tick telemetry (open / blocked counts + timestamp);
-        within-threshold + no-order-book holds no longer write a log entry —
-        only ok / error closes land in exit_log."""
+        directly, and ``_tick_loop`` runs it via ``asyncio.to_thread`` so a
+        blocking live-executor sell doesn't stall the event loop for the
+        whole tick. Records tick telemetry (open / blocked counts +
+        timestamp); within-threshold + no-order-book holds no longer write a
+        log entry — only ok / error closes land in exit_log."""
         if self._portfolio is None:
             return
         ts = time.time()

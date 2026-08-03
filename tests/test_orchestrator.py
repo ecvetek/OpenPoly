@@ -184,6 +184,24 @@ class FakeExecutor:
         return ExecResult.skip(self._skip_reason)
 
 
+class _BlockingExecutor:
+    """Blocks in execute_buy() (on a real threading.Event) until released —
+    proves _run_entry offloads the executor call to a worker thread via
+    asyncio.to_thread, not run inline (a live-broker order submit + fill poll
+    would otherwise stall the whole event loop for the trade's duration)."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.call_count = 0
+
+    def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult:
+        self.call_count += 1
+        self.started.set()
+        self.release.wait(timeout=5)
+        return ExecResult.ok(price=0.43, qty=intent.qty, position_id=1)
+
+
 def _item(news_id: str = "n1", urgency: str = "high") -> NewsItem:
     return NewsItem(
         id=news_id,
@@ -332,6 +350,34 @@ async def test_stop_logs_discarded_items_left_in_queue() -> None:
     assert [e.news_id for e in entries] == ["n1", "n2"]
     assert all(e.verdict == "error" for e in entries)
     assert all("discarded_at_shutdown" in (e.error or "") for e in entries)
+
+
+async def test_execute_buy_runs_off_event_loop_thread() -> None:
+    """The executor call in _run_entry must be offloaded (D20) — otherwise a
+    slow live-broker call (order submit + fill poll) would stall the entire
+    event loop, and any other concurrently-scheduled coroutine, for the
+    whole trade duration."""
+    executor = _BlockingExecutor()
+    orch, _, _, _ = make_orchestrator(executor=executor)
+    await orch.start()
+    try:
+        orch.enqueue(_item("n1"))
+        await asyncio.to_thread(executor.started.wait, 5)
+
+        # If execute_buy ran inline on the event loop, this concurrently
+        # scheduled sleep loop could never make progress until it returned.
+        ticks = 0
+        for _ in range(5):
+            await asyncio.wait_for(asyncio.sleep(0.01), timeout=1)
+            ticks += 1
+        assert ticks == 5
+
+        executor.release.set()
+        await _drain(orch)
+    finally:
+        executor.release.set()
+        await orch.stop()
+    assert executor.call_count == 1
 
 
 # ---------- happy path ----------
