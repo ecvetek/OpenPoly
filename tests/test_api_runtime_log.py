@@ -46,6 +46,8 @@ def _reset_exit_monitor_telemetry() -> None:
     exit_monitor._last_tick_at = None  # noqa: SLF001
     exit_monitor._last_tick_open = 0  # noqa: SLF001
     exit_monitor._last_tick_blocked = 0  # noqa: SLF001
+    exit_monitor._last_tick = None  # noqa: SLF001
+    exit_monitor._tick_events.clear()  # noqa: SLF001
 
 
 @pytest.fixture(autouse=True)

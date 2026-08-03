@@ -5,12 +5,21 @@
  * ledger that never gets evicted by skip churn. The tick heartbeat (last tick /
  * open / blocked) lives in the header so liveness is visible even when there
  * are no closes yet. Cross-reference a close with the position via ``position_id``.
+ *
+ * TickEventTimeline + TickHistogram below give per-sweep visibility on top of
+ * that: a started/stopped/tick_ok/tick_error event ring and a last-tick
+ * evaluated→closed reason-count breakdown — the exit-node equivalent of
+ * market_source's LiveTab EventTimeline / PollHistogram.
  */
+import { useState } from 'react'
+
 import { formatRelativeAgo, formatUTC } from '../news_source/time'
 import {
   useExitLogStore,
   type ExitLogEntry,
   type ExitLogResponse,
+  type LastTick,
+  type TickEvent,
   type Verdict,
 } from './logStore'
 
@@ -21,10 +30,18 @@ const VERDICT_COLOR: Record<Verdict, string> = {
   error: 'text-red-300',
 }
 
+const TICK_KIND_COLOR: Record<string, string> = {
+  started: 'text-emerald-300',
+  stopped: 'text-neutral-500',
+  tick_ok: 'text-sky-300',
+  tick_error: 'text-red-300',
+}
+
 export function ExitClosesTab() {
   const data = useExitLogStore((s) => s.data)
   const status = useExitLogStore((s) => s.status)
   const error = useExitLogStore((s) => s.error)
+  const [showAllTickEvents, setShowAllTickEvents] = useState(false)
 
   if (data === null) {
     return (
@@ -42,6 +59,12 @@ export function ExitClosesTab() {
         </div>
       )}
       <SummaryHeader data={data} />
+      <TickEventTimeline
+        events={data.tick_events ?? []}
+        showAll={showAllTickEvents}
+        onToggleAll={() => setShowAllTickEvents((v) => !v)}
+      />
+      <TickHistogram lastTick={data.last_tick} />
       <ClosesTimeline entries={data.entries} />
     </div>
   )
@@ -89,6 +112,97 @@ function SummaryHeader({ data }: { data: ExitLogResponse }) {
       >
         {data.last_at ? formatRelativeAgo(data.last_at) : '—'}
       </span>
+    </div>
+  )
+}
+
+function TickEventTimeline({
+  events,
+  showAll,
+  onToggleAll,
+}: {
+  events: TickEvent[]
+  showAll: boolean
+  onToggleAll: () => void
+}) {
+  const sliced = showAll ? events : events.slice(-20)
+  const ordered = [...sliced].reverse() // newest first
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
+          Tick events
+        </h3>
+        {events.length > 20 && (
+          <button
+            type="button"
+            onClick={onToggleAll}
+            className="text-[10px] text-neutral-500 hover:text-neutral-300"
+          >
+            {showAll ? 'Show last 20' : `Show all ${events.length}`}
+          </button>
+        )}
+      </div>
+      {ordered.length === 0 ? (
+        <div className="text-[11px] text-neutral-600">No ticks yet.</div>
+      ) : (
+        <ol className="flex flex-col gap-0.5 font-mono text-[10px]">
+          {ordered.map((e, i) => (
+            <li key={`${e.ts}-${i}`} className="flex gap-2">
+              <span
+                className="text-neutral-600 shrink-0 w-[60px]"
+                title={formatUTC(e.ts)}
+              >
+                {formatRelativeAgo(e.ts)}
+              </span>
+              <span
+                className={`shrink-0 w-[70px] ${
+                  TICK_KIND_COLOR[e.kind] ?? 'text-neutral-300'
+                }`}
+              >
+                {e.kind}
+              </span>
+              <span className="text-neutral-400 truncate">{e.detail ?? ''}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+function TickHistogram({ lastTick }: { lastTick: LastTick | null }) {
+  return (
+    <div>
+      <h3 className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500 mb-1">
+        Last tick
+      </h3>
+      {!lastTick ? (
+        <div className="text-[11px] text-neutral-600">No tick yet.</div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          <div className="text-[11px] text-neutral-300">
+            <span className="font-medium text-neutral-100">{lastTick.evaluated}</span>
+            {' evaluated → '}
+            <span className="font-medium text-emerald-300">{lastTick.closed}</span>
+            {' closed'}
+          </div>
+          {Object.keys(lastTick.reason_counts).length > 0 && (
+            <ol className="flex flex-col gap-0.5 font-mono text-[10px]">
+              {Object.entries(lastTick.reason_counts)
+                .sort((a, b) => b[1] - a[1])
+                .map(([reason, n]) => (
+                  <li key={reason} className="flex gap-2">
+                    <span className="text-neutral-500 shrink-0 w-[150px] truncate">
+                      {reason}
+                    </span>
+                    <span className="text-neutral-300">{n}</span>
+                  </li>
+                ))}
+            </ol>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -108,6 +108,12 @@ class SectionLogResponse(BaseModel):
     last_tick_at: float | None = None
     open_positions: int | None = None
     blocked: int | None = None
+    # Exit-only: the last sweep's evaluated/closed/reason_counts breakdown
+    # (mirrors market_source's last_poll) and a bounded started/stopped/
+    # tick_ok/tick_error event ring (mirrors market_source's events) — see
+    # ExitMonitor.last_tick / ExitMonitor.tick_events.
+    last_tick: dict[str, Any] | None = None
+    tick_events: list[dict[str, Any]] | None = None
 
 
 @router.get("/embedding/log", response_model=SectionLogResponse)
@@ -228,6 +234,8 @@ def get_exit_log(
         last_tick_at=exit_monitor.last_tick_at,
         open_positions=exit_monitor.open_positions,
         blocked=exit_monitor.blocked,
+        last_tick=exit_monitor.last_tick,
+        tick_events=exit_monitor.tick_events(limit=limit),
     )
 
 

@@ -27,8 +27,10 @@ import contextlib
 import json
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
-from typing import Literal, Protocol
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -51,8 +53,50 @@ from openpoly.sections.exit.threshold_v0 import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_TICK_INTERVAL_SECONDS = 30  # matches ThresholdExitConfig's own default
+TICK_EVENT_RING_MAXLEN = 200  # mirrors markets.manager.EVENT_RING_MAXLEN
 
 State = Literal["stopped", "running"]
+
+TickEventKind = Literal["started", "stopped", "tick_ok", "tick_error"]
+
+
+@dataclass(frozen=True)
+class TickEvent:
+    """One sweep-level lifecycle/heartbeat event — the "does this node
+    actually execute" timeline, parallel to MarketSourceManager's LogEvent
+    ring. One entry per tick (not per position), so it stays bounded
+    regardless of how many positions are open."""
+
+    ts: float
+    kind: TickEventKind
+    detail: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"ts": self.ts, "kind": self.kind, "detail": self.detail}
+
+
+@dataclass(frozen=True)
+class TickSummary:
+    """The last sweep's outcome breakdown — parallel to markets.store's
+    PollSummary. ``reason_counts`` keys are ``no_order_book``,
+    ``within_thresholds``, ``stop_loss``, ``peak_drawdown``, ``take_profit``,
+    ``error`` — whichever occurred this tick."""
+
+    ts: float
+    evaluated: int
+    closed: int
+    reason_counts: dict[str, int]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ts": self.ts,
+            "evaluated": self.evaluated,
+            "closed": self.closed,
+            "reason_counts": dict(self.reason_counts),
+        }
+
+
+_CLOSE_REASONS = ("stop_loss", "peak_drawdown", "take_profit")
 
 
 class _ExitSection(Protocol):
@@ -115,6 +159,13 @@ class ExitMonitor:
         self._last_tick_at: float | None = None
         self._last_tick_open: int = 0
         self._last_tick_blocked: int = 0
+        # Per-tick evaluated/closed/reason_counts breakdown + a bounded
+        # started/stopped/tick_ok/tick_error event ring — the "last poll"
+        # histogram and "events" timeline equivalents from market_source's
+        # Live tab, surfaced via /api/exit/log so the Closes tab can show
+        # skips and closes without logging one entry per position per tick.
+        self._last_tick: TickSummary | None = None
+        self._tick_events: deque[TickEvent] = deque(maxlen=TICK_EVENT_RING_MAXLEN)
         # Persist hook — optional, set by main.py's lifespan once the DB is
         # up. None means "not wired yet"; append still happens to exit_log
         # (the in-memory ring) regardless.
@@ -139,6 +190,23 @@ class ExitMonitor:
         """Positions on the last sweep that could not be evaluated (no order
         book — market resolved or data gap; their stop-loss can't fire)."""
         return self._last_tick_blocked
+
+    @property
+    def last_tick(self) -> dict[str, Any] | None:
+        """The last sweep's evaluated/closed/reason_counts breakdown, or
+        None before the first tick."""
+        return self._last_tick.to_dict() if self._last_tick is not None else None
+
+    def tick_events(self, limit: int = TICK_EVENT_RING_MAXLEN) -> list[dict[str, Any]]:
+        """Oldest-first tick events, capped at ``limit`` — same slicing
+        contract as SectionLogStore.entries()."""
+        events = list(self._tick_events)
+        if limit is not None and 0 <= limit < len(events):
+            events = events[-limit:]
+        return [e.to_dict() for e in events]
+
+    def _record_tick_event(self, kind: TickEventKind, detail: str | None = None) -> None:
+        self._tick_events.append(TickEvent(ts=time.time(), kind=kind, detail=detail))
 
     def configure(self, portfolio: PortfolioStore) -> None:
         """Inject the PortfolioStore — the FastAPI lifespan calls this once the
@@ -191,6 +259,7 @@ class ExitMonitor:
         # this module singleton may be start()ed across distinct loops (tests).
         self._stop = asyncio.Event()
         self._task = asyncio.create_task(self._tick_loop())
+        self._record_tick_event("started")
 
     async def stop(self) -> None:
         if self._task is None:
@@ -205,6 +274,7 @@ class ExitMonitor:
         finally:
             self._task = None
             self._state = "stopped"
+            self._record_tick_event("stopped")
 
     # ---------- loop ----------
 
@@ -226,43 +296,63 @@ class ExitMonitor:
         directly, and ``_tick_loop`` runs it via ``asyncio.to_thread`` so a
         blocking live-executor sell doesn't stall the event loop for the
         whole tick. Records tick telemetry (open / blocked counts +
-        timestamp); within-threshold + no-order-book holds no longer write a
-        log entry — only ok / error closes land in exit_log."""
+        timestamp) plus a ``last_tick`` reason-count breakdown and a
+        ``tick_ok``/``tick_error`` event — within-threshold and no-order-book
+        holds no longer write a log entry to ``exit_log`` (only ok / error
+        closes do), but they DO count towards ``last_tick.reason_counts``."""
         if self._portfolio is None:
             return
         ts = time.time()
-        catalog = market_source_manager.store
-        opens = self._portfolio.get_open_positions()
-        # A position can close via a path other than this monitor's own
-        # _evaluate() below (SettlementMonitor, manual close, reconciliation)
-        # — self-heal any now-stale peak entry here rather than coupling to
-        # those other monitors, which deliberately stay independent of this
-        # one (see module docstrings). Otherwise _peak grows unboundedly for
-        # the life of the process, since settlement is the normal way most
-        # positions eventually close.
-        open_ids = {held.position_id for held in opens}
-        for stale_id in set(self._peak) - open_ids:
-            del self._peak[stale_id]
-        blocked = 0
-        for held in opens:
-            try:
-                if self._evaluate(held, catalog, ts):
-                    blocked += 1
-            except Exception as exc:  # noqa: BLE001 — one bad position must not abort the sweep
-                logger.exception("exit monitor: position %d failed", held.position_id)
-                self._log(held, ts, verdict="error", error=repr(exc)[:200])
+        try:
+            catalog = market_source_manager.store
+            opens = self._portfolio.get_open_positions()
+            # A position can close via a path other than this monitor's own
+            # _evaluate() below (SettlementMonitor, manual close,
+            # reconciliation) — self-heal any now-stale peak entry here rather
+            # than coupling to those other monitors, which deliberately stay
+            # independent of this one (see module docstrings). Otherwise
+            # _peak grows unboundedly for the life of the process, since
+            # settlement is the normal way most positions eventually close.
+            open_ids = {held.position_id for held in opens}
+            for stale_id in set(self._peak) - open_ids:
+                del self._peak[stale_id]
+            reason_counts: dict[str, int] = {}
+            for held in opens:
+                try:
+                    outcome = self._evaluate(held, catalog, ts)
+                except Exception as exc:  # noqa: BLE001 — one bad position must not abort the sweep
+                    logger.exception("exit monitor: position %d failed", held.position_id)
+                    self._log(held, ts, verdict="error", error=repr(exc)[:200])
+                    outcome = "error"
+                reason_counts[outcome] = reason_counts.get(outcome, 0) + 1
+        except Exception as exc:  # noqa: BLE001 — surfaced as a tick_error event, then re-raised so _tick_loop still logs it
+            self._record_tick_event("tick_error", detail=str(exc)[:200])
+            raise
+
+        closed = sum(reason_counts.get(k, 0) for k in _CLOSE_REASONS)
+        blocked = reason_counts.get("no_order_book", 0)
         self._last_tick_at = ts
         self._last_tick_open = len(opens)
         self._last_tick_blocked = blocked
+        self._last_tick = TickSummary(
+            ts=ts, evaluated=len(opens), closed=closed, reason_counts=reason_counts
+        )
+        detail = f"{len(opens)} evaluated → {closed} closed"
+        if blocked:
+            detail += f", {blocked} blocked"
+        self._record_tick_event("tick_ok", detail=detail)
 
-    def _evaluate(self, held: HeldPosition, catalog: MarketStore, ts: float) -> bool:
-        """Evaluate one position. Returns True when it could not be evaluated
-        (no order book — counted as ``blocked``); False when held within
-        thresholds or closed. ok / error closes are logged; within-threshold
-        and no-order-book holds are not (see tick telemetry)."""
+    def _evaluate(self, held: HeldPosition, catalog: MarketStore, ts: float) -> str:
+        """Evaluate one position. Returns the outcome reason key tallied into
+        ``last_tick.reason_counts``: ``no_order_book`` (couldn't evaluate),
+        ``within_thresholds`` (held, no trigger), a close trigger
+        (``stop_loss``/``peak_drawdown``/``take_profit``), or ``error`` (close
+        attempted but the sell didn't fill). Only ok / error closes are
+        logged to ``exit_log`` — within-threshold and no-order-book holds are
+        not (see tick telemetry)."""
         book = catalog.get_order_book(held.token_id)
         if book is None or not book.bids:
-            return True
+            return "no_order_book"
         current_price = book.bids[0][0]
         # Monotone-increasing per-position peak. New open positions seed at
         # current_price; bootstrap_peaks may have seeded a higher one already.
@@ -284,7 +374,7 @@ class ExitMonitor:
             # Held within thresholds — no close, no log entry (peak already
             # tracked above; tick telemetry records that this position was
             # evaluated).
-            return False
+            return "within_thresholds"
 
         intent = out.payload
         result = self._executor.execute_sell(
@@ -306,19 +396,19 @@ class ExitMonitor:
                 realized_pnl=realized,
                 reason=intent.trigger,
             )
-        else:
-            # The section decided to close but the fill did not land — a
-            # position that should be closed is still open: surface as error.
-            self._log(
-                held,
-                ts,
-                verdict="error",
-                trigger=intent.trigger,
-                return_pct=return_pct,
-                peak_price=peak_price,
-                error=f"sell not filled: {result.skip_reason}",
-            )
-        return False
+            return intent.trigger
+        # The section decided to close but the fill did not land — a
+        # position that should be closed is still open: surface as error.
+        self._log(
+            held,
+            ts,
+            verdict="error",
+            trigger=intent.trigger,
+            return_pct=return_pct,
+            peak_price=peak_price,
+            error=f"sell not filled: {result.skip_reason}",
+        )
+        return "error"
 
     def _log(
         self,

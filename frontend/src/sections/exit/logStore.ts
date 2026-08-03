@@ -9,6 +9,19 @@ import { create } from 'zustand'
 
 export type Verdict = 'ok' | 'skip' | 'fail_open' | 'error'
 
+export type TickEvent = {
+  ts: number
+  kind: string
+  detail: string | null
+}
+
+export type LastTick = {
+  ts: number
+  evaluated: number
+  closed: number
+  reason_counts: Record<string, number>
+}
+
 export type ExitLogEntry = {
   ts: number
   position_id: number
@@ -35,6 +48,10 @@ export type ExitLogResponse = {
   last_tick_at: number | null
   open_positions: number | null
   blocked: number | null
+  // Last-tick evaluated/closed/reason_counts breakdown + tick event ring —
+  // mirrors market_source's last_poll / events.
+  last_tick: LastTick | null
+  tick_events: TickEvent[] | null
 }
 
 export type FetchStatus = 'idle' | 'loading' | 'ready' | 'error'
