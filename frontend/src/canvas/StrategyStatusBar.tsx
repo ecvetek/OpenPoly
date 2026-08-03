@@ -3,25 +3,10 @@
  * health of each source, and (when not ready) what still needs configuring
  * before Run is enabled. Sits directly under the top bar.
  */
+import { Dot } from '../components/Dot'
+import { ago } from '../lib/time'
 import { useRuntime, type Blocker } from './useRuntime'
 import { useCanvasUiStore } from './uiStore'
-
-function ago(ts: number | null): string {
-  if (!ts) return '—'
-  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts))
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  return `${Math.floor(s / 3600)}h`
-}
-
-function Dot({ color, pulse }: { color: string; pulse?: boolean }) {
-  return (
-    <span
-      className={`inline-block h-2 w-2 rounded-full ${pulse ? 'animate-pulse' : ''}`}
-      style={{ background: color }}
-    />
-  )
-}
 
 function BlockerChip({ b }: { b: Blocker }) {
   const setKeysOpen = useCanvasUiStore((s) => s.setKeysOpen)

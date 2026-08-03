@@ -316,6 +316,10 @@ _BALANCE_CACHE_TTL_SECONDS = 30.0
 # (fetched_at, payload) — one wallet, one slot. Keeps the frontend's poll from
 # hammering the CLOB / data-api; 30s staleness is fine for a display card.
 _balance_cache: tuple[float, dict] | None = None
+# (fetched_at, raw_balance) — just the collateral read, shared between this
+# route and the health check so a short health-poll interval doesn't force a
+# second CLOB round-trip on top of whatever this route already cached.
+_raw_balance_cache: tuple[float, int | None] | None = None
 
 
 class WalletBalanceResponse(BaseModel):
@@ -324,6 +328,28 @@ class WalletBalanceResponse(BaseModel):
     positions_value: float | None = None
     total: float | None = None
     ts: float | None = None
+
+
+async def get_wallet_balance_cached(
+    executor_: object, ttl_seconds: float = _BALANCE_CACHE_TTL_SECONDS
+) -> int | None:
+    """Cached raw USDC collateral balance (6-decimal integer units) via the
+    live executor's CLOB client. ``executor_`` is taken as a parameter
+    (rather than closing over the module-level singleton) so callers — e.g.
+    the health check — can inject a fake in tests.
+
+    ``None`` when no wallet/live executor is configured or the read fails —
+    same degrade-to-null contract as ``get_collateral_balance_raw`` itself.
+    """
+    global _raw_balance_cache
+    now = time.time()
+    if _raw_balance_cache is not None and now - _raw_balance_cache[0] < ttl_seconds:
+        return _raw_balance_cache[1]
+    # The collateral read is a sync CLOB network round-trip — offload it so a
+    # slow CLOB can't starve the event loop (docs/architecture/05).
+    raw = await asyncio.to_thread(executor_.get_collateral_balance_raw)
+    _raw_balance_cache = (now, raw)
+    return raw
 
 
 @router.get("/api/wallet/balance", response_model=WalletBalanceResponse)
@@ -344,9 +370,7 @@ async def get_wallet_balance() -> WalletBalanceResponse:
     if _balance_cache is not None and now - _balance_cache[0] < _BALANCE_CACHE_TTL_SECONDS:
         return WalletBalanceResponse(**_balance_cache[1])
 
-    # The collateral read is a sync CLOB network round-trip — offload it so a
-    # slow CLOB can't starve the event loop (docs/architecture/05).
-    raw = await asyncio.to_thread(executor.get_collateral_balance_raw)
+    raw = await get_wallet_balance_cached(executor)
     usdc = raw / 1e6 if raw is not None else None
 
     try:

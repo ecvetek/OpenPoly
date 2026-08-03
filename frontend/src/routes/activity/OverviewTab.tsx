@@ -5,6 +5,8 @@
  * is visible at a glance.
  */
 import { useState } from 'react'
+import { RefreshButton } from '../../components/RefreshButton'
+import { StatCard } from '../../components/StatCard'
 import { EquityChart } from './EquityChart'
 import { fetchEquity, type EquityResponse } from './equityClient'
 import { formatPnl, pnlClass } from './format'
@@ -137,7 +139,7 @@ export function OverviewTab() {
                 </button>
               ))}
             </div>
-            <ManualRefreshButton onClick={refetch} />
+            <RefreshButton onClick={refetch} title="Refresh chart" />
           </div>
         </div>
         {data.points.length === 0 ? (
@@ -148,72 +150,6 @@ export function OverviewTab() {
           <EquityChart points={data.points} />
         )}
       </div>
-    </div>
-  )
-}
-
-// Lives in the window/refresh controls row (above the chart) rather than
-// floating over the chart itself — an overlaid button there covered the
-// top-right price-axis labels.
-function ManualRefreshButton({ onClick }: { onClick: () => void }) {
-  const [spinning, setSpinning] = useState(false)
-
-  function handleClick() {
-    onClick()
-    setSpinning(true)
-    setTimeout(() => setSpinning(false), 500)
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={handleClick}
-      title="Refresh chart"
-      aria-label="Refresh chart"
-      className="rounded border border-neutral-700 p-1 text-neutral-500 hover:text-neutral-200"
-    >
-      <svg
-        viewBox="0 0 24 24"
-        width="12"
-        height="12"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        className={spinning ? 'animate-spin' : ''}
-      >
-        <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-        <path d="M21 3v6h-6" />
-      </svg>
-    </button>
-  )
-}
-
-function StatCard({
-  label,
-  value,
-  tone,
-  sub,
-}: {
-  label: string
-  value: string
-  tone: string
-  sub?: string
-}) {
-  return (
-    <div className="rounded border border-neutral-800 px-3 py-2.5">
-      <div className="text-[10px] uppercase tracking-wide text-neutral-500">
-        {label}
-      </div>
-      <div className={`mt-1 text-xl font-mono font-semibold ${tone}`}>
-        {value}
-      </div>
-      {sub !== undefined && (
-        <div className="mt-0.5 text-[10px] font-mono text-neutral-500">
-          {sub}
-        </div>
-      )}
     </div>
   )
 }

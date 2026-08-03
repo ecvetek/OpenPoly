@@ -21,6 +21,7 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI
 
 from openpoly.api.canvas_routes import router as canvas_router
+from openpoly.api.health_routes import router as health_router
 from openpoly.api.inspect_routes import router as inspect_router
 from openpoly.api.market_routes import router as market_router
 from openpoly.api.news_routes import router as news_router
@@ -279,6 +280,7 @@ app.include_router(portfolio_router)
 app.include_router(wallet_router)
 app.include_router(canvas_router)
 app.include_router(debug_router)
+app.include_router(health_router)
 
 _catalog_cache: list[CatalogEntry] | None = None
 

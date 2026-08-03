@@ -134,8 +134,9 @@ def test_response_never_includes_private_key(
 
 @pytest.fixture
 def balance_env(env: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    """env + reset the module-level balance cache between tests."""
+    """env + reset the module-level balance caches between tests."""
     monkeypatch.setattr(wallet_routes, "_balance_cache", None)
+    monkeypatch.setattr(wallet_routes, "_raw_balance_cache", None)
     return env
 
 

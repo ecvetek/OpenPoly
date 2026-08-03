@@ -8,6 +8,7 @@ import {
 import { AppShell } from './components/AppShell'
 import { CanvasPage } from './routes/CanvasPage'
 import { ActivityPage } from './routes/ActivityPage'
+import { HealthPage } from './routes/HealthPage'
 import { OverviewPage } from './routes/OverviewPage'
 import { PositionsTab } from './routes/activity/PositionsTab'
 import { NewsTab } from './routes/activity/NewsTab'
@@ -36,6 +37,7 @@ function App() {
             <Route path="positions/:positionId" element={<PositionDetail />} />
             <Route path="news" element={<NewsTab />} />
           </Route>
+          <Route path="health" element={<HealthPage />} />
           {/* "runs" / "portfolio" were earlier names for this tab; redirect
               any stale link. */}
           <Route path="runs" element={<Navigate to="/overview" replace />} />
