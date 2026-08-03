@@ -397,8 +397,14 @@ def _unrealized_pnl(record: PositionRecord) -> float | None:
 
 # The equity chart is windowed to bound its cost as order_book_snapshot
 # grows unboundedly over a long-running process's lifetime — see
-# openpoly.portfolio.equity's module docstring. 1 day.
-EQUITY_WINDOW_SECONDS = 86_400
+# openpoly.portfolio.equity's module docstring. User-selectable (frontend:
+# OverviewTab.tsx's WINDOW_OPTIONS); a query value outside this safelist
+# falls back to the default rather than erroring, matching this API's
+# existing permissive-clamp convention (SECTION_LOG_LIMIT_MAX etc.) — but a
+# safelist rather than a plain min/max clamp, since an unbounded window
+# would defeat the whole point of windowing.
+EQUITY_WINDOW_OPTIONS_DAYS: dict[int, int] = {1: 86_400, 7: 7 * 86_400, 30: 30 * 86_400}
+EQUITY_WINDOW_DEFAULT_DAYS = 1
 
 
 def _all_time_equity_summary(store: PortfolioStore) -> dict[str, Any]:
@@ -426,17 +432,21 @@ def _all_time_equity_summary(store: PortfolioStore) -> dict[str, Any]:
 
 @router.get("/portfolio/equity")
 def get_equity_curve(
+    window_days: int = EQUITY_WINDOW_DEFAULT_DAYS,
     store: PortfolioStore = Depends(get_portfolio_store),
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> dict[str, Any]:
-    """Equity chart (last ``EQUITY_WINDOW_SECONDS``) + all-time summary.
+    """Equity chart (``window_days``, default 1) + all-time summary.
 
     ``points`` is windowed to bound the reconstruction cost as
-    ``order_book_snapshot`` grows unboundedly over time; ``summary`` is
-    always all-time, computed via a separate cheap path — see
-    ``_all_time_equity_summary``. Response shape is unchanged from before
-    windowing was added."""
-    curve = build_equity_curve(factory, window_seconds=EQUITY_WINDOW_SECONDS)
+    ``order_book_snapshot`` grows unboundedly over time — ``window_days``
+    must be one of ``EQUITY_WINDOW_OPTIONS_DAYS``' keys, anything else
+    silently falls back to the default. ``summary`` is always all-time,
+    computed via a separate cheap path — see ``_all_time_equity_summary``."""
+    window_seconds = EQUITY_WINDOW_OPTIONS_DAYS.get(
+        window_days, EQUITY_WINDOW_OPTIONS_DAYS[EQUITY_WINDOW_DEFAULT_DAYS]
+    )
+    curve = build_equity_curve(factory, window_seconds=window_seconds)
     return {
         "points": [asdict(p) for p in curve.points],
         "summary": _all_time_equity_summary(store),

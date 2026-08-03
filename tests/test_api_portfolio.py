@@ -152,10 +152,13 @@ def test_equity_endpoint_summary_alltime_but_points_windowed(env) -> None:
     windowed curve's last point (which would silently drop it)."""
     import time
 
-    from openpoly.api.portfolio_routes import EQUITY_WINDOW_SECONDS
+    from openpoly.api.portfolio_routes import (
+        EQUITY_WINDOW_DEFAULT_DAYS,
+        EQUITY_WINDOW_OPTIONS_DAYS,
+    )
 
     store, client, _factory = env
-    old_ts = time.time() - EQUITY_WINDOW_SECONDS * 3
+    old_ts = time.time() - EQUITY_WINDOW_OPTIONS_DAYS[EQUITY_WINDOW_DEFAULT_DAYS] * 3
     h = store.open_position(
         market_id="m1",
         side="yes",
@@ -172,6 +175,58 @@ def test_equity_endpoint_summary_alltime_but_points_windowed(env) -> None:
     body = client.get("/api/portfolio/equity").json()
     assert body["summary"]["realized"] == pytest.approx(1.50)
     assert body["points"] == []
+
+
+def test_equity_endpoint_window_days_param_widens_the_chart(env) -> None:
+    """A position closed ~3 days ago falls outside the default 1-day window
+    (no points) but inside a 7-day window (has points) — proves window_days
+    actually reaches build_equity_curve, not just the default."""
+    import time
+
+    store, client, _factory = env
+    old_ts = time.time() - 3 * 86_400
+    h = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="ty1",
+        condition_id="0xc1",
+        price=0.40,
+        qty=10.0,
+        ts=old_ts,
+        news_id="n1",
+    )
+    store.close_position(
+        h.position_id, sell_price=0.55, ts=old_ts + 10, close_reason="take_profit"
+    )
+    assert client.get("/api/portfolio/equity?window_days=1").json()["points"] == []
+    assert client.get("/api/portfolio/equity?window_days=7").json()["points"] != []
+
+
+def test_equity_endpoint_unrecognized_window_days_falls_back_to_default(env) -> None:
+    """An out-of-safelist window_days must not be used verbatim as an
+    unbounded window — a value like 999 would defeat the whole point of
+    windowing if it reached build_equity_curve as 999 days."""
+    import time
+
+    store, client, _factory = env
+    old_ts = time.time() - 3 * 86_400
+    h = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="ty1",
+        condition_id="0xc1",
+        price=0.40,
+        qty=10.0,
+        ts=old_ts,
+        news_id="n1",
+    )
+    store.close_position(
+        h.position_id, sell_price=0.55, ts=old_ts + 10, close_reason="take_profit"
+    )
+    # 999 isn't in the safelist -> falls back to the 1-day default, so this
+    # position (closed 3 days ago) still produces no points, same as the
+    # default's own behavior in the sibling test above.
+    assert client.get("/api/portfolio/equity?window_days=999").json()["points"] == []
 
 
 # ---------- /api/positions/{id} ----------
