@@ -330,6 +330,63 @@ def test_sell_success_closes_position(store) -> None:
     assert len(clob.allowance_updates) >= 1
 
 
+def test_sell_quantizes_fractional_dust_qty_not_to_zero(store) -> None:
+    """A fractional-share position (normal after a partial fill or partial
+    close) must still be sellable. _quantize_sell_size floors to 4 decimals
+    — the server's real SELL precision — not to a whole share the way the
+    BUY-side quantizer would (the bug this fix closes: reusing that BUY
+    quantizer here made any qty below 1 share permanently unsellable)."""
+    m = _market("m1")
+    _populate(m, _book(m.yes_token_id, bid=0.55))
+    held = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id=m.yes_token_id,
+        condition_id=m.condition_id,
+        price=0.40,
+        qty=0.6234567,
+        ts=100.0,
+        news_id="n",
+    )
+    clob = _FakeClob(
+        order_response={
+            "success": True,
+            "orderID": "0xSELL",
+            "status": "matched",
+            "makingAmount": "0.6234",
+            "takingAmount": "0.343",
+            "transactionsHashes": ["0xSTX"],
+        }
+    )
+    le = LiveExecutor(portfolio=store, clob_client=clob)
+    r = le.execute_sell(held, close_reason="take_profit", ts=200.0)
+    assert clob.posted[0]["order_args"].size == pytest.approx(0.6234)
+    assert r.filled is True  # not permanently stranded
+
+
+def test_sell_below_4_decimal_floor_skips(store) -> None:
+    """Genuine dust (below even the 4-decimal SELL floor) still correctly
+    skips — this fix changes which precision the floor is measured at, not
+    whether a floor exists at all."""
+    m = _market("m1")
+    _populate(m, _book(m.yes_token_id, bid=0.55))
+    held = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id=m.yes_token_id,
+        condition_id=m.condition_id,
+        price=0.40,
+        qty=0.00001,
+        ts=100.0,
+        news_id="n",
+    )
+    clob = _FakeClob()
+    le = LiveExecutor(portfolio=store, clob_client=clob)
+    r = le.execute_sell(held, close_reason="take_profit", ts=200.0)
+    assert r.skip_reason == "min_notional_below_floor"
+    assert clob.posted == []
+
+
 def test_sell_skips_when_ctf_cache_never_syncs(store, monkeypatch) -> None:
     """If CTF balance never reaches position.qty within poll window → skip."""
     m = _market("m1")
@@ -651,6 +708,90 @@ def test_sell_retries_db_close_after_transient_failure(store, monkeypatch) -> No
     rec = store.get_position(held.position_id)
     assert rec is not None and rec.status == "closed"
     assert rec.close_reason == "take_profit"
+
+
+class _FlakyOpenStore:
+    """Wraps a PortfolioStore; raises on the first ``fail_times``
+    open_position calls, then delegates. Models a transient DB write
+    failure occurring *after* an irreversible on-chain buy fill — the
+    BUY-side analog of ``_FlakyCloseStore`` above. Previously execute_buy
+    had no retry at all on this path (asymmetric with the sell side)."""
+
+    def __init__(self, inner: PortfolioStore, *, fail_times: int) -> None:
+        self._inner = inner
+        self._remaining = fail_times
+        self.open_attempts = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def open_position(self, *args: Any, **kwargs: Any):
+        self.open_attempts += 1
+        if self._remaining > 0:
+            self._remaining -= 1
+            raise RuntimeError("database is locked")
+        return self._inner.open_position(*args, **kwargs)
+
+
+def test_buy_retries_db_open_after_transient_failure(store, monkeypatch) -> None:
+    """The on-chain buy is irreversible. A transient open_position failure
+    must be retried, or real money is spent and tokens received with no
+    local record at all — previously this path had zero retry, unlike the
+    already-hardened sell path."""
+    m = _market("m1")
+    _populate(m)
+    clob = _FakeClob(
+        order_response={
+            "success": True,
+            "orderID": "0xORDER",
+            "status": "matched",
+            "makingAmount": "4.0",
+            "takingAmount": "10.0",
+            "transactionsHashes": ["0xTX"],
+        }
+    )
+    import openpoly.execution.live_executor as le_mod
+
+    monkeypatch.setattr(le_mod.time, "sleep", lambda *_a, **_k: None)
+    flaky = _FlakyOpenStore(store, fail_times=1)
+    le = LiveExecutor(portfolio=flaky, clob_client=clob)
+    r = le.execute_buy(_intent(), news_id="n1", ts=100.0)
+    assert r.filled is True
+    assert flaky.open_attempts == 2  # failed once, retried, then persisted
+    positions = store.list_positions(limit=5)
+    assert any(p.market_id == "m1" and p.status == "open" for p in positions)
+
+
+def test_buy_open_position_permanent_failure_returns_skip_and_logs_critical(
+    store, monkeypatch, caplog
+) -> None:
+    """If open_position keeps failing, the executor must give up (not hang
+    forever) and log loudly — the position record is genuinely lost, real
+    money was spent, and nothing auto-recovers this (reconciliation only
+    ever flags untracked holdings; it never auto-opens one)."""
+    m = _market("m1")
+    _populate(m)
+    clob = _FakeClob(
+        order_response={
+            "success": True,
+            "orderID": "0xORDER",
+            "status": "matched",
+            "makingAmount": "4.0",
+            "takingAmount": "10.0",
+            "transactionsHashes": ["0xTX"],
+        }
+    )
+    import openpoly.execution.live_executor as le_mod
+
+    monkeypatch.setattr(le_mod.time, "sleep", lambda *_a, **_k: None)
+    flaky = _FlakyOpenStore(store, fail_times=999)
+    le = LiveExecutor(portfolio=flaky, clob_client=clob)
+    with caplog.at_level("ERROR"):
+        r = le.execute_buy(_intent(), news_id="n1", ts=100.0)
+    assert r.filled is False
+    assert r.skip_reason is not None and r.skip_reason.startswith("open_persist_failed:")
+    assert "CRITICAL" in caplog.text
+    assert store.list_positions(limit=5) == []  # genuinely never recorded
 
 
 # ---------- get_collateral_balance_raw (wallet-balance W2) ----------

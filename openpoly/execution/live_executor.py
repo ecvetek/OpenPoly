@@ -1,8 +1,14 @@
-"""LiveExecutor — submit IOC (FAK) orders to Polymarket V2 CLOB.
+"""LiveExecutor — submit orders to Polymarket V2 CLOB.
 
 Same ``ExecResult`` contract as ``PaperExecutor`` — failures map to
-``skip(reason)``, never raise. Order type is FAK (Fill And Kill = IOC); see
-slice C design doc §3 D2 / D3 for why no GTC fallback and no retry.
+``skip(reason)``, never raise. Order type is GTC (Good-Til-Cancelled),
+crossing the spread to act like an aggressive market order — deliberately
+NOT FAK (Fill-And-Kill / IOC), which hits stricter server precision rules
+this codebase hasn't fully mapped (see ``execute_buy``'s inline comment for
+the full reasoning). Any unfilled remainder is explicitly cancelled right
+after the response (``_settle_resting_remainder``), so a GTC order can never
+sit on the book and fill invisibly later — that's what makes GTC safe to
+use here despite not being IOC.
 
 Auth model is Polymarket V2 DepositWallet:
   * signer EOA = ``wallet.private_key_ref`` (resolved at factory time)
@@ -26,6 +32,7 @@ the real v2 client (which would hit the network at init).
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Protocol
 
@@ -61,15 +68,19 @@ _MIN_NOTIONAL_PUSD = 1.10
 _CTF_DECIMALS = 6  # CTF / Polymarket shares are 1e6 base units
 _CTF_POLL_ATTEMPTS = 5  # SELL right after BUY can hit cache lag; ~5s total
 _CTF_POLL_SLEEP = 1.0
-# The on-chain SELL is irreversible; persisting the DB close must survive a
-# transient write failure (locked SQLite, brief error) or the position is left
-# phantom-open with its tokens already gone (root cause of stuck phantom-open positions).
-_CLOSE_PERSIST_ATTEMPTS = 5
-_CLOSE_PERSIST_SLEEP = 0.5
+# The on-chain fill (buy or sell) is irreversible; persisting the DB write
+# must survive a transient failure (locked SQLite, brief error) or the
+# position is left phantom (open with tokens already gone, on a sell; or
+# real money spent with no local record at all, on a buy).
+_FILL_PERSIST_ATTEMPTS = 5
+_FILL_PERSIST_SLEEP = 0.5
+
+_SELL_SIZE_DECIMALS = 4
 
 
-def _quantize_size(qty: float, price: float) -> float:
-    """Floor qty so ``qty * price`` yields a clean ≤2-decimal maker amount.
+def _quantize_buy_size(qty: float, price: float) -> float:
+    """Floor qty so ``qty * price`` yields a clean ≤2-decimal maker amount —
+    the server's BUY precision rule (see the module-level comment above).
 
     Most Polymarket prices are 2-decimal-aligned (cents), in which case
     integer qty is sufficient. For 3+ decimal prices we walk down to find
@@ -89,6 +100,25 @@ def _quantize_size(qty: float, price: float) -> float:
         if abs(maker_cents - round(maker_cents)) < 1e-6:
             return float(candidate)
     return 0.0
+
+
+def _quantize_sell_size(qty: float) -> float:
+    """Floor qty to the server's SELL precision (taker amount ≤ 4 decimals)
+    — a different, much finer rule than ``_quantize_buy_size``'s whole-share
+    BUY rule (see the module-level comment above).
+
+    Reusing the BUY quantizer here was a real bug: ``int(qty)`` truncates
+    any qty below 1 share straight to 0, so a position left with
+    fractional-share dust (the normal case after a partial fill or a
+    partial close) could never be sold again — ``execute_sell`` would skip
+    ``min_notional_below_floor`` forever, permanently stranding it, even
+    though the server's actual SELL rule has no problem with a fractional
+    size at all.
+    """
+    if qty <= 0:
+        return 0.0
+    factor = 10**_SELL_SIZE_DECIMALS
+    return math.floor(qty * factor) / factor
 
 
 class _ClobClient(Protocol):
@@ -208,7 +238,7 @@ class LiveExecutor:
         # Quantize qty + check min notional against server rules verified
         # 2026-05-24. Both are pre-flight: cheaper to skip locally than to
         # eat a 400 round-trip + clutter logs with rejections.
-        size = _quantize_size(intent.qty, intent.price)
+        size = _quantize_buy_size(intent.qty, intent.price)
         notional = size * intent.price
         if notional < _MIN_NOTIONAL_PUSD:
             return ExecResult.skip("min_notional_below_floor")
@@ -261,7 +291,7 @@ class LiveExecutor:
                     actual_qty,
                     intent.price,
                 )
-                held = self._store.open_position(
+                return self._persist_buy(
                     market_id=intent.market_id,
                     side=intent.side,
                     token_id=token_id,
@@ -272,11 +302,6 @@ class LiveExecutor:
                     news_id=news_id,
                     order_id=None,
                     tx_hash=None,
-                )
-                return ExecResult.ok(
-                    price=intent.price,
-                    qty=actual_qty,
-                    position_id=held.position_id,
                 )
             logger.error("live buy submit failed (%s): %s", type(exc).__name__, exc)
             return ExecResult.skip(f"live_error:{type(exc).__name__}")
@@ -299,7 +324,7 @@ class LiveExecutor:
         tx_hashes = resp.get("transactionsHashes") or []
         tx_hash = tx_hashes[0] if tx_hashes else None
 
-        held = self._store.open_position(
+        return self._persist_buy(
             market_id=intent.market_id,
             side=intent.side,
             token_id=token_id,
@@ -311,16 +336,6 @@ class LiveExecutor:
             order_id=order_id,
             tx_hash=tx_hash,
         )
-        logger.info(
-            "live buy filled: %s %s qty=%.4f @ %.4f order=%s tx=%s",
-            intent.market_id,
-            intent.side,
-            actual_qty,
-            actual_price,
-            order_id,
-            (tx_hash[:10] + "…" if tx_hash else None),
-        )
-        return ExecResult.ok(price=actual_price, qty=actual_qty, position_id=held.position_id)
 
     def execute_sell(
         self,
@@ -340,10 +355,10 @@ class LiveExecutor:
             return ExecResult.skip("no_bid_liquidity")
         bid_price = book.bids[0][0]
 
-        # Quantize SELL size symmetrically with BUY so taker (size * price)
-        # stays within server precision. Most likely a no-op since BUY also
-        # quantized, but defensive for partial-fill positions or hand-opened.
-        size = _quantize_size(position.qty, bid_price)
+        # SELL uses its own (finer, 4-decimal) precision rule — see
+        # _quantize_sell_size's docstring for why reusing the BUY quantizer
+        # here was a real bug (permanently stranded fractional-share dust).
+        size = _quantize_sell_size(position.qty)
         if size <= 0:
             return ExecResult.skip("min_notional_below_floor")
 
@@ -428,6 +443,77 @@ class LiveExecutor:
             tx_hash=(resp.get("transactionsHashes") or [None])[0],
         )
 
+    def _persist_buy(
+        self,
+        *,
+        market_id: str,
+        side: str,
+        token_id: str,
+        condition_id: str,
+        price: float,
+        qty: float,
+        ts: float,
+        news_id: str | None,
+        order_id: str | None,
+        tx_hash: str | None,
+    ) -> ExecResult:
+        """Persist an already-executed on-chain buy. The fill is irreversible,
+        so the DB write retries transient failures, mirroring ``_persist_sell``
+        — previously this path had no retry at all, asymmetric with the
+        already-hardened sell path: a transient DB failure here after a real
+        fill would silently lose the position record entirely (real money
+        spent, tokens received, zero local trace), where a sell failure at
+        least leaves the position visibly open for reconciliation to flag."""
+        for attempt in range(_FILL_PERSIST_ATTEMPTS):
+            try:
+                held = self._store.open_position(
+                    market_id=market_id,
+                    side=side,
+                    token_id=token_id,
+                    condition_id=condition_id,
+                    price=price,
+                    qty=qty,
+                    ts=ts,
+                    news_id=news_id,
+                    order_id=order_id,
+                    tx_hash=tx_hash,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 — on-chain fill already happened
+                if attempt < _FILL_PERSIST_ATTEMPTS - 1:
+                    logger.warning(
+                        "open_position attempt %d failed for %s %s: %s; retrying",
+                        attempt + 1,
+                        market_id,
+                        side,
+                        exc,
+                    )
+                    time.sleep(_FILL_PERSIST_SLEEP)
+                    continue
+                logger.error(
+                    "CRITICAL: on-chain buy filled (order=%s tx=%s) but open_position "
+                    "failed after %d attempts for %s %s: %s — real money was spent and "
+                    "tokens received with NO local record; reconciliation will NOT "
+                    "auto-recover this (cost basis unknown — a human must decide)",
+                    order_id,
+                    tx_hash,
+                    _FILL_PERSIST_ATTEMPTS,
+                    market_id,
+                    side,
+                    exc,
+                )
+                return ExecResult.skip(f"open_persist_failed:{type(exc).__name__}")
+        logger.info(
+            "live buy filled: %s %s qty=%.4f @ %.4f order=%s tx=%s",
+            market_id,
+            side,
+            qty,
+            price,
+            order_id,
+            (tx_hash[:10] + "…" if tx_hash else None),
+        )
+        return ExecResult.ok(price=price, qty=qty, position_id=held.position_id)
+
     def _persist_sell(
         self,
         position: HeldPosition,
@@ -445,7 +531,7 @@ class LiveExecutor:
         phantom-open position for the reconciliation monitor to clean up.
         Records the ACTUAL filled qty: a GTC sell can partially fill, and
         record_sell keeps the position open with the remainder in that case."""
-        for attempt in range(_CLOSE_PERSIST_ATTEMPTS):
+        for attempt in range(_FILL_PERSIST_ATTEMPTS):
             try:
                 self._store.record_sell(
                     position.position_id,
@@ -459,14 +545,14 @@ class LiveExecutor:
                 )
                 break
             except Exception as exc:  # noqa: BLE001 — on-chain fill already happened
-                if attempt < _CLOSE_PERSIST_ATTEMPTS - 1:
+                if attempt < _FILL_PERSIST_ATTEMPTS - 1:
                     logger.warning(
                         "close_position attempt %d failed for position %d: %s; retrying",
                         attempt + 1,
                         position.position_id,
                         exc,
                     )
-                    time.sleep(_CLOSE_PERSIST_SLEEP)
+                    time.sleep(_FILL_PERSIST_SLEEP)
                     continue
                 logger.error(
                     "CRITICAL: on-chain sell filled (order=%s tx=%s) but close_position "
@@ -474,7 +560,7 @@ class LiveExecutor:
                     "leaving open for reconciliation",
                     order_id,
                     tx_hash,
-                    _CLOSE_PERSIST_ATTEMPTS,
+                    _FILL_PERSIST_ATTEMPTS,
                     position.position_id,
                     exc,
                 )
