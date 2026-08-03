@@ -16,6 +16,12 @@
  * selected time window), independent of `intervalMs` — including while
  * refresh is disabled. Passing nothing (`undefined`) is a no-op: it never
  * changes, so it never affects the existing interval-only behavior.
+ *
+ * The returned `refetch()` is the same mechanism exposed as a manual
+ * trigger: it bumps an internal nonce that's folded into the effect's
+ * dependency array, forcing an immediate `refresh()` on demand — e.g. for a
+ * manual refresh button — without waiting for `intervalMs` or a
+ * `refreshKey` change.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
@@ -25,6 +31,7 @@ export type PollResult<T> = {
   data: T | null
   status: PollStatus
   error: string | null
+  refetch: () => void
 }
 
 export function usePoll<T>(
@@ -35,6 +42,7 @@ export function usePoll<T>(
   const [data, setData] = useState<T | null>(null)
   const [status, setStatus] = useState<PollStatus>('loading')
   const [error, setError] = useState<string | null>(null)
+  const [nonce, setNonce] = useState(0)
   const fetcherRef = useRef(fetcher)
   useLayoutEffect(() => {
     fetcherRef.current = fetcher
@@ -80,7 +88,8 @@ export function usePoll<T>(
       clearInterval(timer)
       document.removeEventListener('visibilitychange', maybeRefresh)
     }
-  }, [intervalMs, refreshKey])
+  }, [intervalMs, refreshKey, nonce])
 
-  return { data, status, error }
+  const refetch = () => setNonce((n) => n + 1)
+  return { data, status, error, refetch }
 }

@@ -44,7 +44,7 @@ export function OverviewTab() {
   // even while refresh is "off" — otherwise the fetcher closure would pick
   // up the new window silently, only visible on the next scheduled poll
   // (which, with refresh off, is never).
-  const { data, status, error } = usePoll<EquityResponse>(
+  const { data, status, error, refetch } = usePoll<EquityResponse>(
     () => fetchEquity(windowDays),
     refreshMs,
     windowDays,
@@ -141,7 +141,7 @@ export function OverviewTab() {
             No trades yet.
           </div>
         ) : (
-          <EquityChart points={data.points} />
+          <EquityChart points={data.points} onRefresh={refetch} />
         )}
       </div>
     </div>
