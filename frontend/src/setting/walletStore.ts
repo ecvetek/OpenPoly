@@ -52,6 +52,7 @@ type WalletStore = {
   errorMessage: string | null
 
   load: () => Promise<void>
+  refreshOpenPositionsCount: () => Promise<void>
   saveWallet: (private_key_ref: string, funder_address: string) => Promise<WalletConfig>
   switchMode: (target: ExecMode) => Promise<SwitchModeResult>
   closeAllOpenPositions: () => Promise<CloseAllResult>
@@ -96,6 +97,22 @@ export const useWalletStore = create<WalletStore>((set) => ({
         status: 'error',
         errorMessage: e instanceof Error ? e.message : String(e),
       })
+    }
+  },
+
+  async refreshOpenPositionsCount() {
+    // Narrow re-fetch of just the count — unlike load(), does not touch
+    // wallet/execMode/status, so it can run silently (e.g. on ModeSwitchDialog
+    // mount) without flickering other mounted consumers of this store's
+    // loading state (ModePill etc). Best-effort: on failure, leave the
+    // last-known count in place rather than surface an error state.
+    try {
+      const r = await fetch('/api/positions')
+      const positions = await jsonOr<{ positions: { status: string }[] }>(r)
+      const openCount = positions.positions?.filter((p) => p.status === 'open').length ?? 0
+      set({ openPositionsCount: openCount })
+    } catch {
+      // best-effort — see comment above
     }
   },
 

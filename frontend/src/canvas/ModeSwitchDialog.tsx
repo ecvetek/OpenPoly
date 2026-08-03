@@ -65,6 +65,7 @@ function closeAllSummary(r: CloseAllResult): string {
 export function ModeSwitchDialog({ target, onClose }: Props) {
   const switchMode = useWalletStore((s) => s.switchMode)
   const closeAllOpenPositions = useWalletStore((s) => s.closeAllOpenPositions)
+  const refreshOpenPositionsCount = useWalletStore((s) => s.refreshOpenPositionsCount)
   const wallet = useWalletStore((s) => s.wallet)
   const openCount = useWalletStore((s) => s.openPositionsCount)
 
@@ -72,6 +73,14 @@ export function ModeSwitchDialog({ target, onClose }: Props) {
   const [closingAll, setClosingAll] = useState(false)
   const [blocker, setBlocker] = useState<string | null>(null)
   const [closeAllStatus, setCloseAllStatus] = useState<string | null>(null)
+
+  // openPositionsCount is otherwise only as fresh as the last app-mount
+  // load() — re-check on every dialog open so a position opened since then
+  // can't let the operator switch past a stale "0 open positions" blocker.
+  // The pre-flight effect below already re-runs once this updates the store.
+  useEffect(() => {
+    void refreshOpenPositionsCount()
+  }, [refreshOpenPositionsCount])
 
   // Pre-flight: surface the obvious blockers before the user clicks confirm.
   useEffect(() => {
@@ -89,12 +98,17 @@ export function ModeSwitchDialog({ target, onClose }: Props) {
 
   async function onConfirm() {
     setSubmitting(true)
-    const result = await switchMode(target)
-    setSubmitting(false)
-    if (result.ok) {
-      onClose()
-    } else {
-      setBlocker(blockerMessage(result) ?? 'Switch refused.')
+    try {
+      const result = await switchMode(target)
+      if (result.ok) {
+        onClose()
+      } else {
+        setBlocker(blockerMessage(result) ?? 'Switch refused.')
+      }
+    } catch (e) {
+      setBlocker(`Switch request failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSubmitting(false)
     }
   }
 
