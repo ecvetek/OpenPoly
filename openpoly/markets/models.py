@@ -48,6 +48,15 @@ class Market:
     # failure). Position settlement reads this + the held side to derive a
     # 0/1 final price.
     outcome_prices: tuple[float, float] | None = None
+    # True for every market that just passed the discovery filter (set by
+    # normalize_gamma_market's caller via MarketStore.replace()). False for a
+    # market that only re-entered the catalog via MarketStore.union() — i.e.
+    # it currently fails discovery (near-expiry, thin liquidity, excluded
+    # tag, etc.) and is only being kept around so the exit monitor can keep
+    # sampling its order book for a still-open position. The embedding and
+    # entry sections must never treat a non-tradeable market as eligible for
+    # a brand-new position — see MarketStore.union()'s docstring.
+    tradeable: bool = True
 
     @property
     def mid(self) -> float | None:

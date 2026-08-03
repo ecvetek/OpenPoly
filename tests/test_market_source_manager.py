@@ -224,6 +224,9 @@ async def test_sync_holdings_adds_missing_market():
     assert synced == 1
     assert failed == 0
     assert "pos1" in mgr.store.snapshot_ids()
+    # Added purely to keep exit evaluation alive for the open position — it
+    # currently fails discovery, so it must not be eligible for a new entry.
+    assert mgr.store.get("pos1").tradeable is False
 
 
 async def test_sync_holdings_skips_already_present():

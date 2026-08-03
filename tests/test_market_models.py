@@ -42,6 +42,11 @@ def test_normalize_basic():
     assert m.end_date.utcoffset().total_seconds() == 0  # aware UTC
 
 
+def test_normalize_defaults_tradeable_true():
+    m = normalize_gamma_market(_raw())
+    assert m.tradeable is True
+
+
 def test_clob_token_ids_as_list():
     m = normalize_gamma_market(_raw(clobTokenIds=["aaa", "bbb"]))
     assert m.yes_token_id == "aaa"

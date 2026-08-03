@@ -51,6 +51,8 @@ def test_replace_populates_catalog():
     assert len(store) == 3
     assert {m.market_id for m in store.snapshot()} == {"a", "b", "c"}
     assert store.get("a") is not None
+    # Every discovery-sourced market is eligible for a new entry.
+    assert all(m.tradeable for m in store.snapshot())
 
 
 def test_replace_is_atomic_swap():
@@ -161,6 +163,42 @@ def test_store_union_adds_missing_markets():
     assert added == 1
     ids = store.snapshot_ids()
     assert ids == {"a", "b", "c"}
+
+
+def test_store_union_marks_added_markets_not_tradeable():
+    """A market added purely via holding-sync currently fails discovery —
+    it must not become eligible for a brand-new entry just because it's
+    back in the catalog to keep exit evaluation alive."""
+
+    def _m(mid: str) -> Market:
+        return Market(
+            market_id=mid,
+            condition_id=f"0x{mid}",
+            question="?",
+            slug=mid,
+            yes_token_id=f"y_{mid}",
+            no_token_id=f"n_{mid}",
+            end_date=None,
+            best_bid=None,
+            best_ask=None,
+            spread=None,
+            last_trade_price=None,
+            volume_24h=0.0,
+            liquidity=0.0,
+            taker_fee_rate=None,
+            closed=False,
+            accepting_orders=True,
+            enable_order_book=True,
+            event_id=None,
+            event_title=None,
+            event_tags=(),
+        )
+
+    store = MarketStore()
+    store.replace([_m("a")], _summary(kept=1))
+    store.union([_m("c")])
+    assert store.get("a").tradeable is True  # discovery-sourced, unaffected
+    assert store.get("c").tradeable is False  # holding-sync-only
 
 
 def test_store_union_preserves_existing_entry():

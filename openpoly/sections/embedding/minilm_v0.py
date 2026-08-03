@@ -79,9 +79,17 @@ class EmbeddingFilterV0:
         item = input.payload
         if not isinstance(item, NewsItem):
             return SectionOutput(payload=None, verdict="skip", reason="no news item")
-        markets = market_source_manager.store.snapshot()
-        if not markets:
+        all_markets = market_source_manager.store.snapshot()
+        if not all_markets:
             return SectionOutput(payload=None, verdict="skip", reason="empty market catalog")
+        # Exclude markets only in the catalog via holding-sync (currently
+        # failing the discovery filter, kept around solely so the exit
+        # monitor can keep evaluating an existing open position) from
+        # candidate matching — the entry section refuses these anyway, so
+        # excluding them here avoids spending an LLM call analyzing a market
+        # that can't be traded. catalog_size below stays the raw discovery
+        # count (unaffected), same operator-facing meaning as before.
+        markets = [m for m in all_markets if m.tradeable]
         candidates = embedding_manager.match(
             item.content,
             markets,
@@ -93,14 +101,14 @@ class EmbeddingFilterV0:
                 payload=None,
                 verdict="skip",
                 reason="no market above similarity threshold",
-                signals={"news_id": item.id, "catalog_size": len(markets)},
+                signals={"news_id": item.id, "catalog_size": len(all_markets)},
             )
         return SectionOutput(
             payload=MarketCandidates(news=item, candidates=candidates),
             verdict="ok",
             signals={
                 "news_id": item.id,
-                "catalog_size": len(markets),
+                "catalog_size": len(all_markets),
                 "candidate_count": len(candidates),
                 "top_market_id": candidates[0].market.market_id,
                 "top_score": candidates[0].score,

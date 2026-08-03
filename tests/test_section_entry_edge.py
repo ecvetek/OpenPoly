@@ -92,6 +92,19 @@ def test_no_order_book_skips() -> None:
     assert out.reason == "no order book"
 
 
+def test_holding_sync_market_not_tradeable_skips() -> None:
+    """A market only in the catalog via holding-sync (MarketStore.union)
+    currently fails discovery — entry must refuse to open a brand-new
+    position on it, even though it's still in the catalog for exit
+    tracking (that's why it's there in the first place)."""
+    store = market_source_manager.store
+    store.union([_market()])  # union, not replace -> tradeable=False
+    store.set_order_books([_book("yes-m1", 0.40, 0.42)])
+    out = _run(EdgeThresholdEntryV0(EdgeThresholdConfig()), _ar())
+    assert out.verdict == "skip"
+    assert out.reason == "not_tradeable"
+
+
 # ---------- side selection ----------
 
 

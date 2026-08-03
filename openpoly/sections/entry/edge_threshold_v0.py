@@ -267,6 +267,15 @@ class EdgeThresholdEntryV0:
         market = catalog.get(res.market_id)
         if market is None:
             return SectionOutput(payload=None, verdict="skip", reason="market not found")
+        if not market.tradeable:
+            # In the catalog only via holding-sync (MarketStore.union) —
+            # it currently fails the discovery filter (near-expiry, thin
+            # liquidity, excluded tag, etc.) and is only there so the exit
+            # monitor can keep evaluating an existing open position. Must
+            # never become eligible for a brand-new entry.
+            return SectionOutput(
+                payload=None, verdict="skip", reason="not_tradeable", signals={"side": side}
+            )
         token_id = market.yes_token_id if side == "yes" else market.no_token_id
         if token_id is None:
             return SectionOutput(payload=None, verdict="skip", reason="no token for side")

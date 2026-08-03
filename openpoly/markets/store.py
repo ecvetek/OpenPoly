@@ -13,6 +13,7 @@ time series is a separate concern (memory ``openpoly_market_data_persistence``).
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,12 +79,20 @@ class MarketStore:
     def union(self, markets: list[Market]) -> int:
         """Add markets not already present in catalog. Returns count added.
 
-        Existing market_ids keep their current entry (discovery wins).
+        Existing market_ids keep their current entry (discovery wins) — so a
+        market that's both held *and* still passes discovery keeps the
+        ``tradeable=True`` instance ``replace()`` put there, untouched by
+        this call. A market added here is stamped ``tradeable=False``: it's
+        only being kept around so the exit monitor can keep sampling its
+        order book for an open position — it currently fails the discovery
+        filter (near-expiry, thin liquidity, excluded tag, etc.) and must
+        not become eligible for a brand-new entry just because it's back in
+        the catalog. See ``Market.tradeable``'s docstring.
         """
         added = 0
         for m in markets:
             if m.market_id not in self._catalog:
-                self._catalog[m.market_id] = m
+                self._catalog[m.market_id] = dataclasses.replace(m, tradeable=False)
                 added += 1
         return added
 

@@ -172,3 +172,20 @@ def test_run_topk_and_threshold_ordering() -> None:
     assert out.signals["candidate_count"] == 2
     assert out.signals["top_market_id"] == "m1"
     assert out.signals["catalog_size"] == 4
+
+
+def test_run_excludes_non_tradeable_markets_from_candidates() -> None:
+    """A market only in the catalog via holding-sync (not tradeable) must
+    never be surfaced as a candidate, even for a strong semantic match —
+    entry would refuse it anyway, so it's wasted LLM cost to analyze it.
+    catalog_size still counts it though — an unaffected, purely
+    operator-facing "how big is my universe" metric; it genuinely is in
+    the catalog, just not eligible for a new trade."""
+    _set_catalog([_market("m1", "aligned")])
+    market_source_manager.store.union([_market("m2", "aligned too")])  # tradeable=False
+    _warm({"aligned": [1.0, 0.0], "aligned too": [1.0, 0.0], "fed news": [1.0, 0.0]})
+    section = EmbeddingFilterV0(EmbeddingFilterConfig(top_k=5, similarity_threshold=0.5))
+    out = section.run(SectionInput(tick_type="event", payload=_news("fed news")))
+    assert out.verdict == "ok"
+    assert [c.market.market_id for c in out.payload.candidates] == ["m1"]
+    assert out.signals["catalog_size"] == 2
