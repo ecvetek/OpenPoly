@@ -154,6 +154,74 @@ def test_connected_clears_last_error_and_resets_reconnects() -> None:
     assert s.reconnect_attempts == 0
 
 
+# ---------- _on_item: urgency_filter gates the pipeline hook only ----------
+
+
+def _news_item(urgency: str, news_id: str = "n1") -> NewsItem:
+    return NewsItem(
+        id=news_id,
+        content="x",
+        urgency=urgency,  # type: ignore[arg-type]
+        sentiment=None,
+        published_at=0.0,
+        received_at=0.0,
+    )
+
+
+def test_on_item_urgency_filter_blocks_pipeline_not_persist() -> None:
+    """urgency_filter gates only the pipeline hook — persistence (the
+    Live/News tab's "all news received" view) stays unconditional. Real
+    traffic previously never consulted this field at all (only the unused
+    TradingNewsWSSource.run() polling path did)."""
+    m, _ = make_manager()
+    m._running_config = {"urgency_filter": "high"}  # noqa: SLF001
+    pipeline_calls: list[NewsItem] = []
+    persist_calls: list[NewsItem] = []
+    m.set_pipeline_hook(pipeline_calls.append)
+    m.set_news_persist(persist_calls.append)
+
+    item = _news_item("regular")
+    m._on_item(item)  # noqa: SLF001
+
+    assert pipeline_calls == []
+    assert persist_calls == [item]
+
+
+def test_on_item_urgency_filter_all_forwards_everything() -> None:
+    m, _ = make_manager()
+    m._running_config = {"urgency_filter": "all"}  # noqa: SLF001
+    pipeline_calls: list[NewsItem] = []
+    m.set_pipeline_hook(pipeline_calls.append)
+
+    for urgency in ("regular", "low", "medium", "high"):
+        m._on_item(_news_item(urgency))  # noqa: SLF001
+
+    assert len(pipeline_calls) == 4
+
+
+def test_on_item_missing_urgency_filter_in_config_defaults_all() -> None:
+    m, _ = make_manager()
+    m._running_config = {}  # noqa: SLF001 — no urgency_filter key at all
+    pipeline_calls: list[NewsItem] = []
+    m.set_pipeline_hook(pipeline_calls.append)
+
+    m._on_item(_news_item("regular"))  # noqa: SLF001
+
+    assert len(pipeline_calls) == 1
+
+
+def test_on_item_forwards_at_or_above_threshold() -> None:
+    m, _ = make_manager()
+    m._running_config = {"urgency_filter": "medium"}  # noqa: SLF001
+    pipeline_calls: list[NewsItem] = []
+    m.set_pipeline_hook(pipeline_calls.append)
+
+    for urgency in ("regular", "low", "medium", "high"):
+        m._on_item(_news_item(urgency))  # noqa: SLF001
+
+    assert [c.urgency for c in pipeline_calls] == ["medium", "high"]
+
+
 # ---------- event ring capacity ----------
 
 

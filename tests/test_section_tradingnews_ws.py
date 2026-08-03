@@ -6,6 +6,7 @@ from openpoly.news.ring_buffer import NewsItem
 from openpoly.sections._base import SectionInput
 from openpoly.sections._registry import scan
 from openpoly.sections.news_source.tradingnews_ws import (
+    URGENCY_RANK,
     TradingNewsWSConfig,
     TradingNewsWSSource,
 )
@@ -20,6 +21,15 @@ def _item(id_: str, urgency: str, ts: float) -> NewsItem:
         published_at=ts,
         received_at=ts,
     )
+
+
+def test_urgency_rank_includes_regular_at_low_tier() -> None:
+    """"regular" is tradingnews' actual default urgency value (see
+    ws_client.default_parse's fallback) — it must rank alongside "low" (the
+    baseline), not fall through to 0 (which would make it fail every
+    non-"all" filter, the opposite of "minimum urgency level")."""
+    assert "regular" in URGENCY_RANK
+    assert URGENCY_RANK["regular"] == URGENCY_RANK["low"]
 
 
 def test_section_in_default_catalog() -> None:

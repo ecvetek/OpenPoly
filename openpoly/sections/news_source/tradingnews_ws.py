@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 UrgencyFilter = Literal["all", "low", "medium", "high"]
-URGENCY_RANK = {"low": 1, "medium": 2, "high": 3}
+# "regular" is tradingnews' actual default urgency value (see
+# openpoly.news.ws_client.default_parse's fallback) — ranked alongside
+# "low" (the baseline, not the most lenient possible setting) so a filter of
+# "low"/"all" passes ordinary news and "medium"/"high" correctly excludes it.
+URGENCY_RANK = {"regular": 1, "low": 1, "medium": 2, "high": 3}
 
 
 class TradingNewsWSConfig(BaseModel):

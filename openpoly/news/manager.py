@@ -22,6 +22,7 @@ from typing import Any, Callable, Literal, Protocol
 
 from openpoly.news.ring_buffer import NewsItem, NewsRingBuffer
 from openpoly.sections.news_source.tradingnews_ws import (
+    URGENCY_RANK,
     TradingNewsWSConfig,
     TradingNewsWSSource,
 )
@@ -130,12 +131,28 @@ class NewsSourceManager:
         ``enqueue``. Wired by lifespan; ``None`` in tests."""
         self._news_persist = hook
 
+    def _passes_urgency(self, urgency: str) -> bool:
+        """``urgency_filter`` ("Minimum urgency level to forward") gates only
+        the pipeline hook, not persistence — an operator watching "all news
+        received" on the Live/News tab is a different concern from "which
+        news can trigger a trade," so persistence stays unconditional.
+
+        Previously this config field had **no effect at all** on live
+        traffic: it was only read by ``TradingNewsWSSource.run()``, which
+        the orchestrator never calls (real news flows straight from the WS
+        client's ``on_item`` hook into this method, bypassing ``run()``
+        entirely)."""
+        urgency_filter = (self._running_config or {}).get("urgency_filter", "all")
+        if urgency_filter == "all":
+            return True
+        return URGENCY_RANK.get(urgency, 0) >= URGENCY_RANK.get(urgency_filter, 0)
+
     def _on_item(self, item: NewsItem) -> None:
         """Sync hook chained from ws_client. Forwards each item to the pipeline
         and the persistence hook; exceptions in either are swallowed so the WS
         loop survives. The two hooks are independent — persistence fires even
         with no pipeline wired, and vice versa."""
-        if self._pipeline_hook is not None:
+        if self._pipeline_hook is not None and self._passes_urgency(item.urgency):
             try:
                 self._pipeline_hook(item)
             except Exception:  # noqa: BLE001
