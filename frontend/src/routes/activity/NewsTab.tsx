@@ -7,11 +7,14 @@
  * so embedding-skipped news ends up under "Skipped" (where it belongs)
  * and is hidden from "Filled" / "Errored" buckets.
  *
- * Limit selector (25/50/100/200, default 25): sets `newsLimit` directly;
- * the section-log endpoints (embedding / analyzer / entry) are size-200
- * rings server-side and always queried at their max, so they don't need
- * a paged limit. The next poll tick (≤3 s) picks up the new news limit
- * via the fetcher closure (usePoll re-reads via ref).
+ * Limit selector (25/50/100/200/500/1000, default 25): sets `newsLimit`
+ * directly; the section-log endpoints (embedding / analyzer / entry) are
+ * size-200 rings server-side and always queried at their max, so a
+ * limit above 200 gets no matching pipeline-stage data for the extra
+ * items — the news card itself still renders, just without an
+ * embedding/analyzer/entry stage attached. The next poll tick (≤3 s)
+ * picks up the new news limit via the fetcher closure (usePoll re-reads
+ * via ref).
  *
  * 5-s polling re-uses the same `usePoll` everyone else here does;
  * `pending` cards are intentionally only visible under "All" — they're
@@ -25,7 +28,7 @@ import { usePoll } from './usePoll'
 
 type Filter = 'all' | 'filled' | 'skipped' | 'errored'
 
-const NEWS_LIMIT_OPTIONS = [25, 50, 100, 200] as const
+const NEWS_LIMIT_OPTIONS = [25, 50, 100, 200, 500, 1000] as const
 
 function FilterChip({
   label,

@@ -15,9 +15,11 @@ import type {
   NewsPipelineCard,
 } from './newsTypes'
 
-// Caller may raise this via the News tab's limit selector (max 200). The 3
-// section log rings are size-200 server-side, so requesting more than that
-// returns at most 200 — no need to plumb the value through the other URLs.
+// Caller may raise this via the News tab's limit selector (up to 1000,
+// matching the backend's own NEWS_LIMIT_MAX in inspect_routes.py). The 3
+// section log rings are size-200 server-side, so a newsLimit above 200
+// gets news items with no matching embedding/analyzer/entry stage data —
+// no need to plumb the value through the other URLs.
 export const DEFAULT_NEWS_LIMIT = 25
 
 // Ring capacity (per openpoly.runtime.section_log.DEFAULT_MAXLEN). Asking

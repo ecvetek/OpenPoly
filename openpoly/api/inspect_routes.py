@@ -21,7 +21,7 @@ from openpoly.markets.manager import manager as market_source_manager
 router = APIRouter()
 
 NEWS_LIMIT_DEFAULT = 50
-NEWS_LIMIT_MAX = 500
+NEWS_LIMIT_MAX = 1000
 ORDER_BOOK_LIMIT_DEFAULT = 50
 ORDER_BOOK_LIMIT_MAX = 500
 ORDER_BOOK_HISTORY_LIMIT = 2000
