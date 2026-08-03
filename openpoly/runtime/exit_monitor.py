@@ -50,7 +50,7 @@ from openpoly.sections.exit.threshold_v0 import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TICK_INTERVAL_SECONDS = 120  # v8 §10.1 "hard" tick
+DEFAULT_TICK_INTERVAL_SECONDS = 30  # matches ThresholdExitConfig's own default
 
 State = Literal["stopped", "running"]
 
@@ -86,6 +86,10 @@ class ExitMonitor:
     ) -> None:
         self._exit = exit_section
         self._executor = executor
+        # Initial value only — ThresholdExitConfig.tick_interval_seconds is
+        # now the source of truth once a real config is loaded; see
+        # replace_exit_section below, which keeps this in sync on every
+        # canvas-driven swap (startup and live hot-reload alike).
         self._tick_interval = tick_interval_seconds
         self._portfolio: PortfolioStore | None = None
         self._stop = asyncio.Event()
@@ -361,13 +365,24 @@ exit_monitor = ExitMonitor(
 
 
 # canvas-sync v2: hot-swap the exit section without restarting the monitor.
-# Caller (api/canvas_routes._apply_canvas_reload) builds the new instance from
-# the latest canvas, then awaits this. Same atomicity story as orchestrator:
-# in-flight ``self._exit.run(...)`` keeps a reference to the old instance via
-# Python GC; the next tick reads ``self._exit`` and gets the new one.
+# Caller (api/canvas_routes._apply_canvas_reload, and api/main.py's lifespan
+# at startup) builds the new instance from the latest canvas, then awaits
+# this. Same atomicity story as orchestrator: in-flight ``self._exit.run(...)``
+# keeps a reference to the old instance via Python GC; the next tick reads
+# ``self._exit`` and gets the new one.
 async def _replace_exit_section_impl(self: ExitMonitor, new_section: _ExitSection) -> None:
     async with self._exit_lock:
         self._exit = new_section
+        # tick_interval_seconds lives on the same config as the thresholds,
+        # so a canvas save that changes it must take effect the same way —
+        # on the loop's next wait, not just on the next process restart.
+        # Defensive getattr: _ExitSection is deliberately a minimal Protocol
+        # (just .run()) so other exit-section implementations can plug in
+        # without necessarily exposing this field — if absent, the monitor
+        # simply keeps ticking at whatever cadence it already had.
+        new_interval = getattr(getattr(new_section, "config", None), "tick_interval_seconds", None)
+        if isinstance(new_interval, int):
+            self._tick_interval = new_interval
 
 
 ExitMonitor.replace_exit_section = _replace_exit_section_impl  # type: ignore[attr-defined]

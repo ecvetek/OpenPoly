@@ -174,3 +174,14 @@ def test_peak_below_entry_does_not_trigger_peak_dd() -> None:
     assert out.verdict == "skip"
     assert out.signals["peak_meaningful"] is False
     assert out.signals["peak_dd"] is None
+
+
+def test_tick_interval_seconds_defaults_to_30() -> None:
+    """Canvas-configurable exit-evaluation cadence (formerly a hardcoded
+    120s constant with no canvas wiring at all — see ExitMonitor)."""
+    assert ThresholdExitConfig().tick_interval_seconds == 30
+
+
+def test_tick_interval_seconds_custom_value_round_trips() -> None:
+    cfg = ThresholdExitConfig(tick_interval_seconds=45)
+    assert cfg.tick_interval_seconds == 45

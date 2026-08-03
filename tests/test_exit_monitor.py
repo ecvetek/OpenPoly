@@ -329,6 +329,36 @@ async def test_stop_before_start_is_safe() -> None:
     assert m.state == "stopped"
 
 
+# ---------- canvas-driven tick_interval_seconds (hot-swap + startup) ----------
+
+
+async def test_replace_exit_section_updates_tick_interval() -> None:
+    """tick_interval_seconds now lives on the same ThresholdExitConfig as the
+    thresholds — swapping in a new section (canvas save while running, or
+    the lifespan's startup load) must update the monitor's tick cadence too,
+    not just the threshold values."""
+    m = _monitor(_FakePortfolio([]), _FakeExecutor())
+    assert m._tick_interval == 3600  # _monitor()'s constructor arg
+    new_section = ThresholdExitV0(ThresholdExitConfig(tick_interval_seconds=45))
+    await m.replace_exit_section(new_section)
+    assert m._tick_interval == 45
+
+
+async def test_replace_exit_section_keeps_tick_interval_when_new_section_has_no_config() -> None:
+    """A hypothetical exit-section implementation with no config.tick_interval_seconds
+    (the _ExitSection Protocol only requires .run()) must not crash or reset
+    the cadence — the monitor just keeps whatever it already had."""
+    m = _monitor(_FakePortfolio([]), _FakeExecutor())
+    assert m._tick_interval == 3600
+
+    class _NoConfigSection:
+        def run(self, input):  # noqa: A002
+            raise NotImplementedError
+
+    await m.replace_exit_section(_NoConfigSection())
+    assert m._tick_interval == 3600  # unchanged
+
+
 async def test_tick_loop_offloads_slow_execute_sell_without_blocking() -> None:
     """A slow execute_sell (e.g. a live-broker order submit + fill poll) must
     not stall the event loop — _tick_loop offloads _tick_once via

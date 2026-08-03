@@ -89,6 +89,12 @@ class ThresholdExitConfig(BaseModel):
         le=1.0,
         description="Skip peak_drawdown unless the peak gain exceeds this fraction of cost basis.",
     )
+    tick_interval_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=3600,
+        description="Seconds between exit-evaluation ticks (how often open positions are re-checked against these thresholds).",
+    )
 
 
 class ThresholdExitV0:

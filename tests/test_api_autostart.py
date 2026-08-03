@@ -204,6 +204,7 @@ async def test_exit_monitor_autostart_uses_canvas_saved_config(
                         "take_profit_pct": 0.8,
                         "stop_loss_pct": 0.5,
                         "peak_drawdown_pct": 0.5,
+                        "tick_interval_seconds": 45,
                     },
                 }
             ],
@@ -234,6 +235,7 @@ async def test_exit_monitor_autostart_uses_canvas_saved_config(
     assert cfg.take_profit_pct == 0.8  # from canvas, not the 0.20 default
     assert cfg.stop_loss_pct == 0.5  # not the 0.15 default
     assert cfg.peak_drawdown_pct == 0.5  # not the 0.12 default
+    assert cfg.tick_interval_seconds == 45  # not the 30 default
 
 
 async def test_lifespan_calls_bootstrap_peaks_before_start(
