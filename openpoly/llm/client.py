@@ -7,7 +7,8 @@ Anthropic-compatible third-party gateway (e.g. yunwu) instead of the
 official endpoint. The Anthropic SDK retries transient HTTP errors (429 / 5xx /
 connection) itself; this wrapper additionally retries a *structurally* bad
 response — one with no ``tool_use`` block, e.g. a refusal — up to
-``_STRUCTURAL_RETRIES`` times before raising ``LLMError``.
+``_STRUCTURAL_RETRIES`` total attempts (one retry after the first) before
+raising ``LLMError``.
 
 The call blocks (network I/O); the orchestrator runs the section on a worker
 thread so it does not stall the event loop.
