@@ -34,10 +34,18 @@ type DetailData = {
 
 export function PositionDetail() {
   const { positionId } = useParams<{ positionId: string }>()
-  const frozenRef = useRef<DetailData | null>(null)
+  // Keyed on positionId, not just presence — a bare cached DetailData would
+  // survive a future position-to-position navigation that doesn't remount
+  // this component and show the previous position's frozen data under the
+  // new id (unreachable today since every nav entry point remounts, but a
+  // real latent bug for any future in-place link between positions).
+  const frozenRef = useRef<{ positionId: string; data: DetailData } | null>(null)
   const { data, status, error } = usePoll<DetailData>(async () => {
-    if (frozenRef.current !== null) return frozenRef.current
-    const position = await fetchPosition(positionId ?? '')
+    const pid = positionId ?? ''
+    if (frozenRef.current !== null && frozenRef.current.positionId === pid) {
+      return frozenRef.current.data
+    }
+    const position = await fetchPosition(pid)
     if (position === null) return { position: null, history: null }
     const history = await fetchOrderBookHistory(
       position.token_id,
@@ -45,7 +53,7 @@ export function PositionDetail() {
       position.closed_at,
     )
     const result: DetailData = { position, history }
-    if (position.closed_at !== null) frozenRef.current = result
+    if (position.closed_at !== null) frozenRef.current = { positionId: pid, data: result }
     return result
   })
 

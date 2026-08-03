@@ -30,7 +30,14 @@ export function usePoll<T>(
 
   useEffect(() => {
     let cancelled = false
+    // Guards against overlapping fetches: if a slow response is still
+    // in flight when the next interval tick or visibilitychange fires,
+    // skip re-issuing rather than risk an older response landing after
+    // (and overwriting) a newer one.
+    let inflight = false
     async function refresh() {
+      if (inflight) return
+      inflight = true
       try {
         const result = await fetcherRef.current()
         if (cancelled) return
@@ -41,6 +48,8 @@ export function usePoll<T>(
         if (cancelled) return
         setStatus('error')
         setError(e instanceof Error ? e.message : String(e))
+      } finally {
+        inflight = false
       }
     }
     void refresh()
