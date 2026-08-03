@@ -1,8 +1,8 @@
 /**
- * Activity › Overview — P&L stat cards + the equity curve. Phase 1 of the
- * Activity redesign. Wallet cards (cash + total value) read the on-chain
- * wallet via /api/wallet/balance — ledger P&L on the left, on-chain truth
- * on the right, so a divergence between the two is visible at a glance.
+ * Overview — P&L stat cards + the equity curve. Wallet cards (cash + total
+ * value) read the on-chain wallet via /api/wallet/balance — ledger P&L on
+ * the left, on-chain truth on the right, so a divergence between the two
+ * is visible at a glance.
  */
 import { useState } from 'react'
 import { EquityChart } from './EquityChart'
