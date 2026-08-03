@@ -402,9 +402,17 @@ def _unrealized_pnl(record: PositionRecord) -> float | None:
 # falls back to the default rather than erroring, matching this API's
 # existing permissive-clamp convention (SECTION_LOG_LIMIT_MAX etc.) — but a
 # safelist rather than a plain min/max clamp, since an unbounded window
-# would defeat the whole point of windowing.
-EQUITY_WINDOW_OPTIONS_DAYS: dict[int, int] = {1: 86_400, 7: 7 * 86_400, 30: 30 * 86_400}
-EQUITY_WINDOW_DEFAULT_DAYS = 1
+# would defeat the whole point of windowing. Keyed in hours (not days) so
+# sub-day windows (1h/6h/12h) fit the same dict without going fractional.
+EQUITY_WINDOW_OPTIONS_HOURS: dict[int, int] = {
+    1: 3_600,
+    6: 6 * 3_600,
+    12: 12 * 3_600,
+    24: 86_400,
+    24 * 7: 7 * 86_400,
+    24 * 30: 30 * 86_400,
+}
+EQUITY_WINDOW_DEFAULT_HOURS = 24
 
 
 def _all_time_equity_summary(store: PortfolioStore) -> dict[str, Any]:
@@ -432,19 +440,19 @@ def _all_time_equity_summary(store: PortfolioStore) -> dict[str, Any]:
 
 @router.get("/portfolio/equity")
 def get_equity_curve(
-    window_days: int = EQUITY_WINDOW_DEFAULT_DAYS,
+    window_hours: int = EQUITY_WINDOW_DEFAULT_HOURS,
     store: PortfolioStore = Depends(get_portfolio_store),
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> dict[str, Any]:
-    """Equity chart (``window_days``, default 1) + all-time summary.
+    """Equity chart (``window_hours``, default 24) + all-time summary.
 
     ``points`` is windowed to bound the reconstruction cost as
-    ``order_book_snapshot`` grows unboundedly over time — ``window_days``
-    must be one of ``EQUITY_WINDOW_OPTIONS_DAYS``' keys, anything else
+    ``order_book_snapshot`` grows unboundedly over time — ``window_hours``
+    must be one of ``EQUITY_WINDOW_OPTIONS_HOURS``' keys, anything else
     silently falls back to the default. ``summary`` is always all-time,
     computed via a separate cheap path — see ``_all_time_equity_summary``."""
-    window_seconds = EQUITY_WINDOW_OPTIONS_DAYS.get(
-        window_days, EQUITY_WINDOW_OPTIONS_DAYS[EQUITY_WINDOW_DEFAULT_DAYS]
+    window_seconds = EQUITY_WINDOW_OPTIONS_HOURS.get(
+        window_hours, EQUITY_WINDOW_OPTIONS_HOURS[EQUITY_WINDOW_DEFAULT_HOURS]
     )
     curve = build_equity_curve(factory, window_seconds=window_seconds)
     return {
