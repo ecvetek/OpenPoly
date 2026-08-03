@@ -221,6 +221,26 @@ def test_news_ids_for_positions_unknown_id_absent_from_result(store) -> None:
     assert result == {h1.position_id: "n1"}
 
 
+# ---------- total_realized_pnl (all-time summary, PF-perf) ----------
+
+
+def test_total_realized_pnl_sums_closed_positions_only(store) -> None:
+    h1 = _open(store, market_id="m1", condition_id="0xc1", price=0.40, qty=10.0)
+    store.close_position(h1.position_id, sell_price=0.55, ts=200.0, close_reason="take_profit")
+    h2 = _open(store, market_id="m2", condition_id="0xc2", price=0.30, qty=20.0)
+    store.close_position(h2.position_id, sell_price=0.25, ts=210.0, close_reason="stop_loss")
+    _open(store, market_id="m3", condition_id="0xc3", price=0.50, qty=5.0)  # left open
+
+    expected = (0.55 - 0.40) * 10.0 + (0.25 - 0.30) * 20.0
+    assert store.total_realized_pnl() == pytest.approx(expected)
+
+
+def test_total_realized_pnl_zero_when_no_closed_positions(store) -> None:
+    assert store.total_realized_pnl() == 0.0
+    _open(store)  # an open position must not contribute
+    assert store.total_realized_pnl() == 0.0
+
+
 # ---------- order_id / tx_hash (slice C) ----------
 
 

@@ -2,9 +2,18 @@
 order books into a realized + unrealized P&L time series.
 
 Pure read side: no state, reads ``position`` and ``order_book_snapshot``.
-``build_equity_curve`` recomputes from scratch per call — fine at openPoly's
-grain-of-rice scale (single-digit positions, a few thousand snapshots), so no
-materialized table is needed.
+``build_equity_curve`` recomputes from scratch per call. Full-history mode
+(``window_seconds=None``) was fine at openPoly's original grain-of-rice scale,
+but ``order_book_snapshot`` grows unboundedly (a fresh sample roughly every
+``book_sample_interval_seconds``, forever) — the API route now always passes
+a bounded ``window_seconds`` so the per-request cost stays roughly constant
+over the life of a long-running process instead of growing every day. A
+position closed before the window is dropped from the curve entirely; its
+realized P&L belongs in a separate all-time summary (see
+``openpoly.api.portfolio_routes._all_time_equity_summary``), not here.
+``window_seconds=None`` remains available for full-history reconstruction —
+and is what the existing test suite exercises for byte-identical coverage of
+the pre-windowing behavior.
 
 Unrealized P&L marks each open position at the level-1 bid of its token's most
 recent snapshot at-or-before the evaluated time (hold-last). That is the price
@@ -17,7 +26,7 @@ import json
 import time
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.db.tables import OrderBookSnapshot, PositionRow
@@ -52,57 +61,109 @@ def _best_bid(bids_json: str) -> float | None:
     return float(bids[0][0])
 
 
-def _mark_at(marks: list[tuple[float, float]], t: float) -> float | None:
-    """Most recent bid at-or-before ``t`` (hold-last). ``marks`` is ascending
-    by timestamp. Returns None if no mark exists yet at ``t``."""
-    result: float | None = None
-    for ts, bid in marks:
-        if ts <= t:
-            result = bid
-        else:
-            break
-    return result
+def _advance_mark(
+    marks: list[tuple[float, float]], cursor: int, t: float
+) -> tuple[float | None, int]:
+    """Advance ``cursor`` (index of the last-consumed mark; ``-1`` means none
+    consumed yet) forward through ``marks`` (ascending by ts) to the last
+    entry at-or-before ``t``, returning ``(bid_or_None, new_cursor)`` — the
+    same "most recent bid at-or-before t" result the old ``_mark_at`` linear
+    rescan produced, just computed incrementally.
+
+    Caller must invoke this with non-decreasing ``t`` per token across one
+    pass over a sorted timeline — that monotonicity is what makes the total
+    cost O(len(marks) + len(timeline)) instead of O(len(marks) *
+    len(timeline)) (rescanning ``marks`` from the start on every call).
+    """
+    n = len(marks)
+    while cursor + 1 < n and marks[cursor + 1][0] <= t:
+        cursor += 1
+    return (marks[cursor][1] if cursor >= 0 else None), cursor
 
 
-def build_equity_curve(session_factory: sessionmaker[Session]) -> EquityCurve:
-    """Reconstruct the realized + unrealized equity time series."""
-    now = time.time()
+def build_equity_curve(
+    session_factory: sessionmaker[Session],
+    *,
+    window_seconds: float | None = None,
+    now: float | None = None,
+) -> EquityCurve:
+    """Reconstruct the realized + unrealized equity time series.
+
+    ``window_seconds``, when given, bounds the curve to positions still open
+    or closed within the last ``window_seconds``. A single boundary-seed
+    snapshot per token (the latest one strictly before the window) is still
+    fetched so a position already open before the window starts marks
+    correctly from the window's left edge, rather than reading as flat/zero
+    until the first in-window sample arrives. ``now`` defaults to
+    ``time.time()`` — exposed as a parameter for deterministic tests.
+    """
+    now = now if now is not None else time.time()
+    since = now - window_seconds if window_seconds is not None else None
+
     with session_factory() as session:
-        positions = list(session.execute(select(PositionRow)).scalars().all())
+        stmt = select(PositionRow)
+        if since is not None:
+            stmt = stmt.where(
+                or_(PositionRow.closed_at.is_(None), PositionRow.closed_at >= since)
+            )
+        positions = list(session.execute(stmt).scalars().all())
         if not positions:
             return EquityCurve((), 0.0, 0.0, 0.0, 0)
 
-        # Per-token bid series, ascending by recorded_at (empty books dropped).
+        # Per-token bid series, ascending by recorded_at (empty books
+        # dropped). When windowed, seeded with the single most-recent
+        # pre-window snapshot so a position already open at `since` marks
+        # correctly from the first axis point, not just once a fresh
+        # in-window sample lands.
         marks: dict[str, list[tuple[float, float]]] = {}
         for token_id in {p.token_id for p in positions}:
-            rows = (
-                session.execute(
-                    select(OrderBookSnapshot)
-                    .where(OrderBookSnapshot.token_id == token_id)
-                    .order_by(OrderBookSnapshot.recorded_at)
-                )
-                .scalars()
-                .all()
-            )
             series: list[tuple[float, float]] = []
-            for r in rows:
+            if since is not None:
+                seed = (
+                    session.execute(
+                        select(OrderBookSnapshot)
+                        .where(
+                            OrderBookSnapshot.token_id == token_id,
+                            OrderBookSnapshot.recorded_at < since,
+                        )
+                        .order_by(OrderBookSnapshot.recorded_at.desc())
+                        .limit(1)
+                    )
+                    .scalars()
+                    .first()
+                )
+                if seed is not None:
+                    bid = _best_bid(seed.bids_json)
+                    if bid is not None:
+                        series.append((seed.recorded_at, bid))
+            rows_stmt = select(OrderBookSnapshot).where(OrderBookSnapshot.token_id == token_id)
+            if since is not None:
+                rows_stmt = rows_stmt.where(OrderBookSnapshot.recorded_at >= since)
+            rows_stmt = rows_stmt.order_by(OrderBookSnapshot.recorded_at)
+            for r in session.execute(rows_stmt).scalars().all():
                 bid = _best_bid(r.bids_json)
                 if bid is not None:
                     series.append((r.recorded_at, bid))
             marks[token_id] = series
 
-    # Time axis: every open/close event + every in-window snapshot + now.
+    # Time axis: every open/close event + every in-window snapshot + now
+    # (+ `since`, for a clean left edge when windowed).
     axis: set[float] = {now}
+    if since is not None:
+        axis.add(since)
     for p in positions:
-        axis.add(p.opened_at)
+        axis.add(max(p.opened_at, since) if since is not None else p.opened_at)
         if p.closed_at is not None:
             axis.add(p.closed_at)
         end = p.closed_at if p.closed_at is not None else now
         for ts, _bid in marks.get(p.token_id, []):
+            if since is not None and ts < since:
+                continue  # the boundary-seed row feeds the mark cursor only
             if p.opened_at <= ts <= end:
                 axis.add(ts)
     timeline = sorted(axis)
 
+    cursors: dict[str, int] = dict.fromkeys(marks, -1)
     points: list[EquityPoint] = []
     for t in timeline:
         realized = 0.0
@@ -111,7 +172,9 @@ def build_equity_curve(session_factory: sessionmaker[Session]) -> EquityCurve:
             if p.closed_at is not None and p.closed_at <= t:
                 realized += p.realized_pnl or 0.0
             elif p.opened_at <= t and (p.closed_at is None or p.closed_at > t):
-                mark = _mark_at(marks.get(p.token_id, []), t)
+                mark, cursors[p.token_id] = _advance_mark(
+                    marks.get(p.token_id, []), cursors[p.token_id], t
+                )
                 if mark is None:
                     mark = p.avg_entry_price
                 unrealized += (mark - p.avg_entry_price) * p.qty

@@ -108,18 +108,9 @@ def test_limit_param_honored(env) -> None:
 # ---------- /api/portfolio/equity ----------
 
 
-def test_equity_endpoint_empty(tmp_path) -> None:
-    from openpoly.db.engine import get_session_factory
-
-    engine = make_engine(f"sqlite:///{tmp_path}/equity.db")
-    init_db(engine)
-    factory = make_session_factory(engine)
-    app.dependency_overrides[get_session_factory] = lambda: factory
-    try:
-        body = TestClient(app).get("/api/portfolio/equity").json()
-    finally:
-        app.dependency_overrides.clear()
-        engine.dispose()
+def test_equity_endpoint_empty(env) -> None:
+    _store, client, _factory = env
+    body = client.get("/api/portfolio/equity").json()
     assert body == {
         "points": [],
         "summary": {
@@ -131,13 +122,9 @@ def test_equity_endpoint_empty(tmp_path) -> None:
     }
 
 
-def test_equity_endpoint_with_position(tmp_path) -> None:
-    from openpoly.db.engine import get_session_factory
-
-    engine = make_engine(f"sqlite:///{tmp_path}/equity.db")
-    init_db(engine)
-    factory = make_session_factory(engine)
-    PortfolioStore(factory).open_position(
+def test_equity_endpoint_with_position(env) -> None:
+    store, client, _factory = env
+    store.open_position(
         market_id="m1",
         side="yes",
         token_id="ty1",
@@ -147,12 +134,7 @@ def test_equity_endpoint_with_position(tmp_path) -> None:
         ts=100.0,
         news_id="n1",
     )
-    app.dependency_overrides[get_session_factory] = lambda: factory
-    try:
-        body = TestClient(app).get("/api/portfolio/equity").json()
-    finally:
-        app.dependency_overrides.clear()
-        engine.dispose()
+    body = client.get("/api/portfolio/equity").json()
     assert body["summary"]["open_positions"] == 1
     assert len(body["points"]) >= 1
     assert set(body["points"][0].keys()) == {
@@ -161,6 +143,35 @@ def test_equity_endpoint_with_position(tmp_path) -> None:
         "realized",
         "unrealized",
     }
+
+
+def test_equity_endpoint_summary_alltime_but_points_windowed(env) -> None:
+    """A position closed well outside the chart window must still count
+    toward the all-time summary, even though it produces no chart points —
+    proves the summary is a separate all-time path, not derived from the
+    windowed curve's last point (which would silently drop it)."""
+    import time
+
+    from openpoly.api.portfolio_routes import EQUITY_WINDOW_SECONDS
+
+    store, client, _factory = env
+    old_ts = time.time() - EQUITY_WINDOW_SECONDS * 3
+    h = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="ty1",
+        condition_id="0xc1",
+        price=0.40,
+        qty=10.0,
+        ts=old_ts,
+        news_id="n1",
+    )
+    store.close_position(
+        h.position_id, sell_price=0.55, ts=old_ts + 10, close_reason="take_profit"
+    )
+    body = client.get("/api/portfolio/equity").json()
+    assert body["summary"]["realized"] == pytest.approx(1.50)
+    assert body["points"] == []
 
 
 # ---------- /api/positions/{id} ----------

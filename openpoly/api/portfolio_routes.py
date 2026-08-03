@@ -365,6 +365,21 @@ def _lookup_exit_decision(
     }
 
 
+def _mark_unrealized(token_id: str, avg_entry_price: float, qty: float) -> float | None:
+    """Mark-to-market core: live level-1-bid diff for one open position,
+    keyed by its raw fields rather than a ``PositionRecord`` wrapper — lets
+    both ``_unrealized_pnl`` (below) and ``_all_time_equity_summary`` (which
+    works from ``HeldPosition``, a different dataclass with no ``status``
+    field) share the same mark logic.
+
+    ``None`` when there's no live order book yet for the token / it has no
+    bids."""
+    book = market_source_manager.store.get_order_book(token_id)
+    if book is None or book.best_bid is None:
+        return None
+    return (book.best_bid - avg_entry_price) * qty
+
+
 def _unrealized_pnl(record: PositionRecord) -> float | None:
     """Mark-to-market P&L for an open position — what closing it right now
     would realize, marked at the live level-1 bid. Same convention
@@ -377,26 +392,52 @@ def _unrealized_pnl(record: PositionRecord) -> float | None:
     there's no live order book yet for the token / it has no bids."""
     if record.status != "open":
         return None
-    book = market_source_manager.store.get_order_book(record.token_id)
-    if book is None or book.best_bid is None:
-        return None
-    return (book.best_bid - record.avg_entry_price) * record.qty
+    return _mark_unrealized(record.token_id, record.avg_entry_price, record.qty)
+
+
+# The equity chart is windowed to bound its cost as order_book_snapshot
+# grows unboundedly over a long-running process's lifetime — see
+# openpoly.portfolio.equity's module docstring. 1 day.
+EQUITY_WINDOW_SECONDS = 86_400
+
+
+def _all_time_equity_summary(store: PortfolioStore) -> dict[str, Any]:
+    """All-time realized + unrealized P&L — a cheap aggregate path,
+    independent of the windowed equity curve. NOT derived from the curve's
+    last point, which would silently drop any P&L that aged out of the
+    window. Realized: one SUM query over every closed position
+    (``PortfolioStore.total_realized_pnl``). Unrealized: live level-1-bid
+    mark summed over every currently open position — cheap since there are
+    only ever a handful open at once. A token with no live order book yet
+    contributes 0.0, the same effective convention ``build_equity_curve``
+    uses when no mark exists (falls back to entry price, i.e. zero diff)."""
+    open_positions = store.get_open_positions()
+    unrealized = sum(
+        (_mark_unrealized(p.token_id, p.avg_entry_price, p.qty) or 0.0) for p in open_positions
+    )
+    realized = store.total_realized_pnl()
+    return {
+        "realized": realized,
+        "unrealized": unrealized,
+        "total": realized + unrealized,
+        "open_positions": len(open_positions),
+    }
 
 
 @router.get("/portfolio/equity")
 def get_equity_curve(
+    store: PortfolioStore = Depends(get_portfolio_store),
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> dict[str, Any]:
-    """Equity curve — realized + unrealized P&L over time, marked at the
-    level-1 bid. Reconstructed per request from the position ledger + sampled
-    order books; see ``openpoly.portfolio.equity``."""
-    curve = build_equity_curve(factory)
+    """Equity chart (last ``EQUITY_WINDOW_SECONDS``) + all-time summary.
+
+    ``points`` is windowed to bound the reconstruction cost as
+    ``order_book_snapshot`` grows unboundedly over time; ``summary`` is
+    always all-time, computed via a separate cheap path — see
+    ``_all_time_equity_summary``. Response shape is unchanged from before
+    windowing was added."""
+    curve = build_equity_curve(factory, window_seconds=EQUITY_WINDOW_SECONDS)
     return {
         "points": [asdict(p) for p in curve.points],
-        "summary": {
-            "realized": curve.realized,
-            "unrealized": curve.unrealized,
-            "total": curve.total,
-            "open_positions": curve.open_positions,
-        },
+        "summary": _all_time_equity_summary(store),
     }

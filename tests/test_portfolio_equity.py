@@ -198,3 +198,106 @@ def test_same_token_closed_then_reopened(factory) -> None:
     assert curve.realized == pytest.approx(1.00)
     assert curve.unrealized == pytest.approx(0.30)
     assert curve.open_positions == 1
+
+
+# ---------- windowing (window_seconds / now) ----------
+
+
+def test_window_excludes_position_closed_before_window(factory) -> None:
+    store = PortfolioStore(factory)
+    h = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="ty1",
+        condition_id="0xc1",
+        price=0.40,
+        qty=10.0,
+        ts=50.0,
+        news_id="n1",
+    )
+    store.close_position(
+        h.position_id,
+        sell_price=0.55,
+        ts=100.0,
+        close_reason="take_profit",
+        trigger="take_profit",
+    )
+    # now=500, window=200 -> since=300; position closed at 100 (< since) is
+    # dropped entirely from the windowed curve.
+    curve = build_equity_curve(factory, window_seconds=200.0, now=500.0)
+    assert curve.points == ()
+    assert curve.realized == 0.0
+    assert curve.open_positions == 0
+
+
+def test_window_includes_open_position_regardless_of_open_age(factory) -> None:
+    store = PortfolioStore(factory)
+    store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="ty1",
+        condition_id="0xc1",
+        price=0.40,
+        qty=10.0,
+        ts=10.0,  # well before the window
+        news_id="n1",
+    )
+    curve = build_equity_curve(factory, window_seconds=200.0, now=500.0)
+    assert curve.open_positions == 1
+    assert curve.points[0].ts == 300.0  # clamped to `since` — the window's left edge
+    assert curve.points[-1].ts == 500.0
+
+
+def test_window_boundary_seed_marks_position_open_before_window(factory) -> None:
+    """The critical seed-row test: without the pre-window boundary snapshot,
+    the point at t == since would read unrealized == 0 (fallback to entry
+    price) instead of marking at the last real price before the window."""
+    store = PortfolioStore(factory)
+    store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="ty1",
+        condition_id="0xc1",
+        price=0.40,
+        qty=10.0,
+        ts=50.0,
+        news_id="n1",
+    )
+    _snapshot(factory, "ty1", 80.0, 0.45)  # before since=300 -> boundary seed
+    _snapshot(factory, "ty1", 350.0, 0.50)  # inside the window
+    curve = build_equity_curve(factory, window_seconds=200.0, now=500.0)
+    pt_at_since = next(p for p in curve.points if p.ts == 300.0)
+    assert pt_at_since.unrealized == pytest.approx((0.45 - 0.40) * 10.0)
+
+
+# ---------- _advance_mark (two-pointer mark lookup) ----------
+
+
+def _naive_mark_at(marks, t):
+    """Reference reimplementation of the old (now-deleted) _mark_at — a
+    plain linear rescan from the start, for equivalence testing."""
+    result = None
+    for ts, bid in marks:
+        if ts <= t:
+            result = bid
+        else:
+            break
+    return result
+
+
+@pytest.mark.parametrize(
+    "marks,timeline",
+    [
+        ([], [0.0, 10.0]),
+        ([(5.0, 1.0)], [0.0, 5.0, 5.0, 10.0]),
+        ([(5.0, 1.0), (5.0, 2.0)], [4.0, 5.0, 6.0]),  # duplicate timestamps
+        ([(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)], [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0]),
+    ],
+)
+def test_advance_mark_matches_naive_scan(marks, timeline) -> None:
+    from openpoly.portfolio.equity import _advance_mark
+
+    cursor = -1
+    for t in timeline:
+        got, cursor = _advance_mark(marks, cursor, t)
+        assert got == _naive_mark_at(marks, t)

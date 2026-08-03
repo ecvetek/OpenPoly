@@ -12,7 +12,7 @@ only when a method is called, so it is safe to construct before ``init_db``.
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.db.tables import FillRow, PositionRow
@@ -259,6 +259,18 @@ class PortfolioStore:
                 .all()
             )
             return [_to_held(r) for r in rows]
+
+    def total_realized_pnl(self) -> float:
+        """All-time realized P&L across every closed position — one cheap
+        SUM query, independent of the equity curve (which is windowed to a
+        recent range — see ``openpoly.portfolio.equity``). Backs the
+        Overview stat cards, which must keep showing all-time totals even
+        once older P&L ages out of the equity chart's window."""
+        with self._session_factory() as session:
+            stmt = select(func.coalesce(func.sum(PositionRow.realized_pnl), 0.0)).where(
+                PositionRow.status == "closed"
+            )
+            return session.execute(stmt).scalar_one()
 
     def get_position(self, position_id: int) -> PositionRecord | None:
         """The position with this id — any status (open or closed) — or None."""
