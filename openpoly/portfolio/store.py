@@ -303,3 +303,25 @@ class PortfolioStore:
                 .limit(1)
             )
             return session.execute(stmt).scalar_one_or_none()
+
+    def news_ids_for_positions(self, position_ids: list[int]) -> dict[int, str]:
+        """Bulk sibling of ``news_id_for_position`` — one query instead of
+        one per position_id, for callers that need this for many positions
+        at once (``GET /api/positions``, previously up to 2 extra DB
+        sessions per row). A position with no matching BUY fill, or whose
+        fill's news_id is None (manually-opened paper position), is simply
+        absent from the returned dict — same observable ``.get(pid)``
+        contract as the single-lookup version returning ``None``.
+
+        Openpoly is one-shot per (market, side): each position has exactly
+        one BUY fill, so there's no "pick the first of several" ambiguity
+        to resolve here, unlike a naive bulk rewrite might assume."""
+        if not position_ids:
+            return {}
+        with self._session_factory() as session:
+            stmt = (
+                select(FillRow.position_id, FillRow.news_id)
+                .where(FillRow.position_id.in_(position_ids))
+                .where(FillRow.action == "buy")
+            )
+            return {pid: news_id for pid, news_id in session.execute(stmt) if news_id is not None}

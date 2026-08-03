@@ -56,17 +56,28 @@ def list_positions(
     ``/positions/{id}`` — see that route's docstring). Card-style UI relies
     on these being available list-wide so it can render question / rationale
     / live P&L without fanning out to /positions/{id} per row.
+
+    ``news_id`` and ``analyzer_decisions`` are resolved via two bulk queries
+    up front (not per-row) — this used to be up to 2 extra DB sessions per
+    row (``news_id_for_position`` + a per-position analyzer_call lookup),
+    ~1000 short-lived sessions at ``limit=500``. market_question/
+    polymarket_url/unrealized_pnl stay per-row since those only touch the
+    live in-memory catalog, not the DB.
     """
     rows = store.list_positions(_clamp(limit))
+    news_by_position = store.news_ids_for_positions([r.id for r in rows])
+    decisions_by_news = _lookup_analyzer_decisions_bulk(
+        sorted(set(news_by_position.values())), factory
+    )
     positions: list[dict[str, Any]] = []
     for record in rows:
         body = asdict(record)
         market = _lookup_market(record.condition_id)
         body["market_question"] = market.question if market is not None else None
         body["polymarket_url"] = polymarket_url(market)
-        news_id = store.news_id_for_position(record.id)
+        news_id = news_by_position.get(record.id)
         body["news_id"] = news_id
-        body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id, factory)
+        body["analyzer_decisions"] = decisions_by_news.get(news_id, []) if news_id else []
         body["unrealized_pnl"] = _unrealized_pnl(record)
         positions.append(body)
     return {"positions": positions}
@@ -262,6 +273,38 @@ def _lookup_analyzer_decisions(
         }
         for r in rows
     ]
+
+
+def _lookup_analyzer_decisions_bulk(
+    news_ids: list[str], factory: sessionmaker[Session]
+) -> dict[str, list[dict[str, Any]]]:
+    """Bulk sibling of ``_lookup_analyzer_decisions`` — one query for many
+    news_ids at once (grouped in Python), instead of one query per position
+    row. Each group stays newest-first, same ordering contract as the
+    single-news_id version."""
+    if not news_ids:
+        return {}
+    with factory() as session:
+        rows = (
+            session.execute(
+                select(AnalyzerCallRow)
+                .where(AnalyzerCallRow.news_id.in_(news_ids), AnalyzerCallRow.verdict == "ok")
+                .order_by(AnalyzerCallRow.ts.desc())
+            )
+            .scalars()
+            .all()
+        )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        grouped.setdefault(r.news_id, []).append(
+            {
+                "rationale": r.rationale,
+                "p_model": r.p_model,
+                "confidence": r.confidence,
+                "ts": r.ts,
+            }
+        )
+    return grouped
 
 
 def _lookup_news_summary(

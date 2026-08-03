@@ -191,6 +191,36 @@ def test_list_newest_first_and_limit(store) -> None:
     assert fills[0].market_id == "m4"
 
 
+# ---------- news_ids_for_positions (bulk) ----------
+
+
+def test_news_ids_for_positions_bulk_lookup(store) -> None:
+    """One query for many position_ids at once — same observable result as
+    calling news_id_for_position per-id, just without the extra round-trips
+    (the N+1 pattern this bulk method replaces at the list_positions route)."""
+    h1 = _open(store, market_id="m1", condition_id="0xc1", news_id="n1")
+    h2 = _open(store, market_id="m2", condition_id="0xc2", news_id="n2")
+    h3 = _open(store, market_id="m3", condition_id="0xc3", news_id=None)
+
+    result = store.news_ids_for_positions([h1.position_id, h2.position_id, h3.position_id])
+
+    assert result == {h1.position_id: "n1", h2.position_id: "n2"}
+    assert h3.position_id not in result
+    # Sanity: matches what the single-lookup version returns per id.
+    assert store.news_id_for_position(h1.position_id) == "n1"
+    assert store.news_id_for_position(h3.position_id) is None
+
+
+def test_news_ids_for_positions_empty_input_returns_empty_dict(store) -> None:
+    assert store.news_ids_for_positions([]) == {}
+
+
+def test_news_ids_for_positions_unknown_id_absent_from_result(store) -> None:
+    h1 = _open(store, news_id="n1")
+    result = store.news_ids_for_positions([h1.position_id, 999999])
+    assert result == {h1.position_id: "n1"}
+
+
 # ---------- order_id / tx_hash (slice C) ----------
 
 

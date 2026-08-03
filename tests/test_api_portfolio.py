@@ -468,6 +468,94 @@ def test_list_positions_includes_market_question_and_analyzer_decisions(env) -> 
     assert len(by_market["m2"]["analyzer_decisions"]) == 1
 
 
+def test_list_positions_analyzer_decisions_grouped_correctly_per_news_id(env) -> None:
+    """Regression test for the N+1 -> bulk-query rewrite: positions with
+    DIFFERENT news_ids must each get only their own matching decisions, and
+    a position with no news linkage at all must get an empty list — proving
+    the bulk lookup's grouping-by-news_id is correct, not just incidentally
+    right because a single shared news_id (this file's _open() default)
+    makes every position look the same."""
+    from openpoly.runtime.section_log import AnalyzerCall
+
+    store, client, factory = env
+    h1 = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="ty1",
+        condition_id="0xm1",
+        price=0.42,
+        qty=20.0,
+        ts=100.0,
+        news_id="news-a",
+    )
+    h2 = store.open_position(
+        market_id="m2",
+        side="yes",
+        token_id="ty2",
+        condition_id="0xm2",
+        price=0.42,
+        qty=20.0,
+        ts=101.0,
+        news_id="news-b",
+    )
+    h3 = store.open_position(
+        market_id="m3",
+        side="yes",
+        token_id="ty3",
+        condition_id="0xm3",
+        price=0.42,
+        qty=20.0,
+        ts=102.0,
+        news_id=None,
+    )
+
+    with factory() as session:
+        session.add_all(
+            [
+                AnalyzerCallRow(
+                    **AnalyzerCall(
+                        ts=90.0,
+                        news_id="news-a",
+                        news_content_preview="x",
+                        urgency="high",
+                        verdict="ok",
+                        p_model=0.6,
+                        confidence="medium",
+                        market_id="m1",
+                        latency_ms=10,
+                        rationale="rationale for news-a",
+                    ).to_dict()
+                ),
+                AnalyzerCallRow(
+                    **AnalyzerCall(
+                        ts=91.0,
+                        news_id="news-b",
+                        news_content_preview="y",
+                        urgency="high",
+                        verdict="ok",
+                        p_model=0.5,
+                        confidence="medium",
+                        market_id="m2",
+                        latency_ms=10,
+                        rationale="rationale for news-b",
+                    ).to_dict()
+                ),
+            ]
+        )
+        session.commit()
+
+    positions = client.get("/api/positions").json()["positions"]
+    by_id = {p["id"]: p for p in positions}
+
+    assert [d["rationale"] for d in by_id[h1.position_id]["analyzer_decisions"]] == [
+        "rationale for news-a"
+    ]
+    assert [d["rationale"] for d in by_id[h2.position_id]["analyzer_decisions"]] == [
+        "rationale for news-b"
+    ]
+    assert by_id[h3.position_id]["analyzer_decisions"] == []
+
+
 def test_list_positions_market_question_null_when_no_catalog(env) -> None:
     """Empty catalog → every row has market_question=None (UI must still
     render — card header falls back to condition_id truncation)."""
