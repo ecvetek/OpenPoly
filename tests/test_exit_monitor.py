@@ -349,6 +349,27 @@ def test_peak_persists_across_ticks_and_triggers_drawdown() -> None:
     assert 1 not in monitor._peak
 
 
+def test_peak_entry_dropped_when_position_closed_externally() -> None:
+    """A position can close via a path other than this monitor's own
+    _evaluate() (SettlementMonitor, manual close, reconciliation) — the next
+    tick must garbage-collect its now-stale peak entry, or _peak would grow
+    unboundedly for the life of the process."""
+    m = _monitor(_FakePortfolio([]), _FakeExecutor())
+    # Simulate a stale entry left behind by a position no longer open.
+    m._peak[999] = 0.5
+    m._tick_once()
+    assert 999 not in m._peak
+
+
+def test_peak_entry_kept_for_still_open_position() -> None:
+    """Sanity check the self-heal doesn't accidentally drop a live entry."""
+    market_source_manager.store.set_order_books([_book("t1", bid=0.41)])
+    m = _monitor(_FakePortfolio([_held(1, "t1", avg=0.40)]), _FakeExecutor())
+    m._peak[1] = 0.41
+    m._tick_once()
+    assert 1 in m._peak
+
+
 def test_peak_tracked_on_hold() -> None:
     # v18: held within thresholds writes no entry, but the peak is still
     # tracked in-memory for the drawdown trigger.

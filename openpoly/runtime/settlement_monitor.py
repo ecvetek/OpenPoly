@@ -240,6 +240,37 @@ class SettlementMonitor:
                     order_id=None,
                     tx_hash=None,
                 )
+            except ValueError as exc:
+                # close_position raises ValueError when the position is no
+                # longer open — most commonly because ExitMonitor (or a
+                # manual close) beat this monitor to it between the
+                # open-positions snapshot at the top of _tick_once and this
+                # call. That's a benign race, not a real failure; only log
+                # it as an error if the position turns out to genuinely not
+                # be closed (a real bug, not a race) — never silently mask
+                # an actual failure as benign.
+                record = self._portfolio.get_position(held.position_id)  # type: ignore[union-attr]
+                if record is not None and record.status == "closed":
+                    self._log(
+                        held,
+                        ts,
+                        verdict="skip",
+                        final_price=final_price,
+                        reason="already_closed_by_other_monitor",
+                    )
+                else:
+                    logger.exception(
+                        "settlement monitor: close_position failed for %d",
+                        held.position_id,
+                    )
+                    self._log(
+                        held,
+                        ts,
+                        verdict="error",
+                        final_price=final_price,
+                        error=f"close_failed: {type(exc).__name__}: {str(exc)[:160]}",
+                    )
+                continue
             except Exception as exc:  # noqa: BLE001 — one bad close must not abort
                 logger.exception(
                     "settlement monitor: close_position failed for %d",

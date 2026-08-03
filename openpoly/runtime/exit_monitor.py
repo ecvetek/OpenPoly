@@ -227,6 +227,16 @@ class ExitMonitor:
         ts = time.time()
         catalog = market_source_manager.store
         opens = self._portfolio.get_open_positions()
+        # A position can close via a path other than this monitor's own
+        # _evaluate() below (SettlementMonitor, manual close, reconciliation)
+        # — self-heal any now-stale peak entry here rather than coupling to
+        # those other monitors, which deliberately stay independent of this
+        # one (see module docstrings). Otherwise _peak grows unboundedly for
+        # the life of the process, since settlement is the normal way most
+        # positions eventually close.
+        open_ids = {held.position_id for held in opens}
+        for stale_id in set(self._peak) - open_ids:
+            del self._peak[stale_id]
         blocked = 0
         for held in opens:
             try:

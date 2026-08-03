@@ -272,6 +272,72 @@ async def test_market_not_returned_by_gamma_logs_skip(store) -> None:
     assert entries[0].reason == "market_not_returned_by_gamma"
 
 
+# ---------- close-race handling ----------
+
+
+async def test_already_closed_by_other_monitor_logs_skip_not_error(store) -> None:
+    """close_position raising ValueError because something else (ExitMonitor,
+    a manual close) already closed this position between the open-positions
+    snapshot and this call is a benign race, not a real failure — must log
+    skip, not error, and must not disturb the original close."""
+    pid = _open_position(store, condition_id="0xcid", side="yes", avg=0.40, qty=10.0)
+
+    async def _fetch_and_close_externally(condition_ids: list[str]) -> list[dict[str, Any]]:
+        # Simulate ExitMonitor winning the race while this fetch was in flight.
+        store.close_position(
+            pid, sell_price=0.50, ts=150.0, close_reason="take_profit", trigger="take_profit"
+        )
+        return [_raw_market(condition_id="0xcid", closed=True, outcome_prices=["1", "0"])]
+
+    sm = SettlementMonitor(fetcher=_fetch_and_close_externally)
+    sm.configure(store)
+    await sm._tick_once()
+
+    entries = settlement_log.entries()
+    assert entries[0].verdict == "skip"
+    assert entries[0].reason == "already_closed_by_other_monitor"
+    # The original close must be untouched — not overwritten by settlement.
+    rec = store.get_position(pid)
+    assert rec is not None
+    assert rec.close_reason == "take_profit"
+
+
+async def test_close_position_not_found_logs_error_not_skip() -> None:
+    """A genuinely-missing position (never existed, not a race) must still
+    log as a real error — never silently reclassified as a benign race."""
+    from openpoly.portfolio import HeldPosition
+
+    ghost = HeldPosition(
+        position_id=99999,
+        market_id="m1",
+        side="yes",
+        token_id="yes-0xcid",
+        condition_id="0xcid",
+        qty=10.0,
+        avg_entry_price=0.40,
+        opened_at=100.0,
+    )
+
+    class _GhostPortfolio:
+        def get_open_positions(self) -> list[HeldPosition]:
+            return [ghost]
+
+        def close_position(self, *args: Any, **kwargs: Any) -> None:
+            raise ValueError("position 99999 not found")
+
+        def get_position(self, position_id: int) -> None:
+            return None
+
+    raw = [_raw_market(condition_id="0xcid", closed=True, outcome_prices=["1", "0"])]
+    sm = SettlementMonitor(fetcher=_fetcher_returning(raw))
+    sm.configure(_GhostPortfolio())  # type: ignore[arg-type]
+    await sm._tick_once()
+
+    entries = settlement_log.entries()
+    assert entries[0].verdict == "error"
+    assert "close_failed" in (entries[0].error or "")
+
+
 # ---------- persist hook ----------
 
 
