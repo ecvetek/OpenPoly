@@ -58,15 +58,15 @@ def _open_position(
     return held.position_id
 
 
-def _holdings(pairs: set[tuple[str, str]]):
-    async def _fetch() -> set[tuple[str, str]]:
-        return pairs
+def _holdings(sizes: dict[tuple[str, str], float]):
+    async def _fetch() -> dict[tuple[str, str], float]:
+        return sizes
 
     return _fetch
 
 
 async def test_no_open_positions_is_noop(store) -> None:
-    rm = ReconciliationMonitor(holdings_fetcher=_holdings(set()), grace_seconds=0)
+    rm = ReconciliationMonitor(holdings_fetcher=_holdings({}), grace_seconds=0)
     rm.configure(store)
     await rm._tick_once()
     assert settlement_log.entries() == []
@@ -77,7 +77,7 @@ async def test_flat_position_is_reconciled_closed(store) -> None:
     → the position was exited outside the ledger; close it as reconciled with
     realized_pnl 0 (we deliberately do not fabricate the real exit PnL)."""
     pid = _open_position(store, condition_id="0xcid", side="yes", avg=0.40, qty=10.0)
-    rm = ReconciliationMonitor(holdings_fetcher=_holdings(set()), grace_seconds=0)
+    rm = ReconciliationMonitor(holdings_fetcher=_holdings({}), grace_seconds=0)
     rm.configure(store)
     await rm._tick_once()
     rec = store.get_position(pid)
@@ -93,7 +93,9 @@ async def test_flat_position_is_reconciled_closed(store) -> None:
 
 async def test_position_still_held_on_chain_is_left_open(store) -> None:
     pid = _open_position(store, condition_id="0xcid", side="yes")
-    rm = ReconciliationMonitor(holdings_fetcher=_holdings({("0xcid", "yes")}), grace_seconds=0)
+    rm = ReconciliationMonitor(
+        holdings_fetcher=_holdings({("0xcid", "yes"): 10.0}), grace_seconds=0
+    )
     rm.configure(store)
     await rm._tick_once()
     rec = store.get_position(pid)
@@ -104,7 +106,9 @@ async def test_held_other_side_does_not_reconcile_wrong_side(store) -> None:
     """Holding the NO token must not reconcile-close an open YES position on the
     same condition (and vice-versa) — (condition, side) must match exactly."""
     pid = _open_position(store, condition_id="0xcid", side="yes")
-    rm = ReconciliationMonitor(holdings_fetcher=_holdings({("0xcid", "no")}), grace_seconds=0)
+    rm = ReconciliationMonitor(
+        holdings_fetcher=_holdings({("0xcid", "no"): 5.0}), grace_seconds=0
+    )
     rm.configure(store)
     await rm._tick_once()
     rec = store.get_position(pid)
@@ -118,7 +122,7 @@ async def test_not_live_is_noop(store) -> None:
     position as 'flat on-chain'."""
     pid = _open_position(store, condition_id="0xcid", side="yes")
     rm = ReconciliationMonitor(
-        holdings_fetcher=_holdings(set()),
+        holdings_fetcher=_holdings({}),
         grace_seconds=0,
         live_check=lambda: False,
     )
@@ -133,7 +137,7 @@ async def test_within_grace_period_is_skipped(store) -> None:
     """A just-opened position that reads flat must NOT be reconciled — the buy's
     on-chain settlement / indexer update can lag a few minutes."""
     pid = _open_position(store, condition_id="0xcid", side="yes", ts=time.time())
-    rm = ReconciliationMonitor(holdings_fetcher=_holdings(set()), grace_seconds=10_000)
+    rm = ReconciliationMonitor(holdings_fetcher=_holdings({}), grace_seconds=10_000)
     rm.configure(store)
     await rm._tick_once()
     rec = store.get_position(pid)
@@ -148,7 +152,9 @@ async def test_untracked_onchain_holding_alerts_but_never_opens(store) -> None:
     """Wallet holds a (condition, side) the ledger has no open position for
     (the untracked-orphan shape) → loud alert in the log, but NEVER an
     auto-opened position (cost basis unknown; external transfers possible)."""
-    rm = ReconciliationMonitor(holdings_fetcher=_holdings({("0xorphan", "yes")}), grace_seconds=0)
+    rm = ReconciliationMonitor(
+        holdings_fetcher=_holdings({("0xorphan", "yes"): 5.0}), grace_seconds=0
+    )
     rm.configure(store)
     await rm._tick_once()
     entries = settlement_log.entries()
@@ -159,7 +165,9 @@ async def test_untracked_onchain_holding_alerts_but_never_opens(store) -> None:
 
 
 async def test_untracked_alert_fires_once_per_orphan(store) -> None:
-    rm = ReconciliationMonitor(holdings_fetcher=_holdings({("0xorphan", "yes")}), grace_seconds=0)
+    rm = ReconciliationMonitor(
+        holdings_fetcher=_holdings({("0xorphan", "yes"): 5.0}), grace_seconds=0
+    )
     rm.configure(store)
     await rm._tick_once()
     await rm._tick_once()
@@ -167,8 +175,57 @@ async def test_untracked_alert_fires_once_per_orphan(store) -> None:
 
 
 async def test_tracked_holding_does_not_alert(store) -> None:
-    _open_position(store, condition_id="0xcid", side="yes")
-    rm = ReconciliationMonitor(holdings_fetcher=_holdings({("0xcid", "yes")}), grace_seconds=0)
+    _open_position(store, condition_id="0xcid", side="yes", qty=10.0)
+    rm = ReconciliationMonitor(
+        holdings_fetcher=_holdings({("0xcid", "yes"): 10.0}), grace_seconds=0
+    )
     rm.configure(store)
     await rm._tick_once()
     assert settlement_log.entries() == []  # ledger knows it — quiet
+
+
+# ---------- quantity drift on tracked positions (D19) ----------
+
+
+async def test_quantity_drift_alerts_but_does_not_mutate(store) -> None:
+    """A tracked position whose on-chain size has drifted from the ledger
+    must log a loud skip — but the ledger qty is NEVER auto-corrected (the
+    real cause of the drift is unknown; a human decides), unlike the
+    untracked-holding case there is no close either — the position stays
+    open exactly as the ledger already has it."""
+    pid = _open_position(store, condition_id="0xcid", side="yes", qty=10.0)
+    rm = ReconciliationMonitor(
+        holdings_fetcher=_holdings({("0xcid", "yes"): 7.0}), grace_seconds=0
+    )
+    rm.configure(store)
+    await rm._tick_once()
+    rec = store.get_position(pid)
+    assert rec is not None
+    assert rec.status == "open"
+    assert rec.qty == pytest.approx(10.0)  # untouched
+    entries = settlement_log.entries()
+    assert len(entries) == 1
+    assert entries[0].verdict == "skip"
+    assert entries[0].reason == "quantity_drift"
+
+
+async def test_quantity_drift_alert_fires_once_per_key(store) -> None:
+    _open_position(store, condition_id="0xcid", side="yes", qty=10.0)
+    rm = ReconciliationMonitor(
+        holdings_fetcher=_holdings({("0xcid", "yes"): 7.0}), grace_seconds=0
+    )
+    rm.configure(store)
+    await rm._tick_once()
+    await rm._tick_once()
+    assert len(settlement_log.entries()) == 1  # deduped across ticks
+
+
+async def test_quantity_within_epsilon_does_not_alert(store) -> None:
+    """Tiny float noise well under the drift epsilon must not false-alarm."""
+    _open_position(store, condition_id="0xcid", side="yes", qty=10.0)
+    rm = ReconciliationMonitor(
+        holdings_fetcher=_holdings({("0xcid", "yes"): 10.0 + 1e-6}), grace_seconds=0
+    )
+    rm.configure(store)
+    await rm._tick_once()
+    assert settlement_log.entries() == []

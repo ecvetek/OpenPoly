@@ -182,7 +182,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
         _funder = runtime_state.wallet.funder_address
 
-        async def _held_condition_sides() -> set[tuple[str, str]]:
+        async def _held_condition_sides() -> dict[tuple[str, str], float]:
             return await fetch_held_condition_sides(_funder)
 
         _recon_mod.reconciliation_monitor = ReconciliationMonitor(

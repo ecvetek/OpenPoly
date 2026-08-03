@@ -256,8 +256,8 @@ async def test_fetch_market_by_id_normalize_returns_none(monkeypatch, caplog):
 
 
 async def test_held_condition_sides_maps_outcome_to_side():
-    """data-api /positions → set of (conditionId, side); only size>0, and
-    outcome Yes/No mapped to yes/no."""
+    """data-api /positions → dict of (conditionId, side) -> size; only
+    size>0, and outcome Yes/No mapped to yes/no."""
     payload = [
         {"conditionId": "0xaaa", "outcome": "Yes", "size": 34.0},
         {"conditionId": "0xbbb", "outcome": "No", "size": 18.0},
@@ -272,7 +272,7 @@ async def test_held_condition_sides_maps_outcome_to_side():
     async with _mock_client(handler) as client:
         held = await fetch_held_condition_sides("0xFUNDER", client=client)
 
-    assert held == {("0xaaa", "yes"), ("0xbbb", "no")}
+    assert held == {("0xaaa", "yes"): 34.0, ("0xbbb", "no"): 18.0}
 
 
 async def test_held_condition_sides_empty_when_no_positions():
@@ -282,7 +282,7 @@ async def test_held_condition_sides_empty_when_no_positions():
     async with _mock_client(handler) as client:
         held = await fetch_held_condition_sides("0xFUNDER", client=client)
 
-    assert held == set()
+    assert held == {}
 
 
 # ---------- fetch_wallet_positions_value (data-api /value) ----------

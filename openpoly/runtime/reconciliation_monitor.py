@@ -18,6 +18,14 @@ any open position whose ``(condition_id, side)`` is absent from that set —
 *and* older than ``grace_seconds`` (a fresh buy's settlement/indexer update can
 lag) — closes it via ``close_position(reason="reconciled")``.
 
+It also compares *quantity* for positions that are still tracked: the fetcher
+returns each held pair's on-chain size, so a ledger qty that has drifted from
+the on-chain size (e.g. a partial-cancel edge case, or a resting-order
+remainder filling after the cancel appeared to fail) is logged loudly rather
+than silently ignored — the previous set-membership-only diff was blind to
+this. Like the untracked-holding case, drift is **never auto-corrected**: the
+correct on-chain size is known, but not *why* it diverged, so a human decides.
+
 Realized PnL is deliberately recorded as **0** (close at ``avg_entry_price``):
 the real exit price lives on-chain but can't be reliably attributed back to a
 specific openPoly position when the same market was traded more than once, so we
@@ -43,12 +51,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TICK_INTERVAL_SECONDS = 300  # 5 min — divergence isn't latency-sensitive
 DEFAULT_GRACE_SECONDS = 300  # don't reconcile a buy younger than this
+# Looser than PortfolioStore's own 1e-6 float-equality tolerance, to absorb
+# data-api rounding/serialization noise rather than false-alarming on it.
+_QTY_DRIFT_EPS = 1e-4
 
 State = Literal["stopped", "running"]
 
-# Async callable returning the set of (condition_id, side) the wallet holds
-# on-chain, side ∈ {"yes", "no"}.
-HoldingsFetcher = Callable[[], Awaitable["set[tuple[str, str]]"]]
+# Async callable returning, for each (condition_id, side) held on-chain, its
+# on-chain size. side ∈ {"yes", "no"}.
+HoldingsFetcher = Callable[[], Awaitable["dict[tuple[str, str], float]"]]
 
 
 class ReconciliationMonitor:
@@ -79,6 +90,9 @@ class ReconciliationMonitor:
         # as untracked this process lifetime — one loud alert per orphan, not
         # one per tick.
         self._alerted: set[tuple[str, str]] = set()
+        # Quantity-drift alert dedup, same one-per-key-per-process shape as
+        # ``_alerted`` above but for still-tracked positions whose qty diverges.
+        self._drift_alerted: set[tuple[str, str]] = set()
 
     @property
     def state(self) -> State:
@@ -146,7 +160,7 @@ class ReconciliationMonitor:
         # auto-open: the cost basis is unknown and auto-created positions would
         # confuse entry dedup. A human decides what to do with it.
         known = {(p.condition_id, p.side) for p in opens}
-        for cid, side in sorted(held - known):
+        for cid, side in sorted(set(held) - known):
             if (cid, side) in self._alerted:
                 continue
             self._alerted.add((cid, side))
@@ -175,7 +189,27 @@ class ReconciliationMonitor:
         for pos in opens:
             if ts - pos.opened_at < self._grace:
                 continue
-            if (pos.condition_id, pos.side) in held:
+            key = (pos.condition_id, pos.side)
+            if key in held:
+                drift = abs(held[key] - pos.qty)
+                if drift > _QTY_DRIFT_EPS and key not in self._drift_alerted:
+                    self._drift_alerted.add(key)
+                    logger.warning(
+                        "reconciliation: qty drift on tracked position %d (%s…, %s) — "
+                        "ledger=%.6f on-chain=%.6f; NOT auto-corrected, manual review needed",
+                        pos.position_id,
+                        pos.condition_id[:14],
+                        pos.side,
+                        pos.qty,
+                        held[key],
+                    )
+                    self._log(
+                        pos,
+                        ts,
+                        verdict="skip",
+                        reason="quantity_drift",
+                        error=f"ledger={pos.qty:.6f} onchain={held[key]:.6f}",
+                    )
                 continue
             # Flat on-chain but open in the DB → exited outside the ledger.
             try:

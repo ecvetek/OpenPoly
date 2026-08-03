@@ -192,15 +192,17 @@ async def fetch_held_condition_sides(
     base_url: str = DATA_API_BASE_URL,
     timeout: float = DEFAULT_TIMEOUT,
     client: httpx.AsyncClient | None = None,
-) -> set[tuple[str, str]]:
-    """Return the ``(condition_id, side)`` pairs the wallet holds on-chain.
+) -> dict[tuple[str, str], float]:
+    """Return the on-chain size held for each ``(condition_id, side)`` pair.
 
     Reads the Polymarket data-api ``/positions`` indexer for ``funder`` — it is
     authoritative on what the wallet actually holds and accounts for neg-risk
     wrapping (raw ``balanceOf`` on a token id does not). ``side`` is the held
     outcome lowercased (``yes`` / ``no``). Only positions with a positive size
     are included; flat (size 0) ones are omitted so the reconciliation monitor
-    treats them as exited.
+    treats them as exited. Carrying the size (not just membership) lets the
+    caller detect quantity drift on a position it still tracks, not only a
+    full exit.
     """
     raw = await _get_json(
         f"{base_url}/positions",
@@ -209,8 +211,8 @@ async def fetch_held_condition_sides(
         client,
     )
     if not isinstance(raw, list):
-        return set()
-    held: set[tuple[str, str]] = set()
+        return {}
+    held: dict[tuple[str, str], float] = {}
     for pos in raw:
         if not isinstance(pos, dict):
             continue
@@ -222,7 +224,7 @@ async def fetch_held_condition_sides(
             size = 0.0
         if not cid or not isinstance(outcome, str) or size <= 0:
             continue
-        held.add((str(cid), outcome.strip().lower()))
+        held[(str(cid), outcome.strip().lower())] = size
     return held
 
 
