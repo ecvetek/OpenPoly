@@ -102,10 +102,12 @@ def test_buy_dust_skip(store) -> None:
 def test_buy_position_exists_skip(store) -> None:
     _populate(_market(), _book("yes-m1", ask=0.42))
     ex = Executor(store)
-    assert ex.execute_buy(_intent(), news_id="n1", ts=1.0).filled
+    first = ex.execute_buy(_intent(), news_id="n1", ts=1.0)
+    assert first.filled
     r = ex.execute_buy(_intent(), news_id="n2", ts=2.0)
     assert not r.filled
     assert r.skip_reason == "position_exists"
+    assert r.position_id == first.position_id
 
 
 def test_buy_market_not_found_skip(store) -> None:
