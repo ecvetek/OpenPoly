@@ -42,7 +42,7 @@ function fmtUsd(n: number | null): string {
 
 export function OverviewTab() {
   const [refreshMs, setRefreshMs] = useState<number | null>(REFRESH_OPTIONS[0].ms)
-  const [windowHours, setWindowHours] = useState<number>(WINDOW_OPTIONS[3].hours)
+  const [windowHours, setWindowHours] = useState<number>(WINDOW_OPTIONS[1].hours)
   // refreshKey = windowHours: changing the window forces an immediate
   // refetch even while refresh is "off" — otherwise the fetcher closure
   // would pick up the new window silently, only visible on the next
