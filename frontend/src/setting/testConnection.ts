@@ -37,5 +37,13 @@ export async function testNewsConnection(args: {
   if (!resp.ok) {
     return { ok: false, error: `HTTP ${resp.status}`, latency_ms: null }
   }
-  return (await resp.json()) as TestConnectionResult
+  try {
+    return (await resp.json()) as TestConnectionResult
+  } catch (e) {
+    return {
+      ok: false,
+      error: `Malformed response: ${e instanceof Error ? e.message : String(e)}`,
+      latency_ms: null,
+    }
+  }
 }

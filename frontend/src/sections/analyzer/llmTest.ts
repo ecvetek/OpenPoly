@@ -35,5 +35,13 @@ export async function testLLMConnection(args: {
   if (!resp.ok) {
     return { ok: false, error: `HTTP ${resp.status}`, latency_ms: null }
   }
-  return (await resp.json()) as LLMTestResult
+  try {
+    return (await resp.json()) as LLMTestResult
+  } catch (e) {
+    return {
+      ok: false,
+      error: `Malformed response: ${e instanceof Error ? e.message : String(e)}`,
+      latency_ms: null,
+    }
+  }
 }
