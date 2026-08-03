@@ -177,6 +177,65 @@ async def test_embedding_autostart_uses_canvas_saved_config(
     assert captured["warm_interval_seconds"] == 999
 
 
+async def test_exit_monitor_autostart_uses_canvas_saved_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """exit_monitor is a module-level singleton built at import time with
+    bare ThresholdExitConfig() defaults — unlike the orchestrator's sections,
+    which are built lazily (on first get_orchestrator() call) reading canvas
+    config at construction. Without an explicit rebuild at lifespan startup,
+    a fresh process would silently ignore anything saved in the canvas UI
+    (take_profit_pct, stop_loss_pct, peak_drawdown_pct, ...) until the
+    operator happened to re-save the exit node while already running —
+    same class of bug as market/news/embedding autostart."""
+    from openpoly.runtime.canvas_store import save_template
+    from openpoly.runtime.exit_monitor import exit_monitor
+
+    save_template(
+        {
+            "version": 1,
+            "name": "test",
+            "nodes": [
+                {
+                    "id": "exit-seed",
+                    "sectionType": "exit",
+                    "position": {"x": 0, "y": 0},
+                    "config": {
+                        "take_profit_pct": 0.8,
+                        "stop_loss_pct": 0.5,
+                        "peak_drawdown_pct": 0.5,
+                    },
+                }
+            ],
+            "edges": [],
+        }
+    )
+
+    captured: list[Any] = []
+
+    async def fake_replace_exit_section(new_section: Any) -> None:
+        captured.append(new_section)
+
+    async def fake_start() -> None:
+        pass
+
+    async def fake_stop() -> None:
+        pass
+
+    monkeypatch.setattr(exit_monitor, "replace_exit_section", fake_replace_exit_section)
+    monkeypatch.setattr(exit_monitor, "start", fake_start)
+    monkeypatch.setattr(exit_monitor, "stop", fake_stop)
+
+    async with lifespan(app):
+        pass
+
+    assert len(captured) == 1
+    cfg = captured[0].config
+    assert cfg.take_profit_pct == 0.8  # from canvas, not the 0.20 default
+    assert cfg.stop_loss_pct == 0.5  # not the 0.15 default
+    assert cfg.peak_drawdown_pct == 0.5  # not the 0.12 default
+
+
 async def test_lifespan_calls_bootstrap_peaks_before_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

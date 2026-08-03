@@ -44,6 +44,7 @@ from openpoly.runtime.reconciliation_monitor import ReconciliationMonitor
 from openpoly.runtime.orchestrator import _canvas_config, get_orchestrator
 from openpoly.sections._registry import CatalogEntry, scan
 from openpoly.sections.embedding.minilm_v0 import EmbeddingFilterConfig
+from openpoly.sections.exit.threshold_v0 import ThresholdExitConfig, ThresholdExitV0
 from openpoly.sections.news_source.tradingnews_ws import TradingNewsWSConfig
 from openpoly.wallet.runtime_state import runtime_state
 
@@ -159,7 +160,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:  # noqa: BLE001 — startup must survive a bad wallet
             logger.exception("live executor construction failed: %s", exc)
     # Exit monitor — the timer-driven close loop; shares the executor with the
-    # orchestrator. Configure with its own PortfolioStore, then start ticking.
+    # orchestrator. Unlike the orchestrator's sections (built lazily by
+    # get_orchestrator(), which reads canvas config at construction time),
+    # exit_monitor is a plain module-level singleton built at import time
+    # with bare ThresholdExitConfig() defaults — same class of bug as
+    # market/news/embedding autostart. Rebuild its section from the
+    # persisted canvas config before it starts ticking, or a fresh process
+    # silently ignores anything saved in the canvas UI (take_profit_pct,
+    # stop_loss_pct, peak_drawdown_pct, etc.) until the operator happens to
+    # re-save the exit node while the process is already running.
+    exit_cfg = _canvas_config(ThresholdExitConfig, "exit")
+    await exit_monitor.replace_exit_section(ThresholdExitV0(exit_cfg))
+    # Configure with its own PortfolioStore, then start ticking.
     exit_monitor.configure(PortfolioStore(get_session_factory()))
     # Rebuild each open position's true historical peak price from
     # order_book_snapshot before the tick loop starts — otherwise every
