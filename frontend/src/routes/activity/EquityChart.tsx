@@ -6,6 +6,15 @@
  * lightweight-charts needs strictly-increasing whole-second timestamps, so the
  * points are de-duplicated by Math.floor(ts), keeping the last in each second.
  *
+ * IMPORTANT: lightweight-charts formats numeric (UTCTimestamp) axis/crosshair
+ * labels in UTC by default — it does NOT convert to the browser's local
+ * timezone on its own, despite the type name. Without the localization /
+ * tickMarkFormatter overrides below, every label is silently offset from the
+ * viewer's wall clock by their UTC offset (e.g. a UTC+2 browser sees "19:25"
+ * labeled on a point that was actually recorded at local 21:25). Both
+ * formatters below explicitly convert via `new Date(ts * 1000)` + the
+ * browser's local Intl formatting, so labels always match wall-clock time.
+ *
  * v5 API: chart.addSeries(BaselineSeries, …). If a v4 build is installed,
  * swap to chart.addBaselineSeries(…) and remove the BaselineSeries import.
  */
@@ -13,6 +22,7 @@ import { useEffect, useRef } from 'react'
 import {
   BaselineSeries,
   createChart,
+  TickMarkType,
   type IChartApi,
   type ISeriesApi,
   type MouseEventParams,
@@ -23,6 +33,36 @@ import type { EquityPoint } from './equityClient'
 function formatUsd(n: number): string {
   const sign = n < 0 ? '-' : ''
   return `${sign}$${Math.abs(n).toFixed(2)}`
+}
+
+// Local-timezone tick label, granularity-aware (mirrors what the library's
+// own default UTC formatter would show, just using local Date methods).
+function localTickMarkFormatter(time: UTCTimestamp, tickMarkType: TickMarkType): string {
+  const d = new Date(time * 1000)
+  switch (tickMarkType) {
+    case TickMarkType.Year:
+      return String(d.getFullYear())
+    case TickMarkType.Month:
+      return d.toLocaleDateString([], { month: 'short', year: 'numeric' })
+    case TickMarkType.DayOfMonth:
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+    case TickMarkType.TimeWithSeconds:
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    default:
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+}
+
+// Local-timezone label for the crosshair's floating time-axis readout (the
+// small tag at the bottom edge under the crosshair).
+function localCrosshairTimeFormatter(time: UTCTimestamp): string {
+  return new Date(time * 1000).toLocaleString([], {
+    day: '2-digit',
+    month: 'short',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 export function EquityChart({ points }: { points: EquityPoint[] }) {
@@ -47,7 +87,12 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
         vertLines: { color: '#1f242c' },
         horzLines: { color: '#1f242c' },
       },
-      timeScale: { timeVisible: true, secondsVisible: false },
+      localization: { timeFormatter: localCrosshairTimeFormatter },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: localTickMarkFormatter,
+      },
       rightPriceScale: { borderColor: '#30363d' },
     })
     const series = chart.addSeries(BaselineSeries, {
@@ -76,6 +121,7 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
       tip.style.left = `${param.point.x + 12}px`
       tip.style.top = `${param.point.y + 12}px`
       tip.innerHTML =
+        `<div style="color:#8b949e">${localCrosshairTimeFormatter(param.time as UTCTimestamp)}</div>` +
         `<div>Equity <b>${formatUsd(pt.equity)}</b></div>` +
         `<div style="color:#8b949e">realized ${formatUsd(pt.realized)} · ` +
         `unrealized ${formatUsd(pt.unrealized)}</div>`

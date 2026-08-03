@@ -5,6 +5,17 @@
  * visibility, so a background tab does not keep hitting the API but also never
  * hangs forever on "Loading…". The fetcher is held in a ref so passing an
  * inline arrow does not re-subscribe the effect.
+ *
+ * `intervalMs = null` disables automatic refreshing entirely (no interval
+ * timer, no visibilitychange-triggered refetch) — the fetcher still runs
+ * once on mount so the initial data loads, but nothing after that short of
+ * a full remount or a changed `refreshKey`.
+ *
+ * `refreshKey` is an escape hatch for callers whose fetcher closes over
+ * state that should force an immediate refetch when it changes (e.g. a
+ * selected time window), independent of `intervalMs` — including while
+ * refresh is disabled. Passing nothing (`undefined`) is a no-op: it never
+ * changes, so it never affects the existing interval-only behavior.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
@@ -18,7 +29,8 @@ export type PollResult<T> = {
 
 export function usePoll<T>(
   fetcher: () => Promise<T>,
-  intervalMs = 3000,
+  intervalMs: number | null = 3000,
+  refreshKey?: unknown,
 ): PollResult<T> {
   const [data, setData] = useState<T | null>(null)
   const [status, setStatus] = useState<PollStatus>('loading')
@@ -53,6 +65,11 @@ export function usePoll<T>(
       }
     }
     void refresh()
+    if (intervalMs === null) {
+      return () => {
+        cancelled = true
+      }
+    }
     const maybeRefresh = () => {
       if (document.visibilityState === 'visible') void refresh()
     }
@@ -63,7 +80,7 @@ export function usePoll<T>(
       clearInterval(timer)
       document.removeEventListener('visibilitychange', maybeRefresh)
     }
-  }, [intervalMs])
+  }, [intervalMs, refreshKey])
 
   return { data, status, error }
 }
