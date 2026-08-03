@@ -15,10 +15,10 @@ import type {
   NewsPipelineCard,
 } from './newsTypes'
 
-// Caller may bump this via the Load-more button (D5). The 3 section log
-// rings are size-200 server-side, so requesting more than that returns
-// at most 200 — no need to plumb the value through the other URLs.
-export const DEFAULT_NEWS_LIMIT = 100
+// Caller may raise this via the News tab's limit selector (max 200). The 3
+// section log rings are size-200 server-side, so requesting more than that
+// returns at most 200 — no need to plumb the value through the other URLs.
+export const DEFAULT_NEWS_LIMIT = 25
 
 // Ring capacity (per openpoly.runtime.section_log.DEFAULT_MAXLEN). Asking
 // for exactly the ring size guarantees we'll see whatever the backend

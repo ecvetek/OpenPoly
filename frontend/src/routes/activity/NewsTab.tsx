@@ -7,11 +7,11 @@
  * so embedding-skipped news ends up under "Skipped" (where it belongs)
  * and is hidden from "Filled" / "Errored" buckets.
  *
- * Pagination via Load more (D5): we re-fetch with a higher `newsLimit`;
- * the section-log endpoints (embedding / analyzer / entry) are
- * size-200 rings server-side and always queried at their max, so they
- * don't need a paged limit. The next poll tick (≤3 s) picks up the new
- * news limit via the fetcher closure (usePoll re-reads via ref).
+ * Limit selector (25/50/100/200, default 25): sets `newsLimit` directly;
+ * the section-log endpoints (embedding / analyzer / entry) are size-200
+ * rings server-side and always queried at their max, so they don't need
+ * a paged limit. The next poll tick (≤3 s) picks up the new news limit
+ * via the fetcher closure (usePoll re-reads via ref).
  *
  * 5-s polling re-uses the same `usePoll` everyone else here does;
  * `pending` cards are intentionally only visible under "All" — they're
@@ -25,7 +25,7 @@ import { usePoll } from './usePoll'
 
 type Filter = 'all' | 'filled' | 'skipped' | 'errored'
 
-const LOAD_MORE_STEP = 100
+const NEWS_LIMIT_OPTIONS = [25, 50, 100, 200] as const
 
 function FilterChip({
   label,
@@ -80,9 +80,6 @@ export function NewsTab() {
     [cards, filter],
   )
 
-  // Server hit our requested limit → there is likely more to fetch.
-  const canLoadMore = cards !== null && cards.length >= displayLimit
-
   if (cards === null) {
     return (
       <div className="grid place-items-center p-10">
@@ -101,36 +98,55 @@ export function NewsTab() {
         </div>
       )}
 
-      <div className="flex items-center gap-2 flex-wrap">
-        <FilterChip
-          label="All"
-          count={counts.all}
-          active={filter === 'all'}
-          onClick={() => setFilter('all')}
-        />
-        <FilterChip
-          label="Filled"
-          count={counts.filled}
-          active={filter === 'filled'}
-          onClick={() => setFilter('filled')}
-        />
-        <FilterChip
-          label="Skipped"
-          count={counts.skipped}
-          active={filter === 'skipped'}
-          onClick={() => setFilter('skipped')}
-        />
-        <FilterChip
-          label="Errored"
-          count={counts.errored}
-          active={filter === 'errored'}
-          onClick={() => setFilter('errored')}
-        />
-        {counts.pending > 0 && filter !== 'all' && (
-          <span className="ml-2 text-[10px] text-neutral-500 italic">
-            ({counts.pending} pending — visible only under All)
-          </span>
-        )}
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <FilterChip
+            label="All"
+            count={counts.all}
+            active={filter === 'all'}
+            onClick={() => setFilter('all')}
+          />
+          <FilterChip
+            label="Filled"
+            count={counts.filled}
+            active={filter === 'filled'}
+            onClick={() => setFilter('filled')}
+          />
+          <FilterChip
+            label="Skipped"
+            count={counts.skipped}
+            active={filter === 'skipped'}
+            onClick={() => setFilter('skipped')}
+          />
+          <FilterChip
+            label="Errored"
+            count={counts.errored}
+            active={filter === 'errored'}
+            onClick={() => setFilter('errored')}
+          />
+          {counts.pending > 0 && filter !== 'all' && (
+            <span className="ml-2 text-[10px] text-neutral-500 italic">
+              ({counts.pending} pending — visible only under All)
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1 text-[10px] text-neutral-500">
+          <span>limit</span>
+          {NEWS_LIMIT_OPTIONS.map((n) => (
+            <button
+              key={n}
+              type="button"
+              onClick={() => setDisplayLimit(n)}
+              className={`rounded px-1.5 py-0.5 ${
+                displayLimit === n
+                  ? 'bg-blue-600 text-white'
+                  : 'border border-neutral-700 text-neutral-400'
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
       </div>
 
       {visible.length === 0 ? (
@@ -145,16 +161,6 @@ export function NewsTab() {
             <NewsCard key={c.news.id} card={c} />
           ))}
         </div>
-      )}
-
-      {canLoadMore && (
-        <button
-          type="button"
-          onClick={() => setDisplayLimit((n) => n + LOAD_MORE_STEP)}
-          className="self-center px-4 py-1.5 rounded border border-neutral-800 bg-transparent text-[11px] text-neutral-400 hover:bg-neutral-900"
-        >
-          Load more
-        </button>
       )}
     </div>
   )
