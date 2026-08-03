@@ -52,6 +52,12 @@ from openpoly.sections.analyzer.llm_v0 import LLMAnalyzerConfig
 
 router = APIRouter(prefix="/api", tags=["runtime"])
 
+# Matches inspect_routes.py's NEWS_LIMIT_MAX / ORDER_BOOK_LIMIT_MAX pattern —
+# these 5 routes previously had no upper bound at all, so a fat-fingered
+# ?limit=999999999 could force an unbounded query against a call-log table
+# as it grows.
+SECTION_LOG_LIMIT_MAX = 500
+
 
 def _entries_from_db(
     factory: sessionmaker[Session], row_cls: type, limit: int
@@ -59,7 +65,7 @@ def _entries_from_db(
     """Newest ``limit`` rows from a persisted call-log table, returned
     oldest-first — matches ``SectionLogStore.entries(limit)``'s contract
     exactly (``limit<=0`` -> ``[]``)."""
-    limit = max(0, limit)
+    limit = max(0, min(limit, SECTION_LOG_LIMIT_MAX))
     if limit == 0:
         return []
     with factory() as session:

@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import openpoly.api.runtime_routes as runtime_routes
 from openpoly.api.main import app, lifespan
 from openpoly.db.engine import get_session_factory, init_db, make_engine, make_session_factory
 from openpoly.db.tables import (
@@ -544,6 +545,38 @@ async def test_analyzer_log_limit(db) -> None:
     assert [e["news_id"] for e in body["entries"]] == ["n3", "n4"]
     # counters still reflect the full ring, not the limited slice
     assert body["counters"]["ok"] == 5
+
+
+async def test_analyzer_log_limit_clamped_to_max(db, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An absurd ?limit= must not force an unbounded query — previously
+    these 5 routes had no upper clamp at all, unlike portfolio_routes.py /
+    inspect_routes.py's capped ``limit`` handling. Lower the max via
+    monkeypatch instead of seeding 500+ rows, for a fast, deterministic
+    assertion of the same clamping behavior."""
+    monkeypatch.setattr(runtime_routes, "SECTION_LOG_LIMIT_MAX", 2)
+    calls = [
+        AnalyzerCall(
+            ts=float(i),
+            news_id=f"n{i}",
+            news_content_preview="x",
+            urgency="high",
+            verdict="ok",
+            p_model=0.5,
+            confidence="medium",
+            market_id="m",
+            latency_ms=1,
+        )
+        for i in range(5)
+    ]
+    _seed_analyzer_rows(db, *calls)
+    client = await _client()
+    try:
+        r = await client.get("/api/analyzer/log", params={"limit": 999_999_999})
+    finally:
+        await client.aclose()
+    body = r.json()
+    assert r.status_code == 200
+    assert len(body["entries"]) == 2  # clamped to the (patched) max, not 5
 
 
 # ---------- lifespan wiring ----------
