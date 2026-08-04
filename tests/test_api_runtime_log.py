@@ -276,6 +276,7 @@ async def test_embedding_log_includes_polymarket_url_when_catalogued(db) -> None
         r.json()["entries"][0]["top_market_polymarket_url"]
         == "https://polymarket.com/event/event-slug"
     )
+    assert r.json()["entries"][0]["top_market_question"] == "Q?"
 
 
 async def test_embedding_log_polymarket_url_null_when_not_catalogued(db) -> None:
@@ -316,6 +317,7 @@ async def test_embedding_log_polymarket_url_null_when_not_catalogued(db) -> None
     finally:
         await client.aclose()
     assert r.json()["entries"][0]["top_market_polymarket_url"] is None
+    assert r.json()["entries"][0]["top_market_question"] is None
 
 
 def _seed_analyzer_rows(db, *rows: AnalyzerCall) -> None:
@@ -409,6 +411,7 @@ async def test_analyzer_log_includes_polymarket_url_when_catalogued(db) -> None:
         r.json()["entries"][0]["market_polymarket_url"]
         == "https://polymarket.com/event/event-slug"
     )
+    assert r.json()["entries"][0]["market_question"] == "Q?"
 
 
 async def test_analyzer_log_polymarket_url_null_when_not_catalogued(db) -> None:
@@ -431,6 +434,7 @@ async def test_analyzer_log_polymarket_url_null_when_not_catalogued(db) -> None:
     finally:
         await client.aclose()
     assert r.json()["entries"][0]["market_polymarket_url"] is None
+    assert r.json()["entries"][0]["market_question"] is None
 
 
 async def test_analyzer_log_polymarket_url_null_when_no_market_id(db) -> None:
@@ -455,6 +459,7 @@ async def test_analyzer_log_polymarket_url_null_when_no_market_id(db) -> None:
     finally:
         await client.aclose()
     assert r.json()["entries"][0]["market_polymarket_url"] is None
+    assert r.json()["entries"][0]["market_question"] is None
 
 
 async def test_entry_log_returns_appended_entries(db) -> None:

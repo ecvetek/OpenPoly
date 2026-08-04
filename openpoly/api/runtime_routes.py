@@ -81,16 +81,20 @@ def _entries_from_db(
 
 
 def _attach_polymarket_links(
-    entries: list[dict[str, Any]], market_id_key: str, link_key: str
+    entries: list[dict[str, Any]],
+    market_id_key: str,
+    link_key: str,
+    question_key: str,
 ) -> None:
     """Mutates ``entries`` in place, resolving ``market_id_key`` against the
-    live catalog and adding ``link_key``. ``None`` when the id is absent or
-    the market has since been evicted from the catalog (closed / filtered) —
-    same graceful-degradation behavior as ``market_question`` elsewhere."""
+    live catalog and adding ``link_key`` / ``question_key``. Both are
+    ``None`` when the id is absent or the market has since been evicted from
+    the catalog (closed / filtered)."""
     for entry in entries:
         market_id = entry.get(market_id_key)
         market = market_source_manager.store.get(market_id) if market_id else None
         entry[link_key] = polymarket_url(market)
+        entry[question_key] = market.question if market else None
 
 
 class SectionLogResponse(BaseModel):
@@ -123,7 +127,9 @@ def get_embedding_log(
 ) -> SectionLogResponse:
     orch = get_orchestrator()
     entries = _entries_from_db(factory, EmbeddingCallRow, limit)
-    _attach_polymarket_links(entries, "top_market_id", "top_market_polymarket_url")
+    _attach_polymarket_links(
+        entries, "top_market_id", "top_market_polymarket_url", "top_market_question"
+    )
     return SectionLogResponse(
         entries=entries,
         counters=embedding_log.counters(),
@@ -141,7 +147,7 @@ def get_analyzer_log(
 ) -> SectionLogResponse:
     orch = get_orchestrator()
     entries = _entries_from_db(factory, AnalyzerCallRow, limit)
-    _attach_polymarket_links(entries, "market_id", "market_polymarket_url")
+    _attach_polymarket_links(entries, "market_id", "market_polymarket_url", "market_question")
     return SectionLogResponse(
         entries=entries,
         counters=analyzer_log.counters(),

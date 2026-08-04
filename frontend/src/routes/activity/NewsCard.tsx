@@ -303,6 +303,9 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
                       {analyzer.market_id.length > 16 ? '…' : ''}
                     </span>
                   )}
+                  {analyzer.market_question && (
+                    <span className="text-neutral-400"> "{analyzer.market_question}"</span>
+                  )}
                 </span>
               )}
               <span className="ml-auto text-neutral-600 text-[10px]">

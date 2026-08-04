@@ -41,6 +41,7 @@ export type EmbeddingCall = {
   // has since been evicted (closed / filtered), same as top_market_id being
   // unresolvable to a question elsewhere.
   top_market_polymarket_url: string | null
+  top_market_question: string | null
 }
 
 // One row in `/api/analyzer/log.entries[]` — a superset of
@@ -63,6 +64,7 @@ export type AnalyzerCallEntry = {
   // Resolved from the live catalog at response time — null when the market
   // has since been evicted (closed / filtered).
   market_polymarket_url: string | null
+  market_question: string | null
 }
 
 // One row in `/api/entry/log.entries[]`. `fill_*` and `position_id` are

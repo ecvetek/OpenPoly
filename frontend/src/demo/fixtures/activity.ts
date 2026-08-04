@@ -335,6 +335,8 @@ const analyzerLog: AnalyzerCallEntry[] = [
     latency_ms: 1840,
     error: null,
     rationale: 'Dovish tone lifts the implied hold probability above price.',
+    market_polymarket_url: 'https://polymarket.com/event/fed-pause',
+    market_question: 'Will the Fed pause rate hikes in 2026?',
   },
   {
     ts: NOW - 2 * HOUR + 4,
@@ -348,6 +350,8 @@ const analyzerLog: AnalyzerCallEntry[] = [
     latency_ms: 920,
     error: null,
     rationale: null,
+    market_polymarket_url: null,
+    market_question: null,
   },
 ]
 
