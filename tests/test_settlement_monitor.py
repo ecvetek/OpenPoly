@@ -136,7 +136,14 @@ async def test_no_open_positions_is_noop(store) -> None:
     assert settlement_log.entries() == []
 
 
-async def test_market_still_trading_skips(store) -> None:
+# Steady-state outcomes are tick telemetry, not log entries. An unresolved
+# market reports the same thing on every tick forever, so logging one entry per
+# position per tick flooded the shared 200-entry ring (evicting real
+# settlements and the reconciliation monitor's alerts) and grew
+# settlement_decision by ~288 rows/position/day.
+
+
+async def test_market_still_trading_counted_not_logged(store) -> None:
     pid = _open_position(store, condition_id="0xcid", side="yes")
     raw = [_raw_market(condition_id="0xcid", closed=False)]
     sm = SettlementMonitor(fetcher=_fetcher_returning(raw))
@@ -144,24 +151,36 @@ async def test_market_still_trading_skips(store) -> None:
     await sm._tick_once()
     rec = store.get_position(pid)
     assert rec is not None and rec.status == "open"
-    entries = settlement_log.entries()
-    assert len(entries) == 1
-    assert entries[0].verdict == "skip"
-    assert entries[0].reason == "still_trading"
+    assert settlement_log.entries() == []
+    assert sm.last_tick["reason_counts"] == {"still_trading": 1}
+    assert sm.last_tick["evaluated"] == 1
+    assert sm.last_tick["settled"] == 0
 
 
-async def test_market_closed_no_outcome_prices_skips(store) -> None:
+async def test_repeated_ticks_do_not_grow_the_log(store) -> None:
+    """The regression that motivated the change: an unresolved market must not
+    accumulate a row per tick."""
+    _open_position(store, condition_id="0xcid", side="yes")
+    raw = [_raw_market(condition_id="0xcid", closed=False)]
+    sm = SettlementMonitor(fetcher=_fetcher_returning(raw))
+    sm.configure(store)
+    for _ in range(50):
+        await sm._tick_once()
+    assert settlement_log.entries() == []
+    assert sm.last_tick["reason_counts"] == {"still_trading": 1}
+
+
+async def test_market_closed_no_outcome_prices_counted(store) -> None:
     _open_position(store, condition_id="0xcid")
     raw = [_raw_market(condition_id="0xcid", closed=True, outcome_prices=None)]
     sm = SettlementMonitor(fetcher=_fetcher_returning(raw))
     sm.configure(store)
     await sm._tick_once()
-    entries = settlement_log.entries()
-    assert entries[0].verdict == "skip"
-    assert entries[0].reason == "no_outcome_prices"
+    assert settlement_log.entries() == []
+    assert sm.last_tick["reason_counts"] == {"no_outcome_prices": 1}
 
 
-async def test_ambiguous_outcome_skips(store) -> None:
+async def test_ambiguous_outcome_counted(store) -> None:
     """Closed + outcomePrices=[0.5, 0.5] → skip (dispute / unresolved split)."""
     _open_position(store, condition_id="0xcid")
     raw = [
@@ -174,9 +193,8 @@ async def test_ambiguous_outcome_skips(store) -> None:
     sm = SettlementMonitor(fetcher=_fetcher_returning(raw))
     sm.configure(store)
     await sm._tick_once()
-    entries = settlement_log.entries()
-    assert entries[0].verdict == "skip"
-    assert entries[0].reason == "ambiguous_outcome"
+    assert settlement_log.entries() == []
+    assert sm.last_tick["reason_counts"] == {"ambiguous_outcome": 1}
 
 
 async def test_yes_position_yes_wins_closes_at_1(store) -> None:
@@ -242,8 +260,9 @@ async def test_multiple_positions_same_market_all_close(store) -> None:
     assert {e.position_id for e in settlement_log.entries()} == {pid_yes, pid_no}
 
 
-async def test_gamma_fetch_failure_logs_error_no_crash(store) -> None:
-    """Network exception in fetcher → loop must survive + log error rows."""
+async def test_gamma_fetch_failure_surfaces_as_tick_error_no_crash(store) -> None:
+    """Network exception in fetcher → loop must survive. The outage is one
+    tick-level event plus a count, not a row per position for its duration."""
     _open_position(store, condition_id="0xcid")
 
     async def _boom(condition_ids: list[str]) -> list[dict]:
@@ -252,12 +271,14 @@ async def test_gamma_fetch_failure_logs_error_no_crash(store) -> None:
     sm = SettlementMonitor(fetcher=_boom)
     sm.configure(store)
     await sm._tick_once()
-    entries = settlement_log.entries()
-    assert entries[0].verdict == "error"
-    assert "gamma_fetch_failed" in (entries[0].error or "")
+    assert settlement_log.entries() == []
+    assert sm.last_tick["reason_counts"] == {"gamma_fetch_failed": 1}
+    events = sm.tick_events()
+    assert events[-1]["kind"] == "tick_error"
+    assert "gamma_fetch_failed" in (events[-1]["detail"] or "")
 
 
-async def test_market_not_returned_by_gamma_logs_skip(store) -> None:
+async def test_market_not_returned_by_gamma_counted(store) -> None:
     """Gamma returns partial list (our cid absent) → skip, don't close."""
     pid = _open_position(store, condition_id="0xcid")
     # Fetcher returns a different market's data
@@ -267,9 +288,8 @@ async def test_market_not_returned_by_gamma_logs_skip(store) -> None:
     await sm._tick_once()
     rec = store.get_position(pid)
     assert rec is not None and rec.status == "open"
-    entries = settlement_log.entries()
-    assert entries[0].verdict == "skip"
-    assert entries[0].reason == "market_not_returned_by_gamma"
+    assert settlement_log.entries() == []
+    assert sm.last_tick["reason_counts"] == {"market_not_returned_by_gamma": 1}
 
 
 # ---------- close-race handling ----------

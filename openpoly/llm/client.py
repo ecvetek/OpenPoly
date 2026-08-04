@@ -33,6 +33,18 @@ _STRUCTURAL_RETRIES = 2
 # Per-request timeout — a small completion should never take this long.
 _TIMEOUT_SECONDS = 60.0
 
+# Model ids observed to reject ``temperature`` with a 400. Learned at runtime
+# rather than hardcoded: newer Claude models (Opus 4.7 and later, Sonnet 5,
+# Fable 5) removed the sampling parameters entirely, and a hardcoded deny-list
+# goes stale on every release — silently, because the symptom is that *every*
+# analyzer call errors and the pipeline just stops entering trades. Process-
+# lifetime only; a restart re-learns on the first call.
+_no_temperature_models: set[str] = set()
+
+# Substring that identifies a sampling-parameter rejection in the API's 400
+# message, so we don't retry-without-temperature on an unrelated bad request.
+_TEMPERATURE_REJECTED_MARKER = "temperature"
+
 # Minimal tool for the connectivity probe (``ping``): its only job is to make
 # the model emit one forced tool_use block.
 _PING_TOOL: dict[str, Any] = {
@@ -102,32 +114,11 @@ class LLMClient:
         """
         client = self._ensure_client()
         tool_name = str(tool["name"])
-        # temperature is rejected/deprecated by some model ids; omit it for those.
-        _NO_TEMPERATURE_MODELS = {"claude-opus-4-7", "claude-sonnet-5"}
-        extra: dict[str, Any] = (
-            {} if self._model in _NO_TEMPERATURE_MODELS else {"temperature": self._temperature}
-        )
 
         last_error: str | None = None
         for attempt in range(1, _STRUCTURAL_RETRIES + 1):
             try:
-                response = client.messages.create(
-                    model=self._model,
-                    max_tokens=_MAX_TOKENS,
-                    # cache_control marks the (static) system prompt cacheable;
-                    # it is a no-op below the model's minimum cacheable prefix.
-                    system=[
-                        {
-                            "type": "text",
-                            "text": system,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                    messages=[{"role": "user", "content": user}],
-                    tools=[tool],
-                    tool_choice={"type": "tool", "name": tool_name},
-                    **extra,
-                )
+                response = self._create(client, system=system, user=user, tool=tool)
             except anthropic.APIError as exc:
                 # The SDK already retried transient errors; this is terminal.
                 raise LLMError(f"Anthropic API call failed: {exc!r}") from exc
@@ -140,6 +131,53 @@ class LLMClient:
             logger.warning("LLM attempt %d/%d: %s", attempt, _STRUCTURAL_RETRIES, last_error)
 
         raise LLMError(f"LLM returned no usable tool call: {last_error}")
+
+    def _create(self, client: anthropic.Anthropic, *, system: str, user: str, tool: dict[str, Any]):
+        """One ``messages.create`` call, transparently dropping ``temperature``
+        for models that reject it.
+
+        Claude models from Opus 4.7 onward (plus Sonnet 5 and Fable 5) removed
+        the sampling parameters, so sending ``temperature`` is a hard 400. This
+        used to be a hardcoded deny-list, which meant selecting a newer model in
+        the analyzer's canvas config made *every* call fail — the pipeline died
+        at the analyzer stage for every news item, with no entry decisions and
+        nothing but a wall of errors on the Calls tab.
+
+        So: try with ``temperature``, and if the API rejects it by name, retry
+        once without and remember the model for the rest of the process. That
+        costs one wasted request per model per process and needs no code change
+        when the next model drops sampling params.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": _MAX_TOKENS,
+            # cache_control marks the (static) system prompt cacheable;
+            # it is a no-op below the model's minimum cacheable prefix.
+            "system": [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [{"role": "user", "content": user}],
+            "tools": [tool],
+            "tool_choice": {"type": "tool", "name": str(tool["name"])},
+        }
+        if self._model in _no_temperature_models:
+            return client.messages.create(**kwargs)
+        try:
+            return client.messages.create(temperature=self._temperature, **kwargs)
+        except anthropic.BadRequestError as exc:
+            if _TEMPERATURE_REJECTED_MARKER not in str(exc).lower():
+                raise  # a genuine bad request — don't mask it as a sampling issue
+            logger.info(
+                "model %r rejected temperature; retrying without it (and for "
+                "the rest of this process)",
+                self._model,
+            )
+            _no_temperature_models.add(self._model)
+            return client.messages.create(**kwargs)
 
     def ping(self) -> None:
         """Probe connectivity with one minimal forced tool call.

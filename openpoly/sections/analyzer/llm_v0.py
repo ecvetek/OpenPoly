@@ -51,16 +51,19 @@ class LLMAnalyzerConfig(BaseModel):
         default="claude-haiku-4-5",
         description=(
             "Model id sent to the API. On the official Anthropic endpoint use "
-            "a Claude id (claude-haiku-4-5 / claude-sonnet-4-6 / "
-            "claude-opus-4-7); on a third-party gateway use whatever id that "
-            "gateway publishes."
+            "a Claude id (claude-haiku-4-5 / claude-sonnet-5 / claude-opus-5); "
+            "on a third-party gateway use whatever id that gateway publishes."
         ),
     )
     temperature: float = Field(
         default=0.2,
         ge=0.0,
         le=1.0,
-        description="Sampling temperature; ignored for claude-opus-4-7.",
+        description=(
+            "Sampling temperature. Newer Claude models (Opus 4.7 and later, "
+            "Sonnet 5) removed sampling parameters; the client detects that "
+            "from the API's response and drops this automatically."
+        ),
     )
     api_key_ref: str = Field(
         default="env:ANTHROPIC_API_KEY",

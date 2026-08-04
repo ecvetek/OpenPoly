@@ -108,8 +108,9 @@ class FakeEmbeddingManager:
 
 
 class FakeExecutor:
-    def __init__(self, balance_raw: int | None = 1_000_000):
+    def __init__(self, balance_raw: int | None = 1_000_000, live_ready: bool = True):
         self._balance_raw = balance_raw
+        self.live_ready = live_ready
 
     def get_collateral_balance_raw(self) -> int | None:
         return self._balance_raw
@@ -221,6 +222,39 @@ def test_health_detail_market_access_no_wallet_disabled(health_env) -> None:
     assert body["checks"]["market_access"]["detail"]["configured"] is False
     # "disabled" must not drag the overall rollup down.
     assert body["status"] == "ok"
+
+
+def test_health_detail_live_mode_without_armed_executor_is_down(health_env) -> None:
+    """exec_mode=live with no live executor is the quietest way this system can
+    fail: the UI shows LIVE, the pipeline runs, and every order skips as
+    live_not_ready. It must read as down, not ok."""
+    overrides, client = health_env
+    overrides[hr.get_runtime_state] = lambda: FakeRuntimeState(exec_mode="live")
+    overrides[hr.get_executor_dispatcher] = lambda: FakeExecutor(live_ready=False)
+    body = client.get("/api/health/detail").json()
+    assert body["checks"]["market_access"]["status"] == "down"
+    assert body["checks"]["market_access"]["detail"]["live_ready"] is False
+    assert body["status"] == "down"
+
+
+def test_health_detail_live_mode_with_armed_executor_is_ok(health_env) -> None:
+    overrides, client = health_env
+    overrides[hr.get_runtime_state] = lambda: FakeRuntimeState(exec_mode="live")
+    body = client.get("/api/health/detail").json()
+    assert body["checks"]["market_access"]["status"] == "ok"
+    assert body["checks"]["market_access"]["detail"]["live_ready"] is True
+    assert body["status"] == "ok"
+
+
+def test_health_detail_paper_mode_unarmed_is_not_down(health_env) -> None:
+    """Paper mode never dispatches to live, so an unarmed executor there is
+    normal — only the balance read degrades."""
+    overrides, client = health_env
+    overrides[hr.get_executor_dispatcher] = lambda: FakeExecutor(
+        balance_raw=None, live_ready=False
+    )
+    body = client.get("/api/health/detail").json()
+    assert body["checks"]["market_access"]["status"] == "degraded"
 
 
 def test_health_detail_reconciliation_absent_disabled(health_env) -> None:

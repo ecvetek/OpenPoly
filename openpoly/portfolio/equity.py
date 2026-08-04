@@ -165,19 +165,50 @@ def build_equity_curve(
 
     cursors: dict[str, int] = dict.fromkeys(marks, -1)
     points: list[EquityPoint] = []
+
+    # Sweep two sorted cursors alongside the timeline instead of rescanning
+    # every position at every point. A position enters the active set when the
+    # timeline passes its open and leaves at its close, where its realized P&L
+    # accrues once into a running total.
+    #
+    # The naive walk was O(positions × timeline), and the timeline includes
+    # every in-window order-book snapshot — at the default 60s sampling a
+    # 30-day window is tens of thousands of points per token, re-walked for
+    # every position, on every poll of /api/portfolio/equity. This is
+    # O(P log P + T × currently-open), and only a handful are ever open at once.
+    # Same incremental-cursor trick ``_advance_mark`` already uses for marks.
+    by_open = sorted(positions, key=lambda p: p.opened_at)
+    by_close = sorted(
+        (p for p in positions if p.closed_at is not None),
+        key=lambda p: p.closed_at,  # type: ignore[arg-type,return-value]
+    )
+    next_open = 0
+    next_close = 0
+    active: dict[int, PositionRow] = {}
+    realized = 0.0
+
     for t in timeline:
-        realized = 0.0
+        while next_open < len(by_open) and by_open[next_open].opened_at <= t:
+            entering = by_open[next_open]
+            active[entering.id] = entering
+            next_open += 1
+        # Close after open, so a position that opened and closed at the same
+        # instant is never counted as active — matching the original
+        # ``closed_at > t`` guard.
+        while next_close < len(by_close) and by_close[next_close].closed_at <= t:  # type: ignore[operator]
+            leaving = by_close[next_close]
+            active.pop(leaving.id, None)
+            realized += leaving.realized_pnl or 0.0
+            next_close += 1
+
         unrealized = 0.0
-        for p in positions:
-            if p.closed_at is not None and p.closed_at <= t:
-                realized += p.realized_pnl or 0.0
-            elif p.opened_at <= t and (p.closed_at is None or p.closed_at > t):
-                mark, cursors[p.token_id] = _advance_mark(
-                    marks.get(p.token_id, []), cursors[p.token_id], t
-                )
-                if mark is None:
-                    mark = p.avg_entry_price
-                unrealized += (mark - p.avg_entry_price) * p.qty
+        for p in active.values():
+            mark, cursors[p.token_id] = _advance_mark(
+                marks.get(p.token_id, []), cursors[p.token_id], t
+            )
+            if mark is None:
+                mark = p.avg_entry_price
+            unrealized += (mark - p.avg_entry_price) * p.qty
         points.append(
             EquityPoint(
                 ts=t, equity=realized + unrealized, realized=realized, unrealized=unrealized

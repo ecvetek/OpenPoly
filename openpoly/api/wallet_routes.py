@@ -31,7 +31,7 @@ from pydantic import BaseModel
 
 from openpoly.api.portfolio_routes import get_portfolio_store
 from openpoly.execution import executor
-from openpoly.execution.live_executor import build_live_executor
+from openpoly.execution.live_executor import arm_live_executor, build_live_executor
 from openpoly.markets.polymarket_api import fetch_wallet_positions_value
 from openpoly.news.secrets import SecretsError, resolve
 from openpoly.portfolio import PortfolioStore
@@ -130,7 +130,10 @@ def get_wallet_config() -> WalletConfigResponse:
 
 
 @router.put("/api/wallet/config", response_model=WalletConfigResponse)
-def put_wallet_config(body: PutWalletConfigRequest) -> WalletConfigResponse:
+def put_wallet_config(
+    body: PutWalletConfigRequest,
+    store: PortfolioStore = Depends(get_portfolio_store),
+) -> WalletConfigResponse:
     _validate_ref_format(body.private_key_ref)
     _validate_address(body.funder_address, "funder_address")
     try:
@@ -147,17 +150,24 @@ def put_wallet_config(body: PutWalletConfigRequest) -> WalletConfigResponse:
             status_code=400,
             detail={"error": "bad_private_key", "message": str(exc)},
         ) from exc
-    runtime_state.set_wallet(
-        WalletSpec(
-            private_key_ref=body.private_key_ref,
-            funder_address=body.funder_address,
-        )
+    spec = WalletSpec(
+        private_key_ref=body.private_key_ref,
+        funder_address=body.funder_address,
     )
+    runtime_state.set_wallet(spec)
     logger.info(
         "wallet config updated; signer=%s funder=%s",
         signer,
         body.funder_address[:10] + "…",
     )
+    # Arm the live executor now rather than waiting for the next process start.
+    # Without this the wallet is persisted but the dispatcher still has no live
+    # executor, so /api/wallet/balance and the health check read null and a
+    # later mode flip would trade into a void. Best-effort: a CLOB that is
+    # unreachable right now must not fail an otherwise-valid config write —
+    # the mode-switch preflight is the gate that actually blocks going live.
+    _invalidate_balance_cache()
+    arm_live_executor(spec, store, executor)
     return WalletConfigResponse(
         private_key_ref=body.private_key_ref,
         funder_address=body.funder_address,
@@ -300,6 +310,14 @@ def set_mode(
                 },
             )
 
+        # Preflight passed, so ``le`` is a working live executor built from the
+        # exact wallet config we are about to go live with — arm the dispatcher
+        # with it. Previously this was built purely as a probe and thrown away,
+        # which meant a wallet configured after process start left the
+        # dispatcher's live executor at None and every order came back
+        # ``live_not_ready`` while the UI showed LIVE.
+        executor.configure_live(le)
+
     runtime_state.set_mode(target)
     logger.info("exec mode -> %s", target)
     return SetModeResponse(mode=target)
@@ -320,6 +338,15 @@ _balance_cache: tuple[float, dict] | None = None
 # route and the health check so a short health-poll interval doesn't force a
 # second CLOB round-trip on top of whatever this route already cached.
 _raw_balance_cache: tuple[float, int | None] | None = None
+
+
+def _invalidate_balance_cache() -> None:
+    """Drop both cached balance reads. Called when the wallet config changes —
+    otherwise the dashboard keeps serving the previous wallet's balance (or a
+    ``None`` from before the live executor was armed) for up to the TTL."""
+    global _balance_cache, _raw_balance_cache
+    _balance_cache = None
+    _raw_balance_cache = None
 
 
 class WalletBalanceResponse(BaseModel):

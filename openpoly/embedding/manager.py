@@ -112,7 +112,15 @@ class EmbeddingManager:
                 self._store = MarketEmbeddingStore(session_factory)
             if self._store is not None:
                 await self._load_cache()
-            self._stop.clear()
+            # Recreate (not just clear) the Event so it binds to the *current*
+            # loop — this module singleton may be start()ed across distinct
+            # loops (tests, and any second lifespan in one process). An
+            # asyncio.Event binds on its first await, so a cleared-but-reused
+            # Event carries loop 1's binding into loop 2 and the warm loop
+            # dies with "bound to a different event loop", which in turn
+            # aborts the rest of lifespan shutdown. Same discipline as
+            # PipelineOrchestrator.start / ExitMonitor.start / WriteBehindWriter.start.
+            self._stop = asyncio.Event()
             self._task = asyncio.create_task(self._warm_loop())
             self._state = "running"
 

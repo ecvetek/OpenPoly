@@ -356,7 +356,12 @@ def _in_cooldown(
     """True iff the most recent position on (market_id, side) was opened OR
     closed within ``cooldown_minutes``. Reads a bounded slice of the
     position table (newest 500); at paper-scale (~tens of positions/day) the
-    most-recent-for-this-market is always inside this window."""
+    most-recent-for-this-market is always inside this window.
+
+    Scans every match rather than stopping at the first: ``list_positions`` is
+    ordered by id (open order), but the stamp that matters is ``closed_at``
+    when present, so an earlier-opened position can carry the later timestamp.
+    Bounded by the same 500-row slice either way."""
     cutoff_ts = (now if now is not None else time.time()) - cooldown_minutes * 60
     for pos in portfolio.list_positions(limit=500):
         if pos.market_id != market_id or pos.side != side:
@@ -366,9 +371,6 @@ def _in_cooldown(
         ref_ts = pos.closed_at if pos.closed_at is not None else pos.opened_at
         if ref_ts > cutoff_ts:
             return True
-        # list_positions is newest-first; the first matching row is the most
-        # recent, so once we see a match older than the cutoff we can stop.
-        return False
     return False
 
 
@@ -403,10 +405,16 @@ def _kill_switch_check(
     closed = [p for p in positions if p.closed_at is not None and p.realized_pnl is not None]
     if not closed:
         return None
+    # list_positions is ordered by id desc — that is *open* order, not close
+    # order. Both brakes below reason about closes ("the most recent N closed
+    # positions", "the cumulative realized curve, chronological"), so sort by
+    # closed_at. A position opened earlier but closed later otherwise lands in
+    # the wrong place in both walks, making them fire early or not at all.
+    closed.sort(key=lambda p: p.closed_at, reverse=True)  # newest close first
     now_ts = now if now is not None else time.time()
 
-    # 1. Consecutive losses: walk newest → first non-loss. closed is
-    #    newest-first per list_positions contract, so the streak from index 0
+    # 1. Consecutive losses: walk newest → first non-loss. ``closed`` is
+    #    newest-close-first after the sort above, so the streak from index 0
     #    is the live tail.
     if config.kill_max_consecutive_losses > 0:
         streak = 0

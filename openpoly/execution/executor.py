@@ -109,8 +109,16 @@ class PaperExecutor:
         """Close a held position at the level-1 bid of its own token's book.
 
         Reads ``position.token_id`` directly, so a close never depends on the
-        market still being in the live catalog. Closes the full quantity
-        (one-shot model). Skips when the order book / bid liquidity is missing.
+        market still being in the live catalog. Skips when the order book /
+        bid liquidity is missing.
+
+        Capped by level-1 bid depth, symmetric with ``execute_buy``'s ask-depth
+        cap. This previously sold the whole position at the best bid regardless
+        of how thin the book was, so paper never partially filled an exit while
+        live routinely does — paper systematically overstated exit liquidity and
+        its results weren't comparable to a live run. A partial goes through
+        ``record_sell``, which keeps the position open with the remainder for
+        the next exit tick, exactly as the live path does.
         """
         book = market_source_manager.store.get_order_book(position.token_id)
         if book is None:
@@ -118,18 +126,24 @@ class PaperExecutor:
         if not book.bids:
             return ExecResult.skip("no_bid_liquidity")
 
-        bid_price = book.bids[0][0]
-        self._store.close_position(
+        bid_price, bid_size = book.bids[0]
+        qty = min(position.qty, bid_size)
+        if qty * bid_price < MIN_FILL_USD:
+            return ExecResult.skip("dust")
+
+        self._store.record_sell(
             position.position_id,
+            sold_qty=qty,
             sell_price=bid_price,
             ts=ts,
             close_reason=close_reason,
             trigger=trigger,
         )
         logger.info(
-            "sell filled: %s %s qty=%.4f @ %.4f (position %d, %s)",
+            "sell filled: %s %s qty=%.4f/%.4f @ %.4f (position %d, %s)",
             position.market_id,
             position.side,
+            qty,
             position.qty,
             bid_price,
             position.position_id,
@@ -137,6 +151,6 @@ class PaperExecutor:
         )
         return ExecResult.ok(
             price=bid_price,
-            qty=position.qty,
+            qty=qty,
             position_id=position.position_id,
         )

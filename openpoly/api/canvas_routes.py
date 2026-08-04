@@ -39,6 +39,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["canvas"])
 
+# Strong references to in-flight hot-reload tasks. asyncio only holds a *weak*
+# reference to a running task, so a bare ``create_task(...)`` whose result is
+# discarded can be garbage-collected mid-execution — the canvas would save but
+# silently never hot-reload. Discarded on completion so this can't grow.
+_reload_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_reload(coro) -> None:
+    task = asyncio.create_task(coro)
+    _reload_tasks.add(task)
+    task.add_done_callback(_reload_tasks.discard)
+
 
 @router.get("/api/canvas/template")
 def get_canvas_template(response: Response) -> dict[str, Any]:
@@ -149,7 +161,7 @@ async def put_canvas_template(
     # Failures inside reload are logged but don't fail the PUT (operator can
     # observe via /api/<section>/log and act).
     old_template = current[0] if current else None
-    asyncio.create_task(_apply_canvas_reload(old_template, incoming))
+    _spawn_reload(_apply_canvas_reload(old_template, incoming))
 
     logger.info(
         "canvas template saved (version=%s, nodes=%d, rev=%s…)",

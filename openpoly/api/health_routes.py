@@ -216,12 +216,30 @@ async def _check_market_access(rstate: RuntimeState, executor: ExecutorDispatche
         return SubsystemCheck(
             status="disabled", detail={"configured": False, "exec_mode": rstate.exec_mode}
         )
+    # Live mode with no live executor is the worst state this system can be
+    # in and the hardest to notice: the UI shows LIVE, the pipeline runs, and
+    # every single order is silently skipped as ``live_not_ready``. Report it
+    # as down — nothing else here distinguishes it from a healthy live run.
+    if rstate.exec_mode == "live" and not executor.live_ready:
+        return SubsystemCheck(
+            status="down",
+            detail={
+                "configured": True,
+                "exec_mode": rstate.exec_mode,
+                "live_ready": False,
+                "error": (
+                    "exec_mode is live but no live executor is armed — every order "
+                    "will skip as live_not_ready; re-save the wallet config or restart"
+                ),
+            },
+        )
     raw_balance = await get_wallet_balance_cached(executor)
     return SubsystemCheck(
         status="ok" if raw_balance is not None else "degraded",
         detail={
             "configured": True,
             "exec_mode": rstate.exec_mode,
+            "live_ready": executor.live_ready,
             "usdc": None if raw_balance is None else raw_balance / 1e6,
         },
     )

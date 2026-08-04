@@ -158,7 +158,13 @@ class NewsWSClient:
                     logger.info("WS connected to %s", _redact(self.endpoint))
                     await self._consume(ws)
                 self._emit("disconnected", "server closed cleanly")
+                # Back off here too, not just on the exception path below. A
+                # server that accepts the upgrade and immediately closes would
+                # otherwise spin this loop as fast as it can reconnect.
                 await asyncio.sleep(0)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._stop.wait(), timeout=backoff)
+                backoff = min(backoff * 2.0, self.max_backoff)
             except asyncio.CancelledError:
                 raise
             except InvalidStatus as exc:

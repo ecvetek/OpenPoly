@@ -229,3 +229,50 @@ async def test_quantity_within_epsilon_does_not_alert(store) -> None:
     rm.configure(store)
     await rm._tick_once()
     assert settlement_log.entries() == []
+
+
+# ---------- persistence ----------
+#
+# Without a persist hook this monitor's findings lived only in the in-memory
+# ring it shares with SettlementMonitor, so the untracked-holding and qty-drift
+# alerts — precisely the ones that need a human — were evicted within hours and
+# gone on restart.
+
+
+async def test_persist_hook_fires_for_reconciled_close(store) -> None:
+    persisted: list = []
+    _open_position(store, condition_id="0xcid", side="yes")
+    rm = ReconciliationMonitor(holdings_fetcher=_holdings({}), grace_seconds=0)
+    rm.configure(store)
+    rm.set_settlement_persist(persisted.append)
+    await rm._tick_once()
+    assert len(persisted) == 1
+    assert persisted[0].reason == "reconciled"
+
+
+async def test_persist_hook_fires_for_untracked_onchain_holding(store) -> None:
+    """The loudest alert this monitor produces must be durable."""
+    persisted: list = []
+    rm = ReconciliationMonitor(
+        holdings_fetcher=_holdings({("0xorphan", "yes"): 7.0}), grace_seconds=0
+    )
+    rm.configure(store)
+    rm.set_settlement_persist(persisted.append)
+    await rm._tick_once()
+    assert [e.reason for e in persisted] == ["untracked_onchain_holding"]
+    assert persisted[0].market_id == "0xorphan"
+
+
+async def test_raising_persist_hook_is_swallowed(store) -> None:
+    """A bad hook must not break the sweep — same discipline as the other monitors."""
+
+    def _boom(entry) -> None:
+        raise RuntimeError("db down")
+
+    pid = _open_position(store, condition_id="0xcid", side="yes")
+    rm = ReconciliationMonitor(holdings_fetcher=_holdings({}), grace_seconds=0)
+    rm.configure(store)
+    rm.set_settlement_persist(_boom)
+    await rm._tick_once()
+    rec = store.get_position(pid)
+    assert rec is not None and rec.status == "closed"

@@ -616,3 +616,34 @@ def build_live_executor(
         creds.api_key[:8] + "…",
     )
     return LiveExecutor(portfolio=portfolio, clob_client=clob)
+
+
+def arm_live_executor(wallet, portfolio: PortfolioStore, dispatcher=None) -> bool:
+    """Build a LiveExecutor for ``wallet`` and inject it into ``dispatcher``
+    (the module-level singleton when omitted). Returns True on success; a
+    construction failure is logged and swallowed (startup must survive a bad
+    wallet, and a route must not 500).
+
+    This exists because ``configure_live`` used to be called from exactly one
+    place — the FastAPI lifespan, gated on a wallet existing *at process
+    start*. The documented first-run flow (boot in paper with no wallet →
+    configure the wallet in the UI → flip to live) therefore left the
+    dispatcher's live executor at None, so every order returned
+    ``live_not_ready`` while the UI showed LIVE, until the operator happened to
+    restart the backend. Every caller that can make a wallet available now goes
+    through here.
+
+    Blocking: ``build_live_executor`` does network I/O (``derive_api_key``), so
+    call this from a sync context (the lifespan, or a sync FastAPI route, which
+    runs in the threadpool) — never inline on the event loop.
+    """
+    if dispatcher is None:
+        from openpoly.execution import executor as dispatcher
+
+    try:
+        live = build_live_executor(wallet, portfolio)
+    except Exception as exc:  # noqa: BLE001 — a bad wallet must not break startup or a route
+        logger.exception("live executor construction failed: %s", exc)
+        return False
+    dispatcher.configure_live(live)
+    return True

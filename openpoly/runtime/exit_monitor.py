@@ -262,19 +262,24 @@ class ExitMonitor:
         self._record_tick_event("started")
 
     async def stop(self) -> None:
-        if self._task is None:
-            self._state = "stopped"
-            return
+        """Signal the tick loop to stop, then await its natural exit — never
+        ``task.cancel()`` here. The tick body runs via
+        ``asyncio.to_thread(self._tick_once)``, and cancelling the awaiting
+        coroutine does **not** stop that worker thread: it keeps running
+        through ``_evaluate`` → ``execute_sell`` (a blocking CLOB round-trip in
+        live mode) → ``_log`` → ``_exit_persist``. So a cancel returns while a
+        real sell is still in flight, and the lifespan then tears down the DB
+        writer out from under it — an on-chain fill with no ledger record.
+
+        The loop checks ``_stop`` only between ticks and its interval wait wakes
+        early on it, so this waits for exactly one in-flight tick. Mirrors
+        ``PipelineOrchestrator.stop`` and ``WriteBehindWriter.stop``."""
         self._stop.set()
-        self._task.cancel()
-        try:
+        if self._task is not None:
             await self._task
-        except asyncio.CancelledError:
-            pass
-        finally:
             self._task = None
-            self._state = "stopped"
-            self._record_tick_event("stopped")
+        self._state = "stopped"
+        self._record_tick_event("stopped")
 
     # ---------- loop ----------
 
@@ -381,7 +386,13 @@ class ExitMonitor:
             held, close_reason=intent.trigger, ts=ts, trigger=intent.trigger
         )
         if result.filled and result.price is not None:
-            realized = (result.price - held.avg_entry_price) * held.qty
+            # Mark against the qty that actually filled, not the qty we asked
+            # for: a live GTC sell can partially fill, and record_sell keeps
+            # the position open with the remainder. Using held.qty here
+            # overstated the log entry (and the PositionDetail UI) on every
+            # partial close, while the DB's own realized_pnl was correct.
+            filled_qty = result.qty if result.qty is not None else held.qty
+            realized = (result.price - held.avg_entry_price) * filled_qty
             # Position is closed; drop its peak so a future re-entry on the
             # same position_id (shouldn't happen, but be safe) starts fresh.
             self._peak.pop(held.position_id, None)

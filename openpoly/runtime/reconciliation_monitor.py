@@ -93,6 +93,12 @@ class ReconciliationMonitor:
         # Quantity-drift alert dedup, same one-per-key-per-process shape as
         # ``_alerted`` above but for still-tracked positions whose qty diverges.
         self._drift_alerted: set[tuple[str, str]] = set()
+        # Persist hook — optional, set by main.py's lifespan once the DB is up.
+        # Without it this monitor's findings lived only in the in-memory ring it
+        # shares with SettlementMonitor, so the untracked-holding and qty-drift
+        # alerts — precisely the ones needing a human — were evicted within
+        # hours and gone on restart.
+        self._settlement_persist: Callable[[SettlementDecision], None] | None = None
 
     @property
     def state(self) -> State:
@@ -101,6 +107,21 @@ class ReconciliationMonitor:
     def configure(self, portfolio: PortfolioStore) -> None:
         """Inject PortfolioStore — FastAPI lifespan calls once DB is up."""
         self._portfolio = portfolio
+
+    def set_settlement_persist(self, hook: Callable[[SettlementDecision], None] | None) -> None:
+        """Mirror this monitor's entries into the durable settlement_decision
+        table. Same hook and same table SettlementMonitor writes to —
+        ``reason`` distinguishes the source (``reconciled`` /
+        ``untracked_onchain_holding`` / ``quantity_drift``)."""
+        self._settlement_persist = hook
+
+    def _append(self, entry: SettlementDecision) -> None:
+        settlement_log.append(entry)
+        if self._settlement_persist is not None:
+            try:
+                self._settlement_persist(entry)
+            except Exception:  # noqa: BLE001 — a bad persist hook must not break the monitor
+                logger.exception("settlement_persist raised; suppressing")
 
     # ---------- lifecycle ----------
 
@@ -112,18 +133,16 @@ class ReconciliationMonitor:
         self._task = asyncio.create_task(self._tick_loop())
 
     async def stop(self) -> None:
-        if self._task is None:
-            self._state = "stopped"
-            return
+        """Signal the tick loop to stop, then await its natural exit — never
+        ``task.cancel()``. A cancel mid-sweep can abandon a ``close_position``
+        partway through the open-position walk. Same discipline as
+        ``PipelineOrchestrator.stop``; the loop checks ``_stop`` between ticks
+        and its interval wait wakes early on it."""
         self._stop.set()
-        self._task.cancel()
-        try:
+        if self._task is not None:
             await self._task
-        except asyncio.CancelledError:
-            pass
-        finally:
             self._task = None
-            self._state = "stopped"
+        self._state = "stopped"
 
     # ---------- loop ----------
 
@@ -170,7 +189,7 @@ class ReconciliationMonitor:
                 cid[:14],
                 side,
             )
-            settlement_log.append(
+            self._append(
                 SettlementDecision(
                     ts=ts,
                     position_id=-1,
@@ -248,7 +267,7 @@ class ReconciliationMonitor:
         reason: str | None = None,
         error: str | None = None,
     ) -> None:
-        settlement_log.append(
+        self._append(
             SettlementDecision(
                 ts=ts,
                 position_id=pos.position_id,

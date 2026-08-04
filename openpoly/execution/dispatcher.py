@@ -67,10 +67,18 @@ class ExecutorDispatcher:
         self._paper.configure(portfolio)
 
     def configure_live(self, live: _LiveLike) -> None:
-        """Inject the live executor — called by lifespan after wallet + ClobClient
-        are constructed. Idempotent; safe to call even when mode=paper (live is
-        pre-built so a UI-driven flip is cheap)."""
+        """Inject the live executor — called by ``arm_live_executor`` (lifespan
+        at startup, and the wallet routes when a wallet is configured or a mode
+        flip is requested afterwards). Idempotent; safe to call even when
+        mode=paper (live is pre-built so a UI-driven flip is cheap)."""
         self._live = live
+
+    @property
+    def live_ready(self) -> bool:
+        """True once a live executor has been injected. Read by the health
+        check so ``exec_mode == "live"`` with no live executor surfaces as a
+        failure instead of a healthy-looking system that skips every order."""
+        return self._live is not None
 
     def get_collateral_balance_raw(self) -> int | None:
         """Read-only USDC collateral balance via the live executor's CLOB

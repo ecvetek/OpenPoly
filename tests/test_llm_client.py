@@ -155,20 +155,92 @@ def test_api_error_raises_llm_error(monkeypatch) -> None:
 
 
 # ---------- temperature handling ----------
+#
+# Claude models from Opus 4.7 onward removed the sampling parameters, so
+# sending ``temperature`` is a hard 400. Which models those are is learned from
+# the API's own rejection rather than hardcoded — a stale deny-list meant
+# picking a newer model in the canvas made every analyzer call fail, killing
+# the pipeline at stage 2 for every news item.
 
 
-def test_temperature_sent_for_haiku(monkeypatch) -> None:
+@pytest.fixture(autouse=True)
+def _reset_learned_models():
+    """``_no_temperature_models`` is process-lifetime state; isolate it."""
+    from openpoly.llm import client as client_mod
+
+    client_mod._no_temperature_models.clear()
+    yield
+    client_mod._no_temperature_models.clear()
+
+
+def _bad_request(message: str) -> anthropic.BadRequestError:
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.BadRequestError(
+        message,
+        response=httpx.Response(400, request=request),
+        body=None,
+    )
+
+
+class _RejectsTemperature(_Messages):
+    """Fake that 400s any call carrying ``temperature`` — the real API's
+    behavior on Opus 4.7+ / Sonnet 5 / Fable 5."""
+
+    def __init__(self, responses: list[_Response], message: str) -> None:
+        super().__init__(responses)
+        self._message = message
+
+    def create(self, **kwargs: Any) -> _Response:
+        self.calls.append(kwargs)
+        if "temperature" in kwargs:
+            raise _bad_request(self._message)
+        return self._responses.pop(0)
+
+
+def test_temperature_sent_by_default(monkeypatch) -> None:
     messages = _Messages([_tool_response({"ok": True})])
     _patch(monkeypatch, messages)
     _client("claude-haiku-4-5").analyze(system="s", user="u", tool=_TOOL)
     assert messages.calls[0]["temperature"] == 0.2
 
 
-def test_temperature_omitted_for_opus_4_7(monkeypatch) -> None:
-    messages = _Messages([_tool_response({"ok": True})])
+def test_temperature_rejection_retries_without_it(monkeypatch) -> None:
+    messages = _RejectsTemperature(
+        [_tool_response({"ok": True})],
+        "temperature: Extra inputs are not permitted",
+    )
     _patch(monkeypatch, messages)
-    _client("claude-opus-4-7").analyze(system="s", user="u", tool=_TOOL)
-    assert "temperature" not in messages.calls[0]
+    out = _client("claude-opus-5").analyze(system="s", user="u", tool=_TOOL)
+    assert out == {"ok": True}
+    assert len(messages.calls) == 2
+    assert messages.calls[0]["temperature"] == 0.2
+    assert "temperature" not in messages.calls[1]
+
+
+def test_temperature_rejection_is_remembered_per_model(monkeypatch) -> None:
+    """The probe costs one wasted request per model per process, not one per
+    news item."""
+    messages = _RejectsTemperature(
+        [_tool_response({"ok": True}), _tool_response({"ok": True})],
+        "temperature: Extra inputs are not permitted",
+    )
+    _patch(monkeypatch, messages)
+    client = _client("claude-opus-5")
+    client.analyze(system="s", user="u", tool=_TOOL)
+    client.analyze(system="s", user="u", tool=_TOOL)
+    # call 0 probes with temperature and 400s, 1 retries without; call 2 is the
+    # second analyze() and must skip the probe entirely.
+    assert len(messages.calls) == 3
+    assert "temperature" not in messages.calls[2]
+
+
+def test_unrelated_bad_request_is_not_masked(monkeypatch) -> None:
+    """Only a sampling-parameter rejection triggers the retry — a genuine bad
+    request must surface, not be retried into a confusing second failure."""
+    err = _bad_request("max_tokens: must be greater than 0")
+    _patch(monkeypatch, _Messages(raise_exc=err))
+    with pytest.raises(LLMError, match="Anthropic API call failed"):
+        _client("claude-opus-5").analyze(system="s", user="u", tool=_TOOL)
 
 
 # ---------- base_url (third-party gateway, e.g. yunwu) ----------

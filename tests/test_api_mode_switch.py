@@ -236,3 +236,116 @@ def test_switch_to_live_blocked_by_rpc_unreachable(env, monkeypatch: pytest.Monk
     r = client.post("/api/system/mode", json={"mode": "live"})
     assert r.status_code == 409
     assert r.json()["detail"]["error"] == "rpc_unreachable"
+
+
+# ---------- the live executor must actually be armed, not just probed ----------
+
+
+@pytest.fixture
+def bare_dispatcher(monkeypatch: pytest.MonkeyPatch):
+    """A dispatcher with no live executor, standing in for a process that
+    booted in paper mode with no wallet configured."""
+    from openpoly.execution import ExecutorDispatcher, PaperExecutor
+
+    dispatcher = ExecutorDispatcher(paper=PaperExecutor())
+    monkeypatch.setattr(wallet_routes, "executor", dispatcher)
+    return dispatcher
+
+
+def test_switch_to_live_arms_the_dispatcher(
+    env, bare_dispatcher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The preflight builds a working LiveExecutor — it must be kept, not
+    discarded. Previously ``set_mode`` built one purely as a probe and threw it
+    away, so a wallet configured after process start left the dispatcher with
+    live=None: the UI showed LIVE while every order skipped as
+    ``live_not_ready`` until the operator happened to restart the backend."""
+    client, _store, rs = env
+    _set_wallet(rs)
+
+    class _ClobOK:
+        def get_balance_allowance(self, params):
+            return {"balance": "5000000", "allowances": _allowance_dict()}
+
+    _patch_build_with_fake(monkeypatch, _ClobOK())
+    assert bare_dispatcher.live_ready is False
+
+    r = client.post("/api/system/mode", json={"mode": "live"})
+    assert r.status_code == 200, r.text
+    assert bare_dispatcher.live_ready is True
+
+
+def test_failed_preflight_leaves_dispatcher_unarmed(
+    env, bare_dispatcher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flip side: a preflight that rejects the switch must not arm live."""
+    client, _store, rs = env
+    _set_wallet(rs)
+
+    class _ClobLowBalance:
+        def get_balance_allowance(self, params):
+            return {"balance": "500000", "allowances": _allowance_dict()}
+
+    _patch_build_with_fake(monkeypatch, _ClobLowBalance())
+    r = client.post("/api/system/mode", json={"mode": "live"})
+    assert r.status_code == 409
+    assert bare_dispatcher.live_ready is False
+
+
+def _patch_arm_build_with_fake(monkeypatch: pytest.MonkeyPatch, fake_clob) -> None:
+    """Same as ``_patch_build_with_fake`` but for the copy of the symbol that
+    ``arm_live_executor`` resolves — it looks ``build_live_executor`` up in its
+    own module, so patching the wallet_routes import is not enough (and would
+    let the test make a real CLOB round-trip)."""
+    from openpoly.execution import live_executor as le_mod
+    from openpoly.execution.live_executor import LiveExecutor
+
+    def fake_build(wallet, portfolio):
+        return LiveExecutor(portfolio=portfolio, clob_client=fake_clob)
+
+    monkeypatch.setattr(le_mod, "build_live_executor", fake_build)
+
+
+def test_put_wallet_config_arms_the_dispatcher(
+    env, bare_dispatcher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Configuring a wallet arms live immediately, so /api/wallet/balance and
+    the health check stop reading null without waiting for a restart."""
+    client, _store, _rs = env
+    _patch_arm_build_with_fake(monkeypatch, object())
+
+    r = client.put(
+        "/api/wallet/config",
+        json={
+            "private_key_ref": "env:OPENPOLY_POLYMARKET_PK",
+            "funder_address": TEST_FUNDER,
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert bare_dispatcher.live_ready is True
+
+
+def test_put_wallet_config_survives_unreachable_clob(
+    env, bare_dispatcher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Arming is best-effort: a CLOB that is down right now must not fail an
+    otherwise-valid config write. The mode-switch preflight is the real gate."""
+    from openpoly.execution import live_executor as le_mod
+
+    client, _store, rs = env
+
+    def _explode(wallet, portfolio):
+        raise ConnectionError("clob.polymarket.com unreachable")
+
+    monkeypatch.setattr(le_mod, "build_live_executor", _explode)
+    r = client.put(
+        "/api/wallet/config",
+        json={
+            "private_key_ref": "env:OPENPOLY_POLYMARKET_PK",
+            "funder_address": TEST_FUNDER,
+        },
+    )
+    assert r.status_code == 200, r.text
+    # Config persisted, dispatcher simply left unarmed.
+    assert rs.wallet is not None
+    assert bare_dispatcher.live_ready is False

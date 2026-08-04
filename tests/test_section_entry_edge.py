@@ -718,6 +718,90 @@ def test_kill_drawdown_passes_when_at_or_near_peak() -> None:
     assert out.verdict == "ok"
 
 
+# ---------- kill switch orders by close, not by id ----------
+#
+# ``list_positions`` is ordered by id desc — that is *open* order. Both brakes
+# reason about closes, so a position opened earlier but closed later has to be
+# re-sorted or it lands in the wrong place: the consecutive-loss streak reads
+# the wrong tail and the drawdown curve is walked out of chronological order.
+
+
+def test_kill_consecutive_losses_uses_close_order_not_id_order() -> None:
+    """The newest *close* is a win, so the streak is broken — even though the
+    newest *id* is a loss. Id-ordered, this wrongly trips."""
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    now = _time.time()
+    # id 30 is the highest id but was closed longest ago (a slow position that
+    # was opened last and settled first); the most recent close is the win.
+    records = [
+        _closed_rec(
+            market_id="m30", side="yes", closed_at=now - 5000, realized_pnl=-0.50, position_id=30
+        ),
+        _closed_rec(
+            market_id="m20", side="yes", closed_at=now - 4000, realized_pnl=-0.50, position_id=20
+        ),
+        _closed_rec(
+            market_id="m10", side="yes", closed_at=now - 100, realized_pnl=+3.0, position_id=10
+        ),
+    ]
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(kill_max_consecutive_losses=2),
+        portfolio_provider=lambda: _FakePortfolio(records),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok", "streak must be measured from the newest close"
+
+
+def test_kill_drawdown_curve_is_chronological_by_close() -> None:
+    """Cumulative curve by close time is +5 → +2 (drawdown 3). Walked in id
+    order it would be -3 → +2 (peak 2, drawdown 0) and never trip."""
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    now = _time.time()
+    records = [
+        # highest id, but the *earliest* close — the +5 peak.
+        _closed_rec(
+            market_id="m30", side="yes", closed_at=now - 5000, realized_pnl=+5.0, position_id=30
+        ),
+        # lowest id, but the *latest* close — the -3 drop off that peak.
+        _closed_rec(
+            market_id="m10", side="yes", closed_at=now - 100, realized_pnl=-3.0, position_id=10
+        ),
+    ]
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(kill_max_drawdown_usd=3.0),
+        portfolio_provider=lambda: _FakePortfolio(records),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "skip"
+    assert out.reason == "kill_drawdown"
+    assert out.signals["peak_usd"] == 5.0
+    assert out.signals["drawdown_usd"] == 3.0
+
+
+def test_cooldown_scans_all_matches_not_just_the_highest_id() -> None:
+    """A lower-id position on the same market can carry the later close stamp;
+    stopping at the first id match would miss it and let the entry through."""
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    now = _time.time()
+    records = [
+        # Highest id, closed long ago — outside the cooldown window.
+        _closed_rec(
+            market_id="m1", side="no", closed_at=now - 7200, realized_pnl=-0.5, position_id=30
+        ),
+        # Lower id but closed just now — inside the window.
+        _closed_rec(
+            market_id="m1", side="no", closed_at=now - 60, realized_pnl=-0.5, position_id=10
+        ),
+    ]
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(same_market_cooldown_minutes=30),
+        portfolio_provider=lambda: _FakePortfolio(records),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "skip"
+    assert out.reason == "same_market_cooldown"
+
+
 def test_kill_switch_disabled_by_default() -> None:
     """All three kill_* fields default 0 → no portfolio touch even with
     plenty of bad PnL history. Preserves the 'no portfolio touch on

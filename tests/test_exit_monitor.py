@@ -386,6 +386,56 @@ async def test_tick_loop_offloads_slow_execute_sell_without_blocking() -> None:
     assert executor.calls == 1
 
 
+def test_partial_fill_marks_realized_against_filled_qty() -> None:
+    """A live GTC sell can partially fill; record_sell then keeps the position
+    open with the remainder. Marking against the *intended* qty overstated the
+    log entry (and the PositionDetail UI) on every partial close, while the
+    DB's own realized_pnl was computed correctly from the filled qty."""
+    market_source_manager.store.set_order_books([_book("t1", bid=0.55)])
+    # Position is 20 shares at 0.40; only 5 fill at 0.55.
+    executor = _FakeExecutor(result=ExecResult.ok(price=0.55, qty=5.0, position_id=1))
+    monitor = _monitor(_FakePortfolio([_held(1, "t1", avg=0.40)]), executor)
+    monitor._tick_once()
+
+    entries = exit_log.entries()
+    assert len(entries) == 1
+    assert entries[0].verdict == "ok"
+    assert entries[0].realized_pnl == pytest.approx((0.55 - 0.40) * 5.0)
+
+
+async def test_stop_waits_for_in_flight_sell_to_persist() -> None:
+    """``stop()`` must not return while a sell is still in flight.
+
+    The tick body runs on a worker thread via ``asyncio.to_thread``, so
+    ``task.cancel()`` would return immediately while the thread kept going
+    through execute_sell → _log → _exit_persist. The lifespan tears down the DB
+    writer right after stop() returns, so a cancel means an on-chain fill whose
+    ledger record lands in a torn-down writer — or nowhere.
+    """
+    market_source_manager.store.set_order_books([_book("t1", bid=0.55)])
+    executor = _BlockingExecutor()
+    m = _monitor(_FakePortfolio([_held(1, "t1", avg=0.40)]), executor)  # type: ignore[arg-type]
+    persisted: list[ExitDecision] = []
+    m.set_exit_persist(persisted.append)
+
+    await m.start()
+    await asyncio.to_thread(executor.started.wait, 5)
+    assert persisted == []  # sell is blocked mid-flight
+
+    stopping = asyncio.create_task(m.stop())
+    # Give stop() every chance to return early if it were cancelling.
+    for _ in range(5):
+        await asyncio.sleep(0.01)
+    assert not stopping.done(), "stop() returned while a sell was still in flight"
+
+    executor.release.set()
+    await asyncio.wait_for(stopping, timeout=5)
+
+    assert m.state == "stopped"
+    assert len(persisted) == 1, "the in-flight tick's persist hook must have run"
+    assert persisted[0].verdict == "ok"
+
+
 # ---------- peak tracking ----------
 
 

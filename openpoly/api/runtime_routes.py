@@ -256,11 +256,18 @@ def get_settlement_log(
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> SectionLogResponse:
     # Settlement monitor mirrors the exit-monitor shape — position-driven, no
-    # news queue. state surfaces whether the loop is running.
+    # news queue. The tick-heartbeat fields carry the steady-state outcomes
+    # (still_trading, gamma_fetch_failed, …) that used to be written as one log
+    # entry per position per tick; ``entries`` now holds only real settlements
+    # and genuine failures.
     return SectionLogResponse(
         entries=_entries_from_db(factory, SettlementDecisionRow, limit),
         counters=settlement_log.counters(),
         last_at=settlement_log.last_at,
         queue_depth=0,
         state=settlement_monitor.state,
+        last_tick_at=settlement_monitor.last_tick_at,
+        open_positions=settlement_monitor.open_positions,
+        last_tick=settlement_monitor.last_tick,
+        tick_events=settlement_monitor.tick_events(limit=limit),
     )

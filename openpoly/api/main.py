@@ -152,15 +152,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     executor.configure_paper(portfolio)
     # Try-build the live executor whether or not we're currently in live
     # mode — pre-construct so a UI flip is cheap. Failure leaves live=None
-    # and the dispatcher falls back to live_not_ready.
+    # and the dispatcher falls back to live_not_ready. A wallet configured
+    # *after* startup is armed by the wallet routes through the same helper.
     if runtime_state.wallet is not None:
-        try:
-            from openpoly.execution.live_executor import build_live_executor
+        from openpoly.execution.live_executor import arm_live_executor
 
-            live_exec = build_live_executor(runtime_state.wallet, portfolio)
-            executor.configure_live(live_exec)
-        except Exception as exc:  # noqa: BLE001 — startup must survive a bad wallet
-            logger.exception("live executor construction failed: %s", exc)
+        arm_live_executor(runtime_state.wallet, portfolio, executor)
     # Exit monitor — the timer-driven close loop; shares the executor with the
     # orchestrator. Unlike the orchestrator's sections (built lazily by
     # get_orchestrator(), which reads canvas config at construction time),
@@ -189,22 +186,31 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await settlement_monitor.start()
     # Reconciliation monitor — closes positions the wallet no longer holds
     # on-chain (exited outside the ledger). Needs the funder to query the
-    # data-api, and only acts in live mode (paper positions aren't on-chain),
-    # so it's wired only when a wallet is configured.
-    if runtime_state.wallet is not None:
-        from openpoly.markets.polymarket_api import fetch_held_condition_sides
+    # data-api, and only acts in live mode (paper positions aren't on-chain).
+    #
+    # Wired unconditionally, reading the funder at *fetch* time rather than
+    # capturing it here: this used to be gated on a wallet existing at process
+    # start, so a wallet configured later through the UI got no reconciliation
+    # at all until a restart. The live_check gate below is what actually keeps
+    # it inert in paper mode, and going live already requires a wallet
+    # (``set_mode`` rejects with wallet_not_configured), so a missing wallet
+    # here can only mean "not live yet".
+    from openpoly.markets.polymarket_api import fetch_held_condition_sides
 
-        _funder = runtime_state.wallet.funder_address
+    async def _held_condition_sides() -> dict[tuple[str, str], float]:
+        wallet = runtime_state.wallet
+        if wallet is None:
+            # Never return {} — an empty holdings set reads as "the wallet is
+            # flat" and would reconcile every open position closed.
+            raise RuntimeError("no wallet configured; cannot query on-chain holdings")
+        return await fetch_held_condition_sides(wallet.funder_address)
 
-        async def _held_condition_sides() -> dict[tuple[str, str], float]:
-            return await fetch_held_condition_sides(_funder)
-
-        _recon_mod.reconciliation_monitor = ReconciliationMonitor(
-            holdings_fetcher=_held_condition_sides,
-            live_check=lambda: runtime_state.exec_mode == "live",
-        )
-        _recon_mod.reconciliation_monitor.configure(PortfolioStore(get_session_factory()))
-        await _recon_mod.reconciliation_monitor.start()
+    _recon_mod.reconciliation_monitor = ReconciliationMonitor(
+        holdings_fetcher=_held_condition_sides,
+        live_check=lambda: runtime_state.exec_mode == "live",
+    )
+    _recon_mod.reconciliation_monitor.configure(PortfolioStore(get_session_factory()))
+    await _recon_mod.reconciliation_monitor.start()
     # Embedding warm cache — uses the engine database_manager just bootstrapped
     # (init_db has created the market_embedding table); the warm loop reloads
     # cached vectors so a restart skips the cold recompute. Seeded from the
@@ -230,6 +236,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     orch.set_entry_persist(database_manager.enqueue_entry_decision)
     exit_monitor.set_exit_persist(database_manager.enqueue_exit_decision)
     settlement_monitor.set_settlement_persist(database_manager.enqueue_settlement_decision)
+    if _recon_mod.reconciliation_monitor is not None:
+        _recon_mod.reconciliation_monitor.set_settlement_persist(
+            database_manager.enqueue_settlement_decision
+        )
     # Auto-start both sources so a fresh process is already streaming — no
     # manual Start needed after a restart. Runs last so the persist hooks
     # above are in place before the first poll / message arrives.
@@ -265,6 +275,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     orch.set_entry_persist(None)
     exit_monitor.set_exit_persist(None)
     settlement_monitor.set_settlement_persist(None)
+    if _recon_mod.reconciliation_monitor is not None:
+        _recon_mod.reconciliation_monitor.set_settlement_persist(None)
     market_source_manager.set_book_persist(None)
     market_source_manager.set_portfolio_store(None)
     news_source_manager.set_news_persist(None)

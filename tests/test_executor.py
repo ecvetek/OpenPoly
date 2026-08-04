@@ -162,6 +162,52 @@ def test_sell_fills_at_level1_bid(store) -> None:
     assert store.get_open_position("m1", "yes") is None  # now closed
 
 
+def test_sell_capped_by_bid_depth_leaves_remainder_open(store) -> None:
+    """Paper sells are capped by level-1 bid depth, symmetric with the buy
+    path's ask-depth cap. Selling the whole position into a thin book
+    regardless of size made paper overstate exit liquidity and produced results
+    that couldn't be compared to a live run, where a GTC sell partially fills
+    and the remainder stays open for the next exit tick."""
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=100.0))
+    ex = Executor(store)
+    ex.execute_buy(_intent(qty=20.0), news_id="n1", ts=1.0)
+    held = store.get_open_position("m1", "yes")
+    assert held is not None
+    assert held.qty == 20.0
+
+    # Book thins out to 6 shares before the exit fires.
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=6.0))
+    r = ex.execute_sell(held, close_reason="take_profit", ts=200.0, trigger="take_profit")
+    assert r.filled
+    assert r.qty == 6.0
+    assert r.price == 0.40
+
+    still_open = store.get_open_position("m1", "yes")
+    assert still_open is not None, "unsold remainder must stay open, not vanish"
+    assert still_open.qty == pytest.approx(14.0)
+
+    # Depth returns; the next tick closes the rest.
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=100.0))
+    r2 = ex.execute_sell(still_open, close_reason="take_profit", ts=300.0)
+    assert r2.filled
+    assert r2.qty == pytest.approx(14.0)
+    assert store.get_open_position("m1", "yes") is None
+
+
+def test_sell_skips_when_bid_depth_is_dust(store) -> None:
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=100.0))
+    ex = Executor(store)
+    ex.execute_buy(_intent(qty=20.0), news_id="n1", ts=1.0)
+    held = store.get_open_position("m1", "yes")
+    assert held is not None
+
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=0.5))  # $0.20
+    r = ex.execute_sell(held, close_reason="manual", ts=2.0)
+    assert not r.filled
+    assert r.skip_reason == "dust"
+    assert store.get_open_position("m1", "yes") is not None
+
+
 def test_sell_no_order_book_skip(store) -> None:
     _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42))
     ex = Executor(store)
