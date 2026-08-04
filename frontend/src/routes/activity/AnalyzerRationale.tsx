@@ -15,6 +15,7 @@
  * ring, which has since been recycled).
  */
 import { useMemo, useState } from 'react'
+import { formatRelativeAgo, formatUTC } from '../../sections/news_source/time'
 import type { AnalyzerDecision } from './portfolioTypes'
 
 type DecisionGroup = {
@@ -41,17 +42,10 @@ function groupDecisions(decisions: AnalyzerDecision[]): DecisionGroup[] {
   return [...byKey.values()]
 }
 
-function fmtTs(ts: number): string {
-  return new Date(ts * 1000).toLocaleString(undefined, {
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    month: 'short', day: 'numeric',
-  })
-}
-
 function DecisionMeta({ d }: { d: AnalyzerDecision }) {
   return (
     <span className="text-[10px] text-neutral-500 font-mono">
-      {fmtTs(d.ts)}
+      <span title={formatUTC(d.ts)}>{formatRelativeAgo(d.ts)}</span>
       {d.p_model !== null && (
         <span className="ml-2 text-neutral-400">p={d.p_model.toFixed(2)}</span>
       )}
