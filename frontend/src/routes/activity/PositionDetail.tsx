@@ -171,82 +171,89 @@ export function PositionDetail() {
       </div>
 
       {/* Position card: side/size/price/cost/status/P&L/opened(+closed)/
-         expiry — same fields and layout as a PositionCard row in the list,
-         plus a manual close action while the position is open. */}
-      <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-2">
-        <div className="flex items-baseline gap-2 flex-wrap text-[11px]">
-          <span className="text-neutral-400">Position</span>
-          <StatusBadge status={p.status} closeReason={p.close_reason} />
+         expiry — same fields and layout as a PositionCard row in the list.
+         Two columns: trading detail on the left, timestamps + the manual
+         close action stacked top-right so an open position (no SELL row)
+         doesn't leave a tall empty gap under a bottom-pinned button. */}
+      <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-2 min-w-0">
+          <div className="flex items-baseline gap-2 flex-wrap text-[11px]">
+            <span className="text-neutral-400">Position</span>
+            <StatusBadge status={p.status} closeReason={p.close_reason} />
+          </div>
+
+          <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
+            <span className={`font-semibold ${sideTone}`}>
+              BUY_{p.side.toUpperCase()}
+            </span>
+            <span className="text-neutral-300">
+              {p.qty.toFixed(2)} @ {p.avg_entry_price.toFixed(3)}
+            </span>
+            <span className="text-neutral-500">(${cost.toFixed(2)})</span>
+            {p.status === 'open' && p.unrealized_pnl != null && (
+              <span className={pnlClass(p.unrealized_pnl)}>
+                {formatPnl(p.unrealized_pnl)}
+              </span>
+            )}
+          </div>
+
+          {/* Market expiry — "<time remaining> / <exact resolution datetime>",
+             flips to "expired / <datetime>" once the market's end_date has
+             passed (the position itself may still be open pending settlement). */}
+          {p.market_end_date != null && (
+            <div
+              className="text-[10px] text-neutral-600 font-mono"
+              title={formatUTC(p.market_end_date)}
+            >
+              {formatTimeRemaining(p.market_end_date)} / {formatLocalDateTime(p.market_end_date)}
+            </div>
+          )}
+
+          {p.closed_at !== null && exitPrice !== null && p.realized_pnl !== null && (
+            <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
+              <span className={`font-semibold ${sideTone}`}>
+                SELL_{p.side.toUpperCase()}
+              </span>
+              <span className="text-neutral-300">
+                {p.qty.toFixed(2)} @ {exitPrice.toFixed(3)}
+              </span>
+              <span className={pnlClass(p.realized_pnl)}>
+                {formatPnl(p.realized_pnl)}
+              </span>
+            </div>
+          )}
+
+          {closeStatus && (
+            <span className="text-[10px] text-neutral-500">{closeStatus}</span>
+          )}
         </div>
 
-        <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
-          <span className={`font-semibold ${sideTone}`}>
-            BUY_{p.side.toUpperCase()}
-          </span>
-          <span className="text-neutral-300">
-            {p.qty.toFixed(2)} @ {p.avg_entry_price.toFixed(3)}
-          </span>
-          <span className="text-neutral-500">(${cost.toFixed(2)})</span>
-          {p.status === 'open' && p.unrealized_pnl != null && (
-            <span className={pnlClass(p.unrealized_pnl)}>
-              {formatPnl(p.unrealized_pnl)}
-            </span>
-          )}
+        <div className="flex flex-col items-end gap-1.5 shrink-0">
           <span
-            className="ml-auto text-neutral-600 text-[10px]"
+            className="text-neutral-600 text-[10px]"
             title={formatUTC(p.opened_at)}
           >
             opened {formatRelativeAgo(p.opened_at)}
           </span>
-        </div>
-
-        {/* Market expiry — "<time remaining> / <exact resolution datetime>",
-           flips to "expired / <datetime>" once the market's end_date has
-           passed (the position itself may still be open pending settlement). */}
-        {p.market_end_date != null && (
-          <div
-            className="text-[10px] text-neutral-600 font-mono"
-            title={formatUTC(p.market_end_date)}
-          >
-            {formatTimeRemaining(p.market_end_date)} / {formatLocalDateTime(p.market_end_date)}
-          </div>
-        )}
-
-        {p.closed_at !== null && exitPrice !== null && p.realized_pnl !== null && (
-          <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
-            <span className={`font-semibold ${sideTone}`}>
-              SELL_{p.side.toUpperCase()}
-            </span>
-            <span className="text-neutral-300">
-              {p.qty.toFixed(2)} @ {exitPrice.toFixed(3)}
-            </span>
-            <span className={pnlClass(p.realized_pnl)}>
-              {formatPnl(p.realized_pnl)}
-            </span>
+          {p.closed_at !== null && (
             <span
-              className="ml-auto text-neutral-600 text-[10px]"
+              className="text-neutral-600 text-[10px]"
               title={formatUTC(p.closed_at)}
             >
               closed {formatRelativeAgo(p.closed_at)}
             </span>
-          </div>
-        )}
-
-        {p.status === 'open' && (
-          <div className="flex items-center gap-2 pt-1">
-            {closeStatus && (
-              <span className="text-[10px] text-neutral-500">{closeStatus}</span>
-            )}
+          )}
+          {p.status === 'open' && (
             <button
               type="button"
               disabled={closing}
               onClick={() => void onClosePosition()}
-              className="ml-auto px-2 py-1 text-[11px] rounded border border-red-800 bg-red-900/30 hover:bg-red-900/50 text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-2 py-1 text-[11px] rounded border border-red-800 bg-red-900/30 hover:bg-red-900/50 text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {closing ? 'Closing…' : 'Close position'}
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* The news item that triggered this position's entry. Inline rather
