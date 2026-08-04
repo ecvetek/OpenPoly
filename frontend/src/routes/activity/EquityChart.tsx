@@ -47,9 +47,9 @@ function localTickMarkFormatter(time: UTCTimestamp, tickMarkType: TickMarkType):
     case TickMarkType.DayOfMonth:
       return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
     case TickMarkType.TimeWithSeconds:
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
     default:
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
   }
 }
 
@@ -62,6 +62,7 @@ function localCrosshairTimeFormatter(time: UTCTimestamp): string {
     year: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    hour12: false,
   })
 }
 
