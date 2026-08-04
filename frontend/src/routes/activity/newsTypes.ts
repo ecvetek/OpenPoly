@@ -1,8 +1,10 @@
 // Types for the News pipeline tab (v16). News carries through four
-// stages — `/api/inspect/news` is the only persisted source; the other
-// three (`embedding` / `analyzer` / `entry`) are short-lived in-memory
-// ring logs on the backend, so any stage in a `NewsPipelineCard` may be
-// null when its log has evicted the news_id.
+// stages, all backed by persisted DB tables (`news_item` /
+// `embedding_call` / `analyzer_call` / `entry_decision`). The three
+// non-news endpoints are fetched at the same `limit` as the news fetch
+// itself (see newsClient.ts), so a stage in a `NewsPipelineCard` is null
+// only when the news item genuinely hasn't reached that stage yet — not
+// because of ring/eviction behavior.
 
 // Matches openpoly.news.ring_buffer.Urgency. Tradingnews tends to send
 // `regular`; `high`/`medium`/`low` are the bucketed view used by filters.
@@ -98,10 +100,11 @@ export type EntryDecision = {
 export type CardState = 'filled' | 'skipped' | 'errored' | 'pending'
 
 // Join product — one per NewsItem (1:1 by news_id). Each non-news stage
-// may be null if the backend ring already evicted that news_id, or if
-// the news has not progressed there yet (e.g. analyzer null when
-// embedding skipped). UI must render each segment independently with a
-// fallback — see plan §Risks/§3.
+// is null when the news item hasn't progressed there yet (e.g. analyzer
+// null when embedding skipped/errored) — not because of any backend
+// ring/eviction behavior; see newsClient.ts's top comment. UI must
+// render each segment independently with a fallback — see plan
+// §Risks/§3.
 export type NewsPipelineCard = {
   news: NewsItem
   embedding: EmbeddingCall | null

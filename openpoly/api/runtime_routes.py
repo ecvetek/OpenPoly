@@ -55,8 +55,13 @@ router = APIRouter(prefix="/api", tags=["runtime"])
 # Matches inspect_routes.py's NEWS_LIMIT_MAX / ORDER_BOOK_LIMIT_MAX pattern —
 # these 5 routes previously had no upper bound at all, so a fat-fingered
 # ?limit=999999999 could force an unbounded query against a call-log table
-# as it grows.
-SECTION_LOG_LIMIT_MAX = 500
+# as it grows. Set equal to NEWS_LIMIT_MAX (1000): the News tab now
+# requests these section logs at the same `limit` as its news fetch (see
+# frontend/src/routes/activity/newsClient.ts), so this cap must never
+# clamp below the news tab's own max selectable limit or the
+# embedding/analyzer/entry join windows fall out of sync with the news
+# window again.
+SECTION_LOG_LIMIT_MAX = 1000
 
 
 def _entries_from_db(

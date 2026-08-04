@@ -9,12 +9,11 @@
  *
  * Limit selector (25/50/100/200/500/1000, default 25): sets `newsLimit`
  * directly; the section-log endpoints (embedding / analyzer / entry) are
- * size-200 rings server-side and always queried at their max, so a
- * limit above 200 gets no matching pipeline-stage data for the extra
- * items — the news card itself still renders, just without an
- * embedding/analyzer/entry stage attached. The next poll tick (≤3 s)
- * picks up the new news limit via the fetcher closure (usePoll re-reads
- * via ref).
+ * fetched at that same `limit` (see newsClient.ts), so every news item
+ * within the selected window has its completed stages attached — a null
+ * stage means the item hasn't reached that stage yet, not that its data
+ * fell outside a fetch window. The next poll tick (≤3 s) picks up the
+ * new news limit via the fetcher closure (usePoll re-reads via ref).
  *
  * 5-s polling re-uses the same `usePoll` everyone else here does;
  * `pending` cards are intentionally only visible under "All" — they're

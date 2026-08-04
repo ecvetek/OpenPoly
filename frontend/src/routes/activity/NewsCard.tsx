@@ -15,9 +15,13 @@
  *  errored red / pending amber). high urgency overrides → red border per
  *  D7 (operator must spot it regardless of pipeline state).
  *
- * Every stage falls back independently to an "evicted" line when its
- * backend ring lost the news_id — plan §Risks #3 forbids cascading
- * failure (older news ② may exist while ③④ are gone).
+ * Every stage falls back independently to a "not reached yet" line when
+ * that stage has no persisted row for this news_id — most commonly
+ * because the item genuinely hasn't been processed there yet. embedding
+ * / analyzer / entry are DB tables fetched at the same `limit` as the
+ * news list (see newsClient.ts), so this is not a ring-eviction symptom.
+ * Plan §Risks #3 still forbids cascading failure (e.g. ② may be null
+ * while ③④ are populated).
  */
 import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
@@ -116,10 +120,10 @@ function StageRow({
   )
 }
 
-function EvictedFallback() {
+function PendingStageFallback() {
   return (
     <span className="text-neutral-500 italic text-[11px]">
-      log evicted — ring buffer overflowed
+      hasn't reached this stage yet
     </span>
   )
 }
@@ -249,7 +253,7 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
             )}
           </>
         ) : (
-          <EvictedFallback />
+          <PendingStageFallback />
         )}
       </StageRow>
 
@@ -334,7 +338,7 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
             />
           </>
         ) : (
-          <EvictedFallback />
+          <PendingStageFallback />
         )}
       </StageRow>
 
@@ -407,7 +411,7 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
             )}
           </>
         ) : (
-          <EvictedFallback />
+          <PendingStageFallback />
         )}
       </StageRow>
     </article>

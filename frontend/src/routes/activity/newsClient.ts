@@ -16,16 +16,8 @@ import type {
 } from './newsTypes'
 
 // Caller may raise this via the News tab's limit selector (up to 1000,
-// matching the backend's own NEWS_LIMIT_MAX in inspect_routes.py). The 3
-// section log rings are size-200 server-side, so a newsLimit above 200
-// gets news items with no matching embedding/analyzer/entry stage data —
-// no need to plumb the value through the other URLs.
+// matching the backend's own NEWS_LIMIT_MAX in inspect_routes.py).
 export const DEFAULT_NEWS_LIMIT = 25
-
-// Ring capacity (per openpoly.runtime.section_log.DEFAULT_MAXLEN). Asking
-// for exactly the ring size guarantees we'll see whatever the backend
-// still remembers.
-const SECTION_LOG_LIMIT = 200
 
 export async function fetchNewsPipeline(
   newsLimit: number = DEFAULT_NEWS_LIMIT,
@@ -33,9 +25,9 @@ export async function fetchNewsPipeline(
 ): Promise<NewsPipelineCard[]> {
   const [newsRes, embRes, anRes, enRes] = await Promise.allSettled([
     fetchJson<{ news?: NewsItem[] }>(`/api/inspect/news?limit=${newsLimit}`, signal),
-    fetchJson<{ entries?: EmbeddingCall[] }>(`/api/embedding/log?limit=${SECTION_LOG_LIMIT}`, signal),
-    fetchJson<{ entries?: AnalyzerCallEntry[] }>(`/api/analyzer/log?limit=${SECTION_LOG_LIMIT}`, signal),
-    fetchJson<{ entries?: EntryDecision[] }>(`/api/entry/log?limit=${SECTION_LOG_LIMIT}`, signal),
+    fetchJson<{ entries?: EmbeddingCall[] }>(`/api/embedding/log?limit=${newsLimit}`, signal),
+    fetchJson<{ entries?: AnalyzerCallEntry[] }>(`/api/analyzer/log?limit=${newsLimit}`, signal),
+    fetchJson<{ entries?: EntryDecision[] }>(`/api/entry/log?limit=${newsLimit}`, signal),
   ])
 
   if (newsRes.status === 'rejected') throw newsRes.reason
