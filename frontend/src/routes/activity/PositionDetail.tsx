@@ -225,17 +225,17 @@ export function PositionDetail() {
 
         {p.status === 'open' && (
           <div className="flex items-center gap-2 pt-1">
+            {closeStatus && (
+              <span className="text-[10px] text-neutral-500">{closeStatus}</span>
+            )}
             <button
               type="button"
               disabled={closing}
               onClick={() => void onClosePosition()}
-              className="px-2 py-1 text-[11px] rounded border border-red-800 bg-red-900/30 hover:bg-red-900/50 text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="ml-auto px-2 py-1 text-[11px] rounded border border-red-800 bg-red-900/30 hover:bg-red-900/50 text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {closing ? 'Closing…' : 'Close position'}
             </button>
-            {closeStatus && (
-              <span className="text-[10px] text-neutral-500">{closeStatus}</span>
-            )}
           </div>
         )}
       </div>
