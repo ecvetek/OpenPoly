@@ -17,9 +17,20 @@ export function formatUTC(epochSeconds: number): string {
 
 export function formatTimeRemaining(endEpochSeconds: number, nowMs = Date.now()): string {
   const delta = endEpochSeconds - nowMs / 1000
-  if (delta <= 0) return 'resolved'
+  if (delta <= 0) return 'expired'
   if (delta < 60) return '<1m left'
   if (delta < 3600) return `${Math.floor(delta / 60)}m left`
   if (delta < 86400) return `${Math.floor(delta / 3600)}h left`
   return `${Math.floor(delta / 86400)}d left`
+}
+
+export function formatLocalDateTime(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toLocaleString([], {
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
 }

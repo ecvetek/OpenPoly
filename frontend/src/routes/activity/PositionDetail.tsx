@@ -12,7 +12,12 @@
  */
 import { useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { formatRelativeAgo, formatTimeRemaining, formatUTC } from '../../sections/news_source/time'
+import {
+  formatLocalDateTime,
+  formatRelativeAgo,
+  formatTimeRemaining,
+  formatUTC,
+} from '../../sections/news_source/time'
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import { OrderBookChart } from './OrderBookChart'
 import { fetchOrderBookHistory, type OrderBookHistory } from './orderBookClient'
@@ -172,14 +177,6 @@ export function PositionDetail() {
         <div className="flex items-baseline gap-2 flex-wrap text-[11px]">
           <span className="text-neutral-400">Position</span>
           <StatusBadge status={p.status} closeReason={p.close_reason} />
-          {p.market_end_date != null && (
-            <span
-              className="ml-auto text-neutral-600"
-              title={formatUTC(p.market_end_date)}
-            >
-              {formatTimeRemaining(p.market_end_date)}
-            </span>
-          )}
         </div>
 
         <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
@@ -202,6 +199,18 @@ export function PositionDetail() {
             opened {formatRelativeAgo(p.opened_at)}
           </span>
         </div>
+
+        {/* Market expiry — "<time remaining> / <exact resolution datetime>",
+           flips to "expired / <datetime>" once the market's end_date has
+           passed (the position itself may still be open pending settlement). */}
+        {p.market_end_date != null && (
+          <div
+            className="text-[10px] text-neutral-600 font-mono"
+            title={formatUTC(p.market_end_date)}
+          >
+            {formatTimeRemaining(p.market_end_date)} / {formatLocalDateTime(p.market_end_date)}
+          </div>
+        )}
 
         {p.closed_at !== null && exitPrice !== null && p.realized_pnl !== null && (
           <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
