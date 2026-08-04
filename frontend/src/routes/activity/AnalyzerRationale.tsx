@@ -42,22 +42,24 @@ function groupDecisions(decisions: AnalyzerDecision[]): DecisionGroup[] {
   return [...byKey.values()]
 }
 
-function DecisionMeta({ d }: { d: AnalyzerDecision }) {
+function DecisionMeta({ d, hideTs = false }: { d: AnalyzerDecision; hideTs?: boolean }) {
   return (
-    <span className="text-[10px] text-neutral-500 font-mono">
-      <span title={formatUTC(d.ts)}>{formatRelativeAgo(d.ts)}</span>
+    <span className="inline-flex items-baseline gap-2 text-[10px] text-neutral-500 font-mono">
+      {!hideTs && (
+        <span title={formatUTC(d.ts)}>{formatRelativeAgo(d.ts)}</span>
+      )}
       {d.p_model !== null && (
-        <span className="ml-2 text-neutral-400">p={d.p_model.toFixed(2)}</span>
+        <span className="text-neutral-400">p={d.p_model.toFixed(2)}</span>
       )}
       {d.confidence !== null && (
         <span
-          className={`ml-2 ${
+          className={
             d.confidence === 'high'
               ? 'text-emerald-300'
               : d.confidence === 'medium'
                 ? 'text-amber-300'
                 : 'text-neutral-400'
-          }`}
+          }
         >
           {d.confidence}
         </span>
@@ -94,24 +96,33 @@ export function AnalyzerRationaleBlock({
 
   return (
     <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-2">
-      <div className="flex items-baseline gap-3 text-[11px]">
-        <span className="text-neutral-400">Analyzer rationale</span>
-        {decisions.length > 1 && (
-          <span className="text-neutral-600">
-            ({decisions.length} total
-            {olderGroups.length > 0
-              ? `, ${groups.length} distinct`
-              : groups.length === 1 && newestGroup.members.length > 1
-                ? `, ×${newestGroup.members.length} same text`
-                : ''}
-            )
-          </span>
-        )}
+      <div className="flex items-baseline justify-between gap-3 text-[11px]">
+        <div className="flex items-baseline gap-3">
+          <span className="text-neutral-400">Analyzer rationale</span>
+          {decisions.length > 1 && (
+            <span className="text-neutral-600">
+              ({decisions.length} total
+              {olderGroups.length > 0
+                ? `, ${groups.length} distinct`
+                : groups.length === 1 && newestGroup.members.length > 1
+                  ? `, ×${newestGroup.members.length} same text`
+                  : ''}
+              )
+            </span>
+          )}
+        </div>
+        <span
+          className="text-neutral-500 font-mono"
+          title={formatUTC(newestGroup.newest.ts)}
+        >
+          {formatRelativeAgo(newestGroup.newest.ts)}
+        </span>
       </div>
 
       <RationaleGroupRow
         group={newestGroup}
         expandedDupes={expandedDupes.has(0)}
+        hideNewestTs
         onToggleDupes={() =>
           setExpandedDupes((s) => {
             const next = new Set(s)
@@ -157,16 +168,18 @@ function RationaleGroupRow({
   group,
   expandedDupes,
   onToggleDupes,
+  hideNewestTs = false,
 }: {
   group: DecisionGroup
   expandedDupes: boolean
   onToggleDupes: () => void
+  hideNewestTs?: boolean
 }) {
   const dupeCount = group.members.length
   return (
     <div className="rounded bg-neutral-900/60 p-2.5 flex flex-col gap-1">
       <div className="flex items-baseline gap-2">
-        <DecisionMeta d={group.newest} />
+        <DecisionMeta d={group.newest} hideTs={hideNewestTs} />
         {dupeCount > 1 && (
           <button
             type="button"
