@@ -10,6 +10,7 @@ import { CanvasPage } from './routes/CanvasPage'
 import { ActivityPage } from './routes/ActivityPage'
 import { HealthPage } from './routes/HealthPage'
 import { OverviewPage } from './routes/OverviewPage'
+import { StatisticsPage } from './routes/StatisticsPage'
 import { PositionsTab } from './routes/activity/PositionsTab'
 import { NewsTab } from './routes/activity/NewsTab'
 import { PositionDetail } from './routes/activity/PositionDetail'
@@ -37,6 +38,7 @@ function App() {
             <Route path="positions/:positionId" element={<PositionDetail />} />
             <Route path="news" element={<NewsTab />} />
           </Route>
+          <Route path="statistics" element={<StatisticsPage />} />
           <Route path="health" element={<HealthPage />} />
           {/* "runs" / "portfolio" were earlier names for this tab; redirect
               any stale link. */}

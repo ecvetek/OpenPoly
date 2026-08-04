@@ -28,6 +28,7 @@ from openpoly.api.news_routes import router as news_router
 from openpoly.api.portfolio_routes import router as portfolio_router
 from openpoly.api.runtime_routes import router as runtime_router
 from openpoly.api.secrets_routes import router as secrets_router
+from openpoly.api.statistics_routes import router as statistics_router
 from openpoly.api.wallet_routes import router as wallet_router
 from openpoly.api.debug_routes import router as debug_router
 from openpoly.db.engine import get_session_factory
@@ -277,6 +278,7 @@ app.include_router(inspect_router)
 app.include_router(secrets_router)
 app.include_router(runtime_router)
 app.include_router(portfolio_router)
+app.include_router(statistics_router)
 app.include_router(wallet_router)
 app.include_router(canvas_router)
 app.include_router(debug_router)

@@ -59,7 +59,9 @@ const analyzerDecisionsFor = (
   { rationale: reason, p_model: p, confidence: conf, ts },
 ]
 
-const positions: PositionRecord[] = [
+// Exported so other fixture modules (e.g. ./statistics) can derive
+// consistent numbers from the same underlying positions.
+export const positions: PositionRecord[] = [
   {
     id: 101,
     market_id: 'mkt-fed-pause',
