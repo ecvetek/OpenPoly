@@ -237,6 +237,9 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
                 <span className="text-neutral-300">
                   {embedding.top_score.toFixed(3)}
                 </span>
+                {embedding.top_market_question && (
+                  <span className="text-neutral-400"> "{embedding.top_market_question}"</span>
+                )}
               </div>
             )}
             {embedding.error && (
