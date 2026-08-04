@@ -10,14 +10,15 @@
  * closed position page never re-flickers when catalog / analyzer log
  * evicts the source data underneath.
  */
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { formatRelativeAgo, formatUTC } from '../../sections/news_source/time'
+import { formatRelativeAgo, formatTimeRemaining, formatUTC } from '../../sections/news_source/time'
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import { OrderBookChart } from './OrderBookChart'
 import { fetchOrderBookHistory, type OrderBookHistory } from './orderBookClient'
 import { formatPnl, pnlClass } from './format'
-import type { PositionRecord } from './portfolioTypes'
+import { StatusBadge } from './PositionCard'
+import type { CloseResult, PositionRecord } from './portfolioTypes'
 import { usePoll } from './usePoll'
 
 async function fetchPosition(id: string): Promise<PositionRecord | null> {
@@ -25,6 +26,15 @@ async function fetchPosition(id: string): Promise<PositionRecord | null> {
   if (r.status === 404) return null
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return (await r.json()) as PositionRecord
+}
+
+async function closePosition(id: number): Promise<CloseResult> {
+  const r = await fetch(`/api/positions/${id}/close`, { method: 'POST' })
+  if (!r.ok) {
+    const body = await r.json().catch(() => null)
+    throw new Error(body?.detail ?? `HTTP ${r.status}`)
+  }
+  return (await r.json()) as CloseResult
 }
 
 type DetailData = {
@@ -40,7 +50,7 @@ export function PositionDetail() {
   // new id (unreachable today since every nav entry point remounts, but a
   // real latent bug for any future in-place link between positions).
   const frozenRef = useRef<{ positionId: string; data: DetailData } | null>(null)
-  const { data, status, error } = usePoll<DetailData>(async () => {
+  const { data, status, error, refetch } = usePoll<DetailData>(async () => {
     const pid = positionId ?? ''
     if (frozenRef.current !== null && frozenRef.current.positionId === pid) {
       return frozenRef.current.data
@@ -56,6 +66,8 @@ export function PositionDetail() {
     if (position.closed_at !== null) frozenRef.current = { positionId: pid, data: result }
     return result
   })
+  const [closing, setClosing] = useState(false)
+  const [closeStatus, setCloseStatus] = useState<string | null>(null)
 
   if (data === null) {
     return (
@@ -84,6 +96,30 @@ export function PositionDetail() {
     p.closed_at !== null && p.realized_pnl !== null
       ? p.avg_entry_price + p.realized_pnl / p.qty
       : null
+  const cost = p.qty * p.avg_entry_price
+  const sideTone = p.side === 'yes' ? 'text-emerald-300' : 'text-sky-300'
+
+  async function onClosePosition() {
+    if (closing) return
+    if (!window.confirm(`Close position #${p.id} now at the level-1 bid?`)) return
+    setClosing(true)
+    setCloseStatus(null)
+    try {
+      const result = await closePosition(p.id)
+      if (result.filled) {
+        setCloseStatus(
+          `Closed at ${result.price?.toFixed(3) ?? '?'} × ${result.qty?.toFixed(2) ?? '?'}.`,
+        )
+      } else {
+        setCloseStatus(`Not closed: ${result.skip_reason ?? 'unknown reason'}.`)
+      }
+      refetch()
+    } catch (e) {
+      setCloseStatus(`Close failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setClosing(false)
+    }
+  }
 
   return (
     <div className="px-6 pb-6 flex flex-col gap-4">
@@ -91,7 +127,9 @@ export function PositionDetail() {
         ‹ Positions
       </Link>
 
-      {/* Header row: id, market identity, side, qty/price, status, PnL */}
+      {/* Header row: id + market identity only. Trading detail (side, size,
+         cost, status, P&L, timestamps) lives in the Position card below,
+         on its own line rather than crammed next to the title. */}
       <div className="flex items-baseline gap-3 flex-wrap font-mono text-[12px]">
         <span className="text-neutral-100 font-semibold">#{p.id}</span>
         {/* PD2: market question, with condition_id truncation as fallback.
@@ -125,45 +163,80 @@ export function PositionDetail() {
             {p.market_id.slice(0, 18)}…
           </span>
         )}
-        <span className={p.side === 'yes' ? 'text-emerald-300' : 'text-sky-300'}>
-          {p.side.toUpperCase()}
-        </span>
-        <span className="text-neutral-300">
-          {p.qty.toFixed(2)} @ {p.avg_entry_price.toFixed(3)}
-        </span>
-        <span
-          className={p.status === 'open' ? 'text-amber-300' : 'text-neutral-400'}
-        >
-          {p.status}
-        </span>
-        {p.status === 'closed' && p.close_reason !== null && (
-          <span className="text-neutral-500 text-[11px]">
-            ({p.close_reason})
+      </div>
+
+      {/* Position card: side/size/price/cost/status/P&L/opened(+closed)/
+         expiry — same fields and layout as a PositionCard row in the list,
+         plus a manual close action while the position is open. */}
+      <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-2">
+        <div className="flex items-baseline gap-2 flex-wrap text-[11px]">
+          <span className="text-neutral-400">Position</span>
+          <StatusBadge status={p.status} closeReason={p.close_reason} />
+          {p.market_end_date != null && (
+            <span
+              className="ml-auto text-neutral-600"
+              title={formatUTC(p.market_end_date)}
+            >
+              {formatTimeRemaining(p.market_end_date)}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
+          <span className={`font-semibold ${sideTone}`}>
+            BUY_{p.side.toUpperCase()}
           </span>
-        )}
-        {p.realized_pnl !== null && (
-          <span className={pnlClass(p.realized_pnl)}>
-            {formatPnl(p.realized_pnl)}
+          <span className="text-neutral-300">
+            {p.qty.toFixed(2)} @ {p.avg_entry_price.toFixed(3)}
           </span>
-        )}
-        {p.status === 'open' && p.unrealized_pnl != null && (
-          <span className={pnlClass(p.unrealized_pnl)}>
-            {formatPnl(p.unrealized_pnl)}
-          </span>
-        )}
-        <span
-          className="ml-auto text-neutral-600 text-[10px]"
-          title={formatUTC(p.opened_at)}
-        >
-          opened {formatRelativeAgo(p.opened_at)}
-        </span>
-        {p.closed_at !== null && (
+          <span className="text-neutral-500">(${cost.toFixed(2)})</span>
+          {p.status === 'open' && p.unrealized_pnl != null && (
+            <span className={pnlClass(p.unrealized_pnl)}>
+              {formatPnl(p.unrealized_pnl)}
+            </span>
+          )}
           <span
-            className="text-neutral-600 text-[10px]"
-            title={formatUTC(p.closed_at)}
+            className="ml-auto text-neutral-600 text-[10px]"
+            title={formatUTC(p.opened_at)}
           >
-            closed {formatRelativeAgo(p.closed_at)}
+            opened {formatRelativeAgo(p.opened_at)}
           </span>
+        </div>
+
+        {p.closed_at !== null && exitPrice !== null && p.realized_pnl !== null && (
+          <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
+            <span className={`font-semibold ${sideTone}`}>
+              SELL_{p.side.toUpperCase()}
+            </span>
+            <span className="text-neutral-300">
+              {p.qty.toFixed(2)} @ {exitPrice.toFixed(3)}
+            </span>
+            <span className={pnlClass(p.realized_pnl)}>
+              {formatPnl(p.realized_pnl)}
+            </span>
+            <span
+              className="ml-auto text-neutral-600 text-[10px]"
+              title={formatUTC(p.closed_at)}
+            >
+              closed {formatRelativeAgo(p.closed_at)}
+            </span>
+          </div>
+        )}
+
+        {p.status === 'open' && (
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              disabled={closing}
+              onClick={() => void onClosePosition()}
+              className="px-2 py-1 text-[11px] rounded border border-red-800 bg-red-900/30 hover:bg-red-900/50 text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {closing ? 'Closing…' : 'Close position'}
+            </button>
+            {closeStatus && (
+              <span className="text-[10px] text-neutral-500">{closeStatus}</span>
+            )}
+          </div>
         )}
       </div>
 

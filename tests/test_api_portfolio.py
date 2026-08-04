@@ -299,6 +299,53 @@ def test_get_position_market_question_null_when_not_catalogued(env) -> None:
     assert body["market_question"] is None
 
 
+def test_get_position_includes_market_end_date_when_catalogued(env) -> None:
+    """Position's condition_id resolves via MarketStore.get_by_condition →
+    response carries the market's resolution date as epoch seconds."""
+    import json
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.models import normalize_gamma_market
+    from openpoly.markets.store import MarketStore, PollSummary
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")  # _open uses condition_id="0xm1"
+    raw = {
+        "id": "m1",
+        "conditionId": "0xm1",
+        "question": "Will the U.S. invade Iran before 2027?",
+        "slug": "iran-2027",
+        "clobTokenIds": json.dumps(["yes-tok", "no-tok"]),
+        "endDate": "2027-01-01T00:00:00Z",
+    }
+    market = normalize_gamma_market(raw, event={"id": "e", "title": "E"})
+    saved_store = msm.store
+    try:
+        fresh = MarketStore()
+        fresh.replace([market], PollSummary(ts=1.0, fetched=1, kept=1, reason_counts={}))
+        msm.store = fresh
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["market_end_date"] == market.end_date.timestamp()
+
+
+def test_get_position_market_end_date_null_when_not_catalogued(env) -> None:
+    """Market evicted / never catalogued → market_end_date is None, same
+    fallback semantics as market_question."""
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.store import MarketStore
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    saved_store = msm.store
+    try:
+        msm.store = MarketStore()  # empty catalog
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["market_end_date"] is None
+
+
 # ---------- PD3: analyzer_decisions lookup ----------
 
 

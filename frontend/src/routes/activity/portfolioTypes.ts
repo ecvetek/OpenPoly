@@ -54,6 +54,9 @@ export type PositionRecord = {
   analyzer_decisions?: AnalyzerDecision[]
   // Resolved from the live catalog — null when the market has been evicted.
   polymarket_url?: string | null
+  // Market resolution date (epoch seconds), from the same catalog lookup as
+  // market_question/polymarket_url — null under the same eviction fallback.
+  market_end_date?: number | null
   // The news_id backing analyzer_decisions; null for a paper/manual
   // position with no news linkage. news is the full triggering item
   // (only populated on /api/positions/{id}, not the list route).
@@ -67,6 +70,17 @@ export type PositionRecord = {
   // closed (use realized_pnl instead), and null if there's no live order
   // book yet for the token.
   unrealized_pnl?: number | null
+}
+
+// Response body of POST /api/positions/{id}/close — mirrors the backend's
+// ExecResult. On filled=true, price/qty/position_id are set; on a skip,
+// skip_reason carries a stable label instead.
+export type CloseResult = {
+  filled: boolean
+  skip_reason?: string | null
+  price?: number | null
+  qty?: number | null
+  position_id?: number | null
 }
 
 export type Fill = {

@@ -75,6 +75,9 @@ def list_positions(
         market = _lookup_market(record.condition_id)
         body["market_question"] = market.question if market is not None else None
         body["polymarket_url"] = polymarket_url(market)
+        body["market_end_date"] = (
+            market.end_date.timestamp() if market is not None and market.end_date else None
+        )
         news_id = news_by_position.get(record.id)
         body["news_id"] = news_id
         body["analyzer_decisions"] = decisions_by_news.get(news_id, []) if news_id else []
@@ -187,10 +190,10 @@ def get_position_by_id(
     Augments the raw PositionRecord with several best-effort lookups so the
     PositionDetail UI doesn't have to fan out to additional endpoints:
 
-    - ``market_question`` / ``polymarket_url``: catalog lookup by
-      condition_id. Both ``None`` when the market is no longer catalogued
-      (filtered out or resolved). UI falls back to displaying the
-      condition_id / a plain (non-link) label.
+    - ``market_question`` / ``polymarket_url`` / ``market_end_date``: catalog
+      lookup by condition_id. All ``None`` when the market is no longer
+      catalogued (filtered out or resolved). UI falls back to displaying the
+      condition_id / a plain (non-link) label, and omits the expiry.
     - ``news_id`` / ``news``: the news item that triggered this position.
       ``news_id`` is ``None`` for a paper/manual position with no news
       linkage. ``news`` (content/urgency/sentiment/published_at) is
@@ -217,6 +220,9 @@ def get_position_by_id(
     market = _lookup_market(record.condition_id)
     body["market_question"] = market.question if market is not None else None
     body["polymarket_url"] = polymarket_url(market)
+    body["market_end_date"] = (
+        market.end_date.timestamp() if market is not None and market.end_date else None
+    )
     # PositionRecord doesn't carry news_id (it lives on the BUY fill row).
     # Look it up via the store + then query the persisted analyzer_call table.
     news_id = store.news_id_for_position(position_id)

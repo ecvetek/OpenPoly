@@ -19,6 +19,7 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts'
 import { BandSeries, type BandData } from './bandSeries'
+import { localCrosshairTimeFormatter, localTickMarkFormatter } from './chartTimeFormat'
 import type { OrderBookSnapshot } from './orderBookClient'
 
 export type OrderBookChartProps = {
@@ -99,7 +100,12 @@ export function OrderBookChart({ snapshots, entry, exit }: OrderBookChartProps) 
         vertLines: { color: '#1f242c' },
         horzLines: { color: '#1f242c' },
       },
-      timeScale: { timeVisible: true, secondsVisible: false },
+      localization: { timeFormatter: localCrosshairTimeFormatter },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: localTickMarkFormatter,
+      },
       rightPriceScale: { borderColor: '#30363d' },
     })
     const bandSeries = chart.addCustomSeries(new BandSeries(), {})

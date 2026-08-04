@@ -14,7 +14,7 @@
  * we mirror it here so the card is self-contained).
  */
 import { Link } from 'react-router-dom'
-import { formatRelativeAgo, formatUTC } from '../../sections/news_source/time'
+import { formatRelativeAgo, formatTimeRemaining, formatUTC } from '../../sections/news_source/time'
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import { formatPnl, pnlClass } from './format'
 import type { PositionRecord } from './portfolioTypes'
@@ -29,7 +29,7 @@ const CLOSE_REASON_TONE: Record<string, string> = {
 
 const OPEN_TONE = 'bg-amber-900/40 text-amber-300 border-amber-700/50'
 
-function StatusBadge({
+export function StatusBadge({
   status,
   closeReason,
 }: {
@@ -88,6 +88,14 @@ export function PositionCard({ p }: { p: PositionRecord }) {
             </span>
           )}
           <StatusBadge status={p.status} closeReason={p.close_reason} />
+          {p.market_end_date != null && (
+            <span
+              className="text-[10px] text-neutral-500 font-mono"
+              title={formatUTC(p.market_end_date)}
+            >
+              {formatTimeRemaining(p.market_end_date)}
+            </span>
+          )}
         </div>
 
         <hr className="border-neutral-800" />

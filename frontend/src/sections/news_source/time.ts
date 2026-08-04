@@ -14,3 +14,12 @@ export function formatRelativeAgo(epochSeconds: number, nowMs = Date.now()): str
 export function formatUTC(epochSeconds: number): string {
   return new Date(epochSeconds * 1000).toISOString().replace('.000Z', 'Z')
 }
+
+export function formatTimeRemaining(endEpochSeconds: number, nowMs = Date.now()): string {
+  const delta = endEpochSeconds - nowMs / 1000
+  if (delta <= 0) return 'resolved'
+  if (delta < 60) return '<1m left'
+  if (delta < 3600) return `${Math.floor(delta / 60)}m left`
+  if (delta < 86400) return `${Math.floor(delta / 3600)}h left`
+  return `${Math.floor(delta / 86400)}d left`
+}
