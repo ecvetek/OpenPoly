@@ -69,19 +69,24 @@ export function CanvasTopBar() {
 
   return (
     <>
-      <div className="h-11 shrink-0 border-b border-neutral-800 bg-neutral-950 flex items-center gap-3 px-4">
+      <div className="min-h-11 shrink-0 border-b border-neutral-800 bg-neutral-950 flex flex-wrap items-center gap-2 sm:gap-3 px-3 sm:px-4 py-1.5 sm:py-0">
         <input
           type="text"
           value={templateName}
           onChange={(e) => setTemplateName(e.target.value)}
           placeholder="Strategy name"
-          className="bg-transparent text-sm text-neutral-100 outline-none border-b border-transparent hover:border-neutral-700 focus:border-indigo-400 px-1 min-w-[200px]"
+          className="bg-transparent text-sm text-neutral-100 outline-none border-b border-transparent hover:border-neutral-700 focus:border-indigo-400 px-1 min-w-[120px] sm:min-w-[200px] flex-1 sm:flex-initial"
         />
-        <span className="text-[11px] text-neutral-500 min-w-[180px]">{status}</span>
-        <div className="ml-auto flex items-center gap-3">
+        <span className="hidden sm:inline text-[11px] text-neutral-500 min-w-[180px]">{status}</span>
+        {saveStatus === 'offline' && (
+          <span className="sm:hidden text-[11px] text-amber-400" title="Offline — local draft only">
+            ⚠
+          </span>
+        )}
+        <div className="order-3 sm:order-none w-full sm:w-auto sm:ml-auto flex items-center justify-between sm:justify-start gap-2 sm:gap-3">
           {/* Passive autosave indicator — the canvas persists on every change
               (v9 / SK3), so there is no manual Save button to forget. */}
-          <span className="text-[11px] text-neutral-500">
+          <span className="hidden sm:inline text-[11px] text-neutral-500">
             {saveStatus === 'saving'
               ? 'Saving…'
               : saveStatus === 'offline'
@@ -94,7 +99,7 @@ export function CanvasTopBar() {
               type="button"
               onClick={() => setKeysOpen(true)}
               title="Manage stored API keys"
-              className="px-3 py-1 text-sm rounded border border-neutral-700 hover:border-neutral-600 hover:bg-neutral-900 text-neutral-100"
+              className="px-2.5 sm:px-3 py-1 text-sm rounded border border-neutral-700 hover:border-neutral-600 hover:bg-neutral-900 text-neutral-100"
             >
               Keys
             </button>
@@ -105,7 +110,7 @@ export function CanvasTopBar() {
                 flash('Reset to seed template')
               }}
               title="Replace canvas with the seed template"
-              className="px-3 py-1 text-sm rounded border border-neutral-700 hover:border-neutral-600 hover:bg-neutral-900 text-neutral-400"
+              className="px-2.5 sm:px-3 py-1 text-sm rounded border border-neutral-700 hover:border-neutral-600 hover:bg-neutral-900 text-neutral-400"
             >
               Reset
             </button>

@@ -75,7 +75,7 @@ export function HealthDashboard() {
   const { data, status, error, refetch } = usePoll<HealthDetailResponse>(fetchHealthDetail, refreshMs)
 
   return (
-    <div className="px-6 pb-6 flex flex-col gap-4">
+    <div className="px-4 sm:px-6 pb-6 flex flex-col gap-4">
       <div className="flex items-center justify-end gap-3 flex-wrap pt-2">
         <div className="flex items-center gap-1 text-[10px] text-neutral-500">
           <span>refresh</span>

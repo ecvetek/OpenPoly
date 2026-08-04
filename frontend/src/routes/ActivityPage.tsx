@@ -23,9 +23,9 @@ export function ActivityPage() {
   usePageTitle('Activity')
   return (
     <div className="h-full flex flex-col bg-neutral-950">
-      <div className="px-6 pt-5 pb-3 flex items-baseline gap-4">
+      <div className="px-4 sm:px-6 pt-5 pb-3 flex flex-wrap items-baseline gap-x-4 gap-y-2">
         <h1 className="text-lg font-medium text-neutral-100">Activity</h1>
-        <nav className="flex gap-1">
+        <nav className="flex flex-wrap gap-1">
           {/* no `end`: stays active for the /activity/positions/:id detail route */}
           <NavLink to="/activity/positions" className={subTabClass}>
             Positions

@@ -70,7 +70,7 @@ export function PositionCard({ p }: { p: PositionRecord }) {
         className="block hover:bg-neutral-900/40 transition-colors"
       >
         {/* Header */}
-        <div className="px-4 py-3 flex items-baseline gap-3 flex-wrap">
+        <div className="px-3 sm:px-4 py-3 flex items-baseline gap-3 flex-wrap">
           <span className="text-neutral-500 font-mono text-[11px]">#{p.id}</span>
           {p.market_question ? (
             <span
@@ -101,7 +101,7 @@ export function PositionCard({ p }: { p: PositionRecord }) {
         <hr className="border-neutral-800" />
 
         {/* BUY block */}
-        <div className="px-4 py-2.5 flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
+        <div className="px-3 sm:px-4 py-2.5 flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
           <span className={`font-semibold ${sideTone}`}>
             BUY_{p.side.toUpperCase()}
           </span>
@@ -126,7 +126,7 @@ export function PositionCard({ p }: { p: PositionRecord }) {
         {p.closed_at !== null && exitPrice !== null && p.realized_pnl !== null && (
           <>
             <hr className="border-neutral-800" />
-            <div className="px-4 py-2.5 flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
+            <div className="px-3 sm:px-4 py-2.5 flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
               <span className={`font-semibold ${sideTone}`}>
                 SELL_{p.side.toUpperCase()}
               </span>
@@ -155,7 +155,7 @@ export function PositionCard({ p }: { p: PositionRecord }) {
       {p.analyzer_decisions !== undefined && (
         <>
           <hr className="border-neutral-800" />
-          <div className="px-4 py-3">
+          <div className="px-3 sm:px-4 py-3">
             <AnalyzerRationaleBlock decisions={p.analyzer_decisions} />
           </div>
         </>

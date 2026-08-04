@@ -86,7 +86,7 @@ export function PositionDetail() {
 
   if (data.position === null) {
     return (
-      <div className="px-6 py-10 flex flex-col gap-3">
+      <div className="px-4 sm:px-6 py-10 flex flex-col gap-3">
         <Link to="/activity/positions" className="text-xs text-blue-400">
           ‹ Positions
         </Link>
@@ -127,7 +127,7 @@ export function PositionDetail() {
   }
 
   return (
-    <div className="px-6 pb-6 flex flex-col gap-4">
+    <div className="px-4 sm:px-6 pb-6 flex flex-col gap-4">
       <Link to="/activity/positions" className="text-xs text-blue-400">
         ‹ Positions
       </Link>

@@ -79,7 +79,7 @@ function InspectorPanel({
 
   return (
     <div className="flex flex-col min-h-0 flex-1">
-      <header className="relative px-6 pt-5 pb-4 border-b border-neutral-800/80">
+      <header className="relative px-4 sm:px-6 pt-5 pb-4 border-b border-neutral-800/80">
         <button
           type="button"
           onClick={onClose}
@@ -147,7 +147,7 @@ function InspectorPanel({
       </header>
 
       {tabs.length > 1 && (
-        <div className="flex gap-1 px-6 pt-3 border-b border-neutral-800/80">
+        <div className="flex gap-1 px-4 sm:px-6 pt-3 border-b border-neutral-800/80">
           {tabs.map((t) => {
             const active = t.key === activeKey
             return (
@@ -168,7 +168,7 @@ function InspectorPanel({
         </div>
       )}
 
-      <div className="overflow-auto px-6 py-5">{activeTab?.render(node)}</div>
+      <div className="overflow-auto px-4 sm:px-6 py-5">{activeTab?.render(node)}</div>
     </div>
   )
 }

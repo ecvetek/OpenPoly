@@ -94,7 +94,7 @@ export function NewsTab() {
   }
 
   return (
-    <div className="px-6 pb-6 flex flex-col gap-4">
+    <div className="px-4 sm:px-6 pb-6 flex flex-col gap-4">
       {status === 'error' && (
         <div className="rounded border border-red-700/50 bg-red-900/20 px-3 py-2 text-[11px] text-red-200">
           Backend unreachable; data may be stale.
