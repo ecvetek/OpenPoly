@@ -20,7 +20,8 @@ const mobileNavLinkClass = ({ isActive }: { isActive: boolean }) =>
 const NAV_ITEMS = [
   { to: '/strategy', label: 'Strategy' },
   { to: '/overview', label: 'Overview' },
-  { to: '/activity', label: 'Activity' },
+  { to: '/positions', label: 'Positions' },
+  { to: '/news', label: 'News' },
   { to: '/statistics', label: 'Statistics' },
   { to: '/health', label: 'Health' },
 ]

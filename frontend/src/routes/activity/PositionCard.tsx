@@ -66,7 +66,7 @@ export function PositionCard({ p }: { p: PositionRecord }) {
   return (
     <article className="rounded border border-neutral-800 bg-neutral-950 overflow-hidden">
       <Link
-        to={`/activity/positions/${p.id}`}
+        to={`/positions/${p.id}`}
         className="block hover:bg-neutral-900/40 transition-colors"
       >
         {/* Header */}

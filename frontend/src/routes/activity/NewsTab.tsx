@@ -1,5 +1,5 @@
 /**
- * Activity › News — single stream of NewsCards (v16).
+ * News — single stream of NewsCards (v16).
  *
  * Filter chips at top (All / Filled / Skipped / Errored), default All
  * per D2; D6 semantics fall out of the card's terminal state derived in

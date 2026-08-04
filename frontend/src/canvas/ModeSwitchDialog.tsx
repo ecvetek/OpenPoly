@@ -181,7 +181,7 @@ export function ModeSwitchDialog({ target, onClose }: Props) {
             <span className="text-neutral-200">{openCount}</span>
             {openCount > 0 && (
               <a
-                href="/activity"
+                href="/positions"
                 target="_blank"
                 rel="noreferrer"
                 className="text-sky-400 hover:text-sky-300 underline"

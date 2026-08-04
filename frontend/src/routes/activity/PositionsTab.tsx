@@ -1,5 +1,5 @@
 /**
- * Activity › Positions — single stream of PositionCards (v15).
+ * Positions — single stream of PositionCards (v15).
  *
  * Filter chips (Open / Closed / All) at the top, default Open. Sort: when
  * "All", open positions come first (opened_at desc) followed by closed

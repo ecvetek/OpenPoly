@@ -1,7 +1,7 @@
 /**
- * Activity › Position detail — one position's order book chart + the LLM's
- * reason for opening it. Reached by clicking a row in the Positions tab
- * (/activity/positions/:positionId).
+ * Position detail — one position's order book chart + the LLM's
+ * reason for opening it. Reached by clicking a row in the Positions page
+ * (/positions/:positionId).
  *
  * PD2/PD3 augment the backend response with `market_question` (catalog
  * lookup) and `analyzer_decisions` (analyzer_log lookup by news_id). PD5
@@ -87,7 +87,7 @@ export function PositionDetail() {
   if (data.position === null) {
     return (
       <div className="px-4 sm:px-6 py-10 flex flex-col gap-3">
-        <Link to="/activity/positions" className="text-xs text-blue-400">
+        <Link to="/positions" className="text-xs text-blue-400">
           ‹ Positions
         </Link>
         <p className="text-sm text-neutral-400">Position not found.</p>
@@ -128,7 +128,7 @@ export function PositionDetail() {
 
   return (
     <div className="px-4 sm:px-6 pb-6 flex flex-col gap-4">
-      <Link to="/activity/positions" className="text-xs text-blue-400">
+      <Link to="/positions" className="text-xs text-blue-400">
         ‹ Positions
       </Link>
 

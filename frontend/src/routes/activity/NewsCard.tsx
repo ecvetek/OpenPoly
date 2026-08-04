@@ -385,7 +385,7 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
                 entry.fill_status === 'position_exists') &&
                 entry.position_id !== null && (
                   <Link
-                    to={`/activity/positions/${entry.position_id}`}
+                    to={`/positions/${entry.position_id}`}
                     className="text-blue-400 hover:text-blue-300 underline"
                   >
                     → #pos {entry.position_id}

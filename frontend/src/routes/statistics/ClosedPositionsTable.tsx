@@ -4,7 +4,7 @@
  * Newest-first (the order /api/statistics already returns). Th/Td helpers
  * copied from PositionsTab.tsx's FillsTable.
  *
- * Each row links to the existing /activity/positions/:id detail route. A
+ * Each row links to the existing /positions/:id detail route. A
  * real <Link> lives in the market cell (keyboard/ctrl-click accessible) —
  * an <a> can't legally wrap a <tr> (only <td>/<th> are valid <tr> children)
  * — plus onClick+useNavigate on the <tr> for click-anywhere convenience.
@@ -64,12 +64,12 @@ export function ClosedPositionsTable({
             return (
               <tr
                 key={p.id}
-                onClick={() => navigate(`/activity/positions/${p.id}`)}
+                onClick={() => navigate(`/positions/${p.id}`)}
                 className="cursor-pointer border-b border-neutral-900 last:border-0 hover:bg-neutral-900/60"
               >
                 <Td>
                   <Link
-                    to={`/activity/positions/${p.id}`}
+                    to={`/positions/${p.id}`}
                     onClick={(e) => e.stopPropagation()}
                     className="text-neutral-300 hover:underline"
                     title={p.market_question ?? p.condition_id}
