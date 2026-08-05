@@ -456,6 +456,26 @@ class PipelineOrchestrator:
             )
         )
 
+    # ---------- canvas-sync v2: hot-reload section swap ----------
+
+    async def replace_section(self, section_type: str, new_inst: _SyncSection) -> None:
+        """Atomically swap one section instance. An in-flight ``run(...)``
+        keeps its own reference via Python GC, so the call already underway
+        finishes on the old instance and the next one uses the new.
+
+        Called by the module-level ``replace_section`` below, which is what
+        ``api/canvas_routes._apply_canvas_reload`` reaches for after a PUT diff
+        detects a section's config changed."""
+        async with self._sections_lock:
+            if section_type == "embedding":
+                self._embedding = new_inst
+            elif section_type == "analyzer":
+                self._analyzer = new_inst
+            elif section_type == "entry":
+                self._entry = new_inst
+            else:
+                raise ValueError(f"unknown orchestrator section_type: {section_type!r}")
+
 
 # Module-level singleton built lazily so tests can substitute. Real
 # wire-up (with manager hook) lives in main.py's lifespan (P4).
@@ -516,10 +536,8 @@ def get_orchestrator() -> PipelineOrchestrator:
                 # Lazy: executor's portfolio is configured *after* the
                 # orchestrator (and entry section) is built, so we hand
                 # entry a closure it calls per run() instead of the store
-                # itself. Returns None until executor.configure() lands.
-                portfolio_provider=lambda: getattr(
-                    getattr(executor, "_paper", executor), "_portfolio", None
-                ),
+                # itself. Returns None until executor.configure_paper() lands.
+                portfolio_provider=lambda: executor.portfolio,
             ),
             executor=executor,
             embedding_log_store=embedding_log,
@@ -551,23 +569,3 @@ async def replace_section(section_type: str, new_inst: _SyncSection) -> None:
     if _singleton is None:
         return
     await _singleton.replace_section(section_type, new_inst)
-
-
-# Patch the class with the swap method (kept here, not next to __init__,
-# so the lock-protected reload code path is co-located with the module-level
-# helper above for a single point of canvas-sync logic to review).
-async def _replace_section_impl(
-    self: PipelineOrchestrator, section_type: str, new_inst: _SyncSection
-) -> None:
-    async with self._sections_lock:
-        if section_type == "embedding":
-            self._embedding = new_inst
-        elif section_type == "analyzer":
-            self._analyzer = new_inst
-        elif section_type == "entry":
-            self._entry = new_inst
-        else:
-            raise ValueError(f"unknown orchestrator section_type: {section_type!r}")
-
-
-PipelineOrchestrator.replace_section = _replace_section_impl  # type: ignore[attr-defined]

@@ -282,9 +282,7 @@ def _build_section(section_type: str):
         # attached after sections are constructed.
         return EdgeThresholdEntryV0(
             _canvas_config(EdgeThresholdConfig, "entry"),
-            portfolio_provider=lambda: getattr(
-                getattr(executor, "_paper", executor), "_portfolio", None
-            ),
+            portfolio_provider=lambda: executor.portfolio,
         )
     if section_type == "exit":
         from openpoly.sections.exit.threshold_v0 import (

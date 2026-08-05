@@ -3,8 +3,9 @@
  * returned 409 (operator's draft is based on a stale server rev). The
  * operator must explicitly choose Keep Mine (force-overwrite server,
  * with a 2nd confirm since it's destructive) or Take Theirs (discard
- * local edits, adopt server). Dismiss leaves the conflict pending; any
- * further canvas autosave is suppressed until resolved.
+ * local edits, adopt server). Dismiss only hides this dialog — the
+ * conflict stays pending, canvas autosave stays suppressed, and the top
+ * bar keeps flagging it with a way to re-open.
  */
 import { useMemo, useState } from 'react'
 import { useCanvasStore } from './store'
@@ -75,6 +76,7 @@ function fmt(v: unknown): string {
 
 export function ConflictDialog() {
   const conflict = useCanvasStore((s) => s.conflict)
+  const conflictDismissed = useCanvasStore((s) => s.conflictDismissed)
   const resolveConflict = useCanvasStore((s) => s.resolveConflict)
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -84,7 +86,7 @@ export function ConflictDialog() {
     return diffTemplates(conflict.mine, conflict.theirs)
   }, [conflict])
 
-  if (!conflict) return null
+  if (!conflict || conflictDismissed) return null
 
   const onKeepMineClick = () => {
     if (!confirming) {

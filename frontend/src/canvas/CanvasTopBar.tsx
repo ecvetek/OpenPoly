@@ -14,6 +14,7 @@ export function CanvasTopBar() {
   const consumeStartupFlash = useCanvasStore((s) => s.consumeStartupFlash)
   const bootstrapFromBackend = useCanvasStore((s) => s.bootstrapFromBackend)
   const saveStatus = useCanvasStore((s) => s.saveStatus)
+  const reopenConflict = useCanvasStore((s) => s.reopenConflict)
   const [status, setStatus] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const keysOpen = useCanvasUiStore((s) => s.keysOpen)
@@ -83,16 +84,39 @@ export function CanvasTopBar() {
             ⚠
           </span>
         )}
+        {saveStatus === 'conflict' && (
+          <button
+            type="button"
+            onClick={reopenConflict}
+            className="sm:hidden text-[11px] text-amber-400"
+            title="Canvas conflict — autosave suspended. Tap to resolve."
+          >
+            ⚠
+          </button>
+        )}
         <div className="order-3 sm:order-none w-full sm:w-auto sm:ml-auto flex items-center justify-between sm:justify-start gap-2 sm:gap-3">
           {/* Passive autosave indicator — the canvas persists on every change
-              (v9 / SK3), so there is no manual Save button to forget. */}
-          <span className="hidden sm:inline text-[11px] text-neutral-500">
-            {saveStatus === 'saving'
-              ? 'Saving…'
-              : saveStatus === 'offline'
-                ? '⚠ Offline — local draft only'
-                : 'All changes saved'}
-          </span>
+              (v9 / SK3), so there is no manual Save button to forget. The
+              conflict branch is not cosmetic: a 409 must never read as "All
+              changes saved" when autosave is suspended, so it says so and
+              hands back the dialog. */}
+          {saveStatus === 'conflict' ? (
+            <button
+              type="button"
+              onClick={reopenConflict}
+              className="hidden sm:inline text-[11px] text-amber-400 hover:text-amber-300 underline underline-offset-2"
+            >
+              ⚠ Conflict — not saved, click to resolve
+            </button>
+          ) : (
+            <span className="hidden sm:inline text-[11px] text-neutral-500">
+              {saveStatus === 'saving'
+                ? 'Saving…'
+                : saveStatus === 'offline'
+                  ? '⚠ Offline — local draft only'
+                  : 'All changes saved'}
+            </span>
+          )}
           <ModePill />
           <div className="flex items-center gap-1">
             <button

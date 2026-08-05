@@ -47,6 +47,14 @@ class PaperExecutor:
             raise RuntimeError("Executor has no PortfolioStore — call configure() first")
         return self._portfolio
 
+    @property
+    def portfolio(self) -> PortfolioStore | None:
+        """The injected store, or None before ``configure()``. The non-raising
+        sibling of ``_store``: the entry section's ``portfolio_provider`` is
+        called on every run() and legitimately may fire before the lifespan has
+        configured one."""
+        return self._portfolio
+
     def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult:
         """Open a position from an entry ``OrderIntent`` at the level-1 ask.
 

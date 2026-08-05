@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 class _PaperLike(Protocol):
     def configure(self, portfolio: PortfolioStore) -> None: ...
+    @property
+    def portfolio(self) -> PortfolioStore | None: ...
     def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult: ...
     def execute_sell(
         self,
@@ -72,6 +74,19 @@ class ExecutorDispatcher:
         flip is requested afterwards). Idempotent; safe to call even when
         mode=paper (live is pre-built so a UI-driven flip is cheap)."""
         self._live = live
+
+    @property
+    def portfolio(self) -> PortfolioStore | None:
+        """The one PortfolioStore both executors write through, or None before
+        the lifespan configures it. Paper and live share it by construction, so
+        reading it off the paper side is not a paper-mode detail.
+
+        Exists so the entry section's ``portfolio_provider`` has something
+        public to call: it used to be spelled
+        ``getattr(getattr(executor, "_paper", executor), "_portfolio", None)``
+        — duplicated in two places, reaching through two private attributes,
+        and silently degrading to None if either name ever changed."""
+        return self._paper.portfolio
 
     @property
     def live_ready(self) -> bool:

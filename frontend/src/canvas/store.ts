@@ -33,7 +33,11 @@ export type SectionNodeType = Node<SectionNodeData, 'section'>
 
 type ConfigValue = string | number | boolean
 
-export type SaveStatus = 'saved' | 'saving' | 'offline'
+/** `conflict` means the last PUT was rejected as stale and autosave is
+ * suspended until the operator resolves it. It exists because reporting
+ * `saved` after a 409 told the operator "All changes saved" when nothing had
+ * been saved and nothing would be until they acted. */
+export type SaveStatus = 'saved' | 'saving' | 'offline' | 'conflict'
 
 /** Pending conflict surfaced by autosave PUT — operator must explicitly
  * resolve via ConflictDialog before any further autosave fires. */
@@ -59,7 +63,13 @@ type CanvasState = {
   isOnline: boolean
   // Set when a PUT returned 409 — the live form is the operator's
   // (`mine`), and we show ConflictDialog over the canvas with `theirs`.
+  // Autosave stays suspended for as long as this is non-null.
   conflict: CanvasConflict | null
+  // Hides the modal without resolving the conflict. Separate from `conflict`
+  // precisely so dismissing can't be mistaken for resolving: the dialog is a
+  // view of the conflict, not the conflict itself. The top bar keeps showing
+  // `conflict` status and offers a way back in.
+  conflictDismissed: boolean
 
   onNodesChange: (changes: NodeChange<SectionNodeType>[]) => void
   onEdgesChange: (changes: EdgeChange[]) => void
@@ -80,14 +90,19 @@ type CanvasState = {
   // → mark offline, keep current state.
   bootstrapFromBackend: () => Promise<void>
   // ConflictDialog handlers: caller picks which side wins.
-  // `keepMine` → force-overwrite backend with the in-memory template
+  // `keep_mine` → force-overwrite backend with the in-memory template
   //   (force = If-Match: *). Operator has presumably already eye-balled
   //   the diff; a confirm dialog wraps this in the UI layer.
-  // `takeTheirs` → adopt the server template, discarding the local
+  // `take_theirs` → adopt the server template, discarding the local
   //   conflict-state draft.
-  // `dismissConflict` → leave the conflict in place for inspection
-  //   (clears the modal but keeps state stuck until resolved).
+  // `dismiss` → hide the modal but leave the conflict unresolved: autosave
+  //   stays suspended and the top bar keeps flagging it. This used to null
+  //   `conflict` outright, which silently resumed autosave and re-409'd on
+  //   the operator's next keystroke — the opposite of what both this comment
+  //   and ConflictDialog's own docstring promised.
   resolveConflict: (choice: 'keep_mine' | 'take_theirs' | 'dismiss') => Promise<void>
+  // Re-open a dismissed conflict from the top bar.
+  reopenConflict: () => void
 }
 
 let nextNumericId = 1
@@ -170,9 +185,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       set({ saveStatus: 'saved', serverRev: result.rev, isOnline: true })
     } else if (result.status === 'conflict') {
       // Backend has moved since our last sync. Park the local draft as
-      // `mine`, show theirs, force operator to choose.
+      // `mine`, show theirs, force operator to choose. Status is 'conflict',
+      // not 'saved' — nothing was saved and nothing will be until they act.
       set({
-        saveStatus: 'saved',
+        saveStatus: 'conflict',
+        conflictDismissed: false,
         conflict: {
           mine: tpl,
           theirs: result.current_template,
@@ -204,6 +221,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     serverRev: null,
     isOnline: true,
     conflict: null,
+    conflictDismissed: false,
 
     onNodesChange: (changes) => {
       set({ nodes: applyNodeChanges(changes, get().nodes) as SectionNodeType[] })
@@ -362,7 +380,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       const c = get().conflict
       if (c === null) return
       if (choice === 'dismiss') {
-        set({ conflict: null })
+        // Hide the modal only. `conflict` stays set, so scheduleAutosave keeps
+        // short-circuiting and the top bar keeps showing 'conflict'.
+        set({ conflictDismissed: true })
         return
       }
       if (choice === 'take_theirs') {
@@ -377,6 +397,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
             selectedNodeId: null,
             serverRev: c.theirsRev,
             conflict: null,
+            conflictDismissed: false,
             saveStatus: 'saved',
           })
           saveToStorage(c.theirs)
@@ -394,14 +415,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
           saveStatus: 'saved',
           serverRev: result.rev,
           conflict: null,
+          conflictDismissed: false,
           isOnline: true,
         })
       } else {
-        // Force-overwrite failed (network or shape) — leave conflict in
-        // place so operator can retry.
-        set({ saveStatus: 'saved' })
+        // Force-overwrite failed (network or shape) — leave the conflict in
+        // place so the operator can retry, and keep saying so.
+        set({ saveStatus: 'conflict' })
         console.error('Force overwrite failed:', result)
       }
+    },
+
+    reopenConflict: () => {
+      if (get().conflict !== null) set({ conflictDismissed: false })
     },
   }
 })
