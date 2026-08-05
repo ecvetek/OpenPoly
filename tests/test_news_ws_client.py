@@ -339,3 +339,44 @@ def test_default_parse_happy() -> None:
     assert item.urgency == "medium"
     assert item.sentiment == 0.2
     assert item.published_at == 100.0
+
+
+async def test_clean_close_does_not_spin_the_reconnect_loop() -> None:
+    """A server that accepts the upgrade and immediately closes must be
+    reconnected to on a backoff, not as fast as the loop can go.
+
+    The clean-close path used to fall straight through to the next iteration
+    with only an ``asyncio.sleep(0)``, so this handler would be re-entered
+    hundreds of times a second. Backoff also must not reset on such a session:
+    resetting on *connect* looks equivalent but pins the delay at
+    ``initial_backoff`` forever instead of escalating.
+    """
+    connects = 0
+
+    async def handler(ws):
+        nonlocal connects
+        connects += 1
+        return  # close immediately, cleanly
+
+    async with websockets.serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        client = NewsWSClient(
+            endpoint=f"ws://127.0.0.1:{port}",
+            buffer=NewsRingBuffer(maxsize=10),
+            initial_backoff=0.05,
+            max_backoff=0.2,
+            ping_interval=None,
+        )
+        task = asyncio.create_task(client.run_forever())
+        try:
+            await asyncio.sleep(0.6)
+            # Unbounded spinning would be in the hundreds here. With escalating
+            # backoff from 0.05s capped at 0.2s, ~5-8 attempts fit in 0.6s.
+            assert 1 <= connects <= 20, f"reconnect loop spun: {connects} connects in 0.6s"
+        finally:
+            client.stop()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass

@@ -303,11 +303,26 @@ def _check_embedding_manager(mgr: EmbeddingManager) -> SubsystemCheck:
     return SubsystemCheck(status=status, detail=detail)
 
 
-def _check_reconciliation(rmon: Any | None) -> SubsystemCheck:
+def _check_reconciliation(rmon: Any | None, rstate: RuntimeState) -> SubsystemCheck:
+    """The monitor's loop is started unconditionally, but it only *acts* in
+    live mode — paper positions aren't on-chain, so reconciling them against
+    an empty holdings set would close every one. Report the gate alongside the
+    loop state, or a running-but-inert monitor reads as plain ``ok``."""
     if rmon is None:
-        return SubsystemCheck(status="disabled", detail={"reason": "no wallet configured"})
-    status = "stopped" if getattr(rmon, "state", "stopped") == "stopped" else "ok"
-    return SubsystemCheck(status=status, detail={"state": getattr(rmon, "state", None)})
+        return SubsystemCheck(status="disabled", detail={"reason": "monitor not wired"})
+    state = getattr(rmon, "state", None)
+    if state != "running":
+        return SubsystemCheck(status="stopped", detail={"state": state})
+    live = rstate.exec_mode == "live"
+    return SubsystemCheck(
+        status="ok",
+        detail={
+            "state": state,
+            "exec_mode": rstate.exec_mode,
+            # Not a fault: inert in paper mode is the intended safety gate.
+            "acting": live,
+        },
+    )
 
 
 @router.get("/health/detail", response_model=HealthDetailResponse)
@@ -332,7 +347,7 @@ async def health_detail(
         "exit_monitor": _safe_check(lambda: _check_exit_monitor(exit_mon)),
         "settlement_monitor": _safe_check(lambda: _check_settlement_monitor(settlement_mon)),
         "embedding": _safe_check(lambda: _check_embedding_manager(embedding_mgr)),
-        "reconciliation": _safe_check(lambda: _check_reconciliation(rmon)),
+        "reconciliation": _safe_check(lambda: _check_reconciliation(rmon, rstate)),
     }
     try:
         checks["market_access"] = await _check_market_access(rstate, executor)

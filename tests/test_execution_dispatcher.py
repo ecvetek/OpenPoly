@@ -44,6 +44,13 @@ class _FakeExecutor:
     def __init__(self, calls: _Calls, kind: str) -> None:
         self._calls = calls
         self._kind = kind
+        self._portfolio = None
+
+    @property
+    def portfolio(self):
+        """Part of the _PaperLike protocol — the dispatcher exposes it so the
+        entry section's portfolio_provider has a public accessor."""
+        return self._portfolio
 
     def execute_buy(self, intent, *, news_id, ts):
         if self._kind == "paper":
@@ -60,7 +67,7 @@ class _FakeExecutor:
         return ExecResult.ok(price=0.5, qty=10.0, position_id=position.position_id)
 
     def configure(self, portfolio) -> None:
-        pass  # paper executor stub
+        self._portfolio = portfolio  # paper executor stub
 
 
 def _intent() -> OrderIntent:
@@ -165,3 +172,15 @@ def test_collateral_balance_none_when_live_unconfigured(fresh_runtime_state) -> 
     calls = _Calls()
     d = ExecutorDispatcher(paper=_FakeExecutor(calls, "paper"), live=None)
     assert d.get_collateral_balance_raw() is None
+
+
+def test_portfolio_property_proxies_to_paper(fresh_runtime_state) -> None:
+    """The entry section's portfolio_provider reads this. It replaced a
+    getattr(getattr(executor, "_paper", executor), "_portfolio", None) chain
+    that would have silently degraded to None if either private name moved."""
+    calls = _Calls()
+    d = ExecutorDispatcher(paper=_FakeExecutor(calls, "paper"))
+    assert d.portfolio is None  # before configure
+    sentinel = object()
+    d.configure_paper(sentinel)  # type: ignore[arg-type]
+    assert d.portfolio is sentinel

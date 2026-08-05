@@ -111,16 +111,21 @@ class SectionLogResponse(BaseModel):
     # Embedding-only: background warm-cache events (model load / cache reload /
     # warm cycles). None on the analyzer / entry routes — they have no warm loop.
     warm: list[dict[str, Any]] | None = None
-    # Exit-only: tick heartbeat. None on the other routes. ``last_tick_at`` is
-    # the last sweep's wall-clock; ``open_positions`` / ``blocked`` are that
-    # sweep's counts (blocked == positions with no order book, can't evaluate).
+    # Sweep-monitor routes (exit, settlement): tick heartbeat. None on the
+    # news-driven routes, which have a queue rather than a sweep.
+    # ``last_tick_at`` is the last sweep's wall-clock; ``open_positions`` is
+    # that sweep's count. ``blocked`` is exit-only (positions with no order
+    # book, so their stop-loss can't be evaluated) — settlement has no
+    # equivalent and leaves it None.
     last_tick_at: float | None = None
     open_positions: int | None = None
     blocked: int | None = None
-    # Exit-only: the last sweep's evaluated/closed/reason_counts breakdown
-    # (mirrors market_source's last_poll) and a bounded started/stopped/
-    # tick_ok/tick_error event ring (mirrors market_source's events) — see
-    # ExitMonitor.last_tick / ExitMonitor.tick_events.
+    # Sweep-monitor routes: the last sweep's outcome breakdown (mirrors
+    # market_source's last_poll) and a bounded started/stopped/tick_ok/
+    # tick_error event ring (mirrors market_source's events). Exit counts
+    # closes, settlement counts settlements; both carry reason_counts, which
+    # is where the steady-state outcomes live instead of one log entry per
+    # position per tick.
     last_tick: dict[str, Any] | None = None
     tick_events: list[dict[str, Any]] | None = None
 

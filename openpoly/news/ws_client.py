@@ -33,6 +33,13 @@ OnItemHook = Callable[[NewsItem], None]
 
 logger = logging.getLogger(__name__)
 
+# How long a session must stay up before it counts as proof the endpoint is
+# healthy and the reconnect backoff may reset. Resetting on *connect* instead
+# looks equivalent but isn't: a server that accepts the upgrade and hangs up
+# immediately would reset the delay on every attempt, pinning reconnects at
+# ``initial_backoff`` forever instead of escalating.
+_HEALTHY_SESSION_SECONDS = 30.0
+
 
 def _to_epoch(value: object, fallback: float) -> float:
     """Accept ISO 8601 string or numeric epoch; fall back if neither parses."""
@@ -148,23 +155,17 @@ class NewsWSClient:
                 is_first_attempt = False
             else:
                 self._emit("reconnect_attempt")
+            session_start: float | None = None
             try:
                 connect_kwargs: dict = {"ping_interval": self.ping_interval}
                 if self.headers:
                     connect_kwargs["additional_headers"] = self.headers
                 async with websockets.connect(self.endpoint, **connect_kwargs) as ws:
-                    backoff = self.initial_backoff
+                    session_start = time.monotonic()
                     self._emit("connected", _redact(self.endpoint))
                     logger.info("WS connected to %s", _redact(self.endpoint))
                     await self._consume(ws)
                 self._emit("disconnected", "server closed cleanly")
-                # Back off here too, not just on the exception path below. A
-                # server that accepts the upgrade and immediately closes would
-                # otherwise spin this loop as fast as it can reconnect.
-                await asyncio.sleep(0)
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=backoff)
-                backoff = min(backoff * 2.0, self.max_backoff)
             except asyncio.CancelledError:
                 raise
             except InvalidStatus as exc:
@@ -179,9 +180,21 @@ class NewsWSClient:
             except (ConnectionClosed, WebSocketException, OSError) as exc:
                 self._emit("disconnected", str(exc))
                 logger.warning("WS dropped: %s; reconnect in %.2fs", exc, backoff)
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=backoff)
-                backoff = min(backoff * 2.0, self.max_backoff)
+
+            # Shared by both non-fatal exits — a clean server close and a
+            # mid-session drop are the same situation: wait, then reconnect.
+            # A clean close used to fall straight through with no wait at all,
+            # so a server that accepted and hung up spun this loop as fast as
+            # it could reconnect.
+            if (
+                session_start is not None
+                and time.monotonic() - session_start >= _HEALTHY_SESSION_SECONDS
+            ):
+                backoff = self.initial_backoff
+            await asyncio.sleep(0)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), timeout=backoff)
+            backoff = min(backoff * 2.0, self.max_backoff)
 
     async def _consume(self, ws) -> None:
         async for raw in ws:
