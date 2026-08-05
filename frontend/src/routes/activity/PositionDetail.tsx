@@ -21,7 +21,7 @@ import {
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import { OrderBookChart } from './OrderBookChart'
 import { fetchOrderBookHistory, type OrderBookHistory } from './orderBookClient'
-import { formatPnl, pnlClass } from './format'
+import { formatPnl, formatPnlPercent, pnlClass, pnlPercent } from './format'
 import { StatusBadge } from './PositionCard'
 import type { CloseResult, PositionRecord } from './portfolioTypes'
 import { usePoll } from './usePoll'
@@ -192,7 +192,7 @@ export function PositionDetail() {
             <span className="text-neutral-500">(${cost.toFixed(2)})</span>
             {p.status === 'open' && p.unrealized_pnl != null && (
               <span className={pnlClass(p.unrealized_pnl)}>
-                {formatPnl(p.unrealized_pnl)}
+                {formatPnl(p.unrealized_pnl)} ({formatPnlPercent(pnlPercent(p.unrealized_pnl, cost))})
               </span>
             )}
           </div>
@@ -218,7 +218,7 @@ export function PositionDetail() {
                 {p.qty.toFixed(2)} @ {exitPrice.toFixed(3)}
               </span>
               <span className={pnlClass(p.realized_pnl)}>
-                {formatPnl(p.realized_pnl)}
+                {formatPnl(p.realized_pnl)} ({formatPnlPercent(pnlPercent(p.realized_pnl, cost))})
               </span>
             </div>
           )}

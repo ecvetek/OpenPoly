@@ -96,6 +96,24 @@ class StatisticsSummary:
         float | None
     )  # mean(closed_at - opened_at) over positions_closed; None if positions_closed == 0
     close_reason_breakdown: dict[str, int]  # close_reason -> count, over positions_closed
+    # Percent-return companions to the dollar figures above, each trade's
+    # return computed as realized_pnl / (qty * avg_entry_price) — the same
+    # cost-basis formula threshold_v0.py uses for its take-profit/stop-loss
+    # triggers. A trade with zero cost basis (shouldn't happen in practice)
+    # is excluded from every pct aggregate below, not treated as 0%.
+    net_pnl_pct: (
+        float | None
+    )  # net_pnl / total cost basis of all closed-in-range rows; None if that total is 0
+    average_win_pct: float | None  # mean of per-trade pct among wins; None if wins == 0
+    average_loss_pct: (
+        float | None
+    )  # mean of per-trade pct among losses (signed, <= 0.0); None if losses == 0
+    largest_win_pct: (
+        float | None
+    )  # pct of the SAME trade as largest_win (not independently maximized); None if wins == 0
+    largest_loss_pct: (
+        float | None
+    )  # pct of the SAME trade as largest_loss (not independently maximized); None if losses == 0
 
 
 @dataclass(frozen=True)
@@ -165,23 +183,35 @@ def build_statistics(
     gross_loss = 0.0  # magnitude, >= 0.0
     win_pnls: list[float] = []
     loss_pnls: list[float] = []  # signed, <= 0.0
+    # Index-aligned with win_pnls/loss_pnls (None where cost basis is 0, so
+    # index i always refers to the same trade in both lists — needed to
+    # pair largest_win/largest_loss with the matching pct below).
+    win_pcts: list[float | None] = []
+    loss_pcts: list[float | None] = []
     hold_seconds: list[float] = []
     close_reason_counts: dict[str, int] = {}
     cumulative = 0.0
     pnl_curve: list[PnlCurvePoint] = []
+    total_cost_basis = 0.0
 
     for row in closed_rows:  # ascending by closed_at
         pnl = row.realized_pnl or 0.0
         cumulative += pnl
         pnl_curve.append(PnlCurvePoint(ts=row.closed_at, cumulative_pnl=cumulative))  # type: ignore[arg-type]
+        cost = row.qty * row.avg_entry_price
+        pct = (pnl / cost) if cost > 0 else None
+        if cost > 0:
+            total_cost_basis += cost
         if pnl > 0:
             wins += 1
             gross_profit += pnl
             win_pnls.append(pnl)
+            win_pcts.append(pct)
         elif pnl < 0:
             losses += 1
             gross_loss += -pnl
             loss_pnls.append(pnl)
+            loss_pcts.append(pct)
         else:
             breakeven += 1
         hold_seconds.append(row.closed_at - row.opened_at)  # type: ignore[operator]
@@ -189,6 +219,16 @@ def build_statistics(
         close_reason_counts[reason] = close_reason_counts.get(reason, 0) + 1
 
     positions_closed = len(closed_rows)
+    net_pnl = gross_profit - gross_loss
+    # largest_win/largest_loss pct pairs with the SAME trade as the dollar
+    # figure (index into the parallel *_pnls list), not an independently
+    # maximized percent — a small trade with a huge % swing shouldn't be
+    # reported as "largest" here when a different trade is the dollar
+    # largest. None if that particular trade had no valid cost basis.
+    largest_win_pct = win_pcts[win_pnls.index(max(win_pnls))] if win_pnls else None
+    largest_loss_pct = loss_pcts[loss_pnls.index(min(loss_pnls))] if loss_pnls else None
+    win_pcts_valid = [p for p in win_pcts if p is not None]
+    loss_pcts_valid = [p for p in loss_pcts if p is not None]
     summary = StatisticsSummary(
         positions_opened=positions_opened,
         positions_closed=positions_closed,
@@ -198,7 +238,7 @@ def build_statistics(
         win_rate=(wins / (wins + losses)) if (wins + losses) > 0 else None,
         gross_profit=gross_profit,
         gross_loss=gross_loss,
-        net_pnl=gross_profit - gross_loss,
+        net_pnl=net_pnl,
         profit_factor=(gross_profit / gross_loss) if gross_loss > 0 else None,
         average_win=(gross_profit / wins) if wins > 0 else None,
         average_loss=(sum(loss_pnls) / losses) if losses > 0 else None,
@@ -206,6 +246,13 @@ def build_statistics(
         largest_loss=min(loss_pnls) if loss_pnls else None,
         average_hold_seconds=(sum(hold_seconds) / len(hold_seconds)) if hold_seconds else None,
         close_reason_breakdown=close_reason_counts,
+        net_pnl_pct=(net_pnl / total_cost_basis) if total_cost_basis > 0 else None,
+        average_win_pct=((sum(win_pcts_valid) / len(win_pcts_valid)) if win_pcts_valid else None),
+        average_loss_pct=(
+            (sum(loss_pcts_valid) / len(loss_pcts_valid)) if loss_pcts_valid else None
+        ),
+        largest_win_pct=largest_win_pct,
+        largest_loss_pct=largest_loss_pct,
     )
 
     newest_first = list(reversed(closed_rows))

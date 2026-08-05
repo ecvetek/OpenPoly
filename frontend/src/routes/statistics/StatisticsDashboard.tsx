@@ -13,7 +13,7 @@ import { ClosedPositionsTable } from './ClosedPositionsTable'
 import { CloseReasonBreakdown } from './CloseReasonBreakdown'
 import { DateRangeControl } from './DateRangeControl'
 import { DEFAULT_RANGE, resolveRange, type DateRange } from './dateRange'
-import { formatDuration, formatPercent, formatPnl, pnlClass } from './format'
+import { formatDuration, formatPercent, formatPnl, formatPnlPercent, pnlClass } from './format'
 import { PnlCurveChart } from './PnlCurveChart'
 import { fetchStatistics, type StatisticsResponse } from './statisticsClient'
 import { WinLossBar } from './WinLossBar'
@@ -77,7 +77,12 @@ export function StatisticsDashboard() {
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <StatCard label="Win rate" value={formatPercent(s.win_rate)} tone="text-neutral-100" sub="excl. breakeven" />
-        <StatCard label="Net P&L" value={formatPnl(s.net_pnl)} tone={pnlClass(s.net_pnl)} />
+        <StatCard
+          label="Net P&L"
+          value={formatPnl(s.net_pnl)}
+          tone={pnlClass(s.net_pnl)}
+          pctValue={s.net_pnl_pct === null ? undefined : formatPnlPercent(s.net_pnl_pct)}
+        />
         <StatCard
           label="Profit factor"
           value={s.profit_factor === null ? '—' : s.profit_factor.toFixed(2)}
@@ -92,21 +97,25 @@ export function StatisticsDashboard() {
           label="Avg win"
           value={s.average_win === null ? '—' : formatPnl(s.average_win)}
           tone={pnlClass(s.average_win)}
+          pctValue={s.average_win_pct === null ? undefined : formatPnlPercent(s.average_win_pct)}
         />
         <StatCard
           label="Avg loss"
           value={s.average_loss === null ? '—' : formatPnl(s.average_loss)}
           tone={pnlClass(s.average_loss)}
+          pctValue={s.average_loss_pct === null ? undefined : formatPnlPercent(s.average_loss_pct)}
         />
         <StatCard
           label="Largest win"
           value={s.largest_win === null ? '—' : formatPnl(s.largest_win)}
           tone={pnlClass(s.largest_win)}
+          pctValue={s.largest_win_pct === null ? undefined : formatPnlPercent(s.largest_win_pct)}
         />
         <StatCard
           label="Largest loss"
           value={s.largest_loss === null ? '—' : formatPnl(s.largest_loss)}
           tone={pnlClass(s.largest_loss)}
+          pctValue={s.largest_loss_pct === null ? undefined : formatPnlPercent(s.largest_loss_pct)}
         />
       </div>
 

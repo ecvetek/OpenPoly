@@ -1,7 +1,7 @@
 /** Statistics-page-specific formatters. Re-exports formatPnl/pnlClass from
  * activity/format rather than duplicating — those are generic P&L helpers,
  * not Activity-tab-specific. */
-export { formatPnl, pnlClass } from '../activity/format'
+export { formatPnl, pnlClass, pnlPercent, formatPnlPercent } from '../activity/format'
 
 export function formatPercent(n: number | null): string {
   return n === null ? '—' : `${(n * 100).toFixed(1)}%`

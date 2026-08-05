@@ -38,19 +38,31 @@ function buildSummary(): StatisticsSummary {
   let grossLoss = 0
   const winPnls: number[] = []
   const lossPnls: number[] = []
+  // Index-aligned with winPnls/lossPnls (null where cost basis is 0) —
+  // mirrors openpoly/portfolio/statistics.py's build_statistics so
+  // largest_win_pct/largest_loss_pct pair with the same trade as the
+  // dollar figure, not an independently-maximized percent.
+  const winPcts: (number | null)[] = []
+  const lossPcts: (number | null)[] = []
   const holdSeconds: number[] = []
   const closeReasonBreakdown: Record<string, number> = {}
+  let totalCostBasis = 0
 
   for (const p of closed) {
     const pnl = p.realized_pnl ?? 0
+    const cost = p.qty * p.avg_entry_price
+    const pct = cost > 0 ? pnl / cost : null
+    if (cost > 0) totalCostBasis += cost
     if (pnl > 0) {
       wins += 1
       grossProfit += pnl
       winPnls.push(pnl)
+      winPcts.push(pct)
     } else if (pnl < 0) {
       losses += 1
       grossLoss += -pnl
       lossPnls.push(pnl)
+      lossPcts.push(pct)
     } else {
       breakeven += 1
     }
@@ -58,6 +70,12 @@ function buildSummary(): StatisticsSummary {
     const reason = p.close_reason ?? 'unknown'
     closeReasonBreakdown[reason] = (closeReasonBreakdown[reason] ?? 0) + 1
   }
+
+  const netPnl = round2(grossProfit - grossLoss)
+  const winPctsValid = winPcts.filter((p): p is number => p !== null)
+  const lossPctsValid = lossPcts.filter((p): p is number => p !== null)
+  const largestWinIdx = winPnls.length ? winPnls.indexOf(Math.max(...winPnls)) : -1
+  const largestLossIdx = lossPnls.length ? lossPnls.indexOf(Math.min(...lossPnls)) : -1
 
   return {
     positions_opened: positions.length,
@@ -68,7 +86,7 @@ function buildSummary(): StatisticsSummary {
     win_rate: wins + losses > 0 ? wins / (wins + losses) : null,
     gross_profit: round2(grossProfit),
     gross_loss: round2(grossLoss),
-    net_pnl: round2(grossProfit - grossLoss),
+    net_pnl: netPnl,
     profit_factor: grossLoss > 0 ? round2(grossProfit / grossLoss) : null,
     average_win: winPnls.length ? round2(grossProfit / winPnls.length) : null,
     average_loss: lossPnls.length
@@ -80,6 +98,15 @@ function buildSummary(): StatisticsSummary {
       ? holdSeconds.reduce((a, b) => a + b, 0) / holdSeconds.length
       : null,
     close_reason_breakdown: closeReasonBreakdown,
+    net_pnl_pct: totalCostBasis > 0 ? netPnl / totalCostBasis : null,
+    average_win_pct: winPctsValid.length
+      ? winPctsValid.reduce((a, b) => a + b, 0) / winPctsValid.length
+      : null,
+    average_loss_pct: lossPctsValid.length
+      ? lossPctsValid.reduce((a, b) => a + b, 0) / lossPctsValid.length
+      : null,
+    largest_win_pct: largestWinIdx >= 0 ? winPcts[largestWinIdx] : null,
+    largest_loss_pct: largestLossIdx >= 0 ? lossPcts[largestLossIdx] : null,
   }
 }
 

@@ -19,6 +19,14 @@ export type StatisticsSummary = {
   largest_loss: number | null
   average_hold_seconds: number | null
   close_reason_breakdown: Record<string, number>
+  // Percent-return companions — each trade's return as realized_pnl / (qty
+  // * avg_entry_price), the same cost-basis formula the exit monitor's
+  // take-profit/stop-loss thresholds use.
+  net_pnl_pct: number | null
+  average_win_pct: number | null
+  average_loss_pct: number | null
+  largest_win_pct: number | null
+  largest_loss_pct: number | null
 }
 
 export type PnlCurvePoint = { ts: number; cumulative_pnl: number }

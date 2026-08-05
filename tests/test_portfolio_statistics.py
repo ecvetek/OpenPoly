@@ -51,6 +51,11 @@ def test_empty_range_returns_zeroed_summary(factory) -> None:
     assert s.largest_loss is None
     assert s.average_hold_seconds is None
     assert s.close_reason_breakdown == {}
+    assert s.net_pnl_pct is None
+    assert s.average_win_pct is None
+    assert s.average_loss_pct is None
+    assert s.largest_win_pct is None
+    assert s.largest_loss_pct is None
     assert result.pnl_curve == ()
     assert result.closed_positions == ()
     assert result.closed_positions_truncated is False
@@ -242,3 +247,57 @@ def test_close_reason_breakdown_counts(factory) -> None:
 
     s = build_statistics(factory).summary
     assert s.close_reason_breakdown == {"take_profit": 2, "stop_loss": 1, "manual": 1}
+
+
+def test_largest_win_pct_pairs_with_dollar_largest_trade(factory) -> None:
+    """largest_win_pct must be the % of the SAME trade as largest_win (the
+    biggest dollar win), not whichever trade independently had the highest
+    % return."""
+    store = PortfolioStore(factory)
+    hA = _open(store, "A", ts=100.0, price=0.40, qty=10.0)
+    store.close_position(
+        hA.position_id, sell_price=0.50, ts=200.0, close_reason="take_profit"
+    )  # pnl=+1.00, cost=4.00, pct=+0.25
+    hB = _open(store, "B", ts=101.0, price=0.10, qty=1.0)
+    store.close_position(
+        hB.position_id, sell_price=0.30, ts=201.0, close_reason="take_profit"
+    )  # pnl=+0.20, cost=0.10, pct=+2.00 (bigger %, smaller $)
+
+    s = build_statistics(factory).summary
+    assert s.largest_win == pytest.approx(1.00)  # trade A is the dollar-largest win
+    assert s.largest_win_pct == pytest.approx(0.25)  # A's pct, not B's larger 2.00
+    assert s.average_win_pct == pytest.approx((0.25 + 2.00) / 2)
+
+
+def test_largest_loss_pct_pairs_with_dollar_largest_trade(factory) -> None:
+    """Same pairing guarantee as above, for the loss side."""
+    store = PortfolioStore(factory)
+    hC = _open(store, "C", ts=100.0, price=0.40, qty=10.0)
+    store.close_position(
+        hC.position_id, sell_price=0.30, ts=200.0, close_reason="stop_loss"
+    )  # pnl=-1.00, cost=4.00, pct=-0.25
+    hD = _open(store, "D", ts=101.0, price=0.10, qty=1.0)
+    store.close_position(
+        hD.position_id, sell_price=0.02, ts=201.0, close_reason="stop_loss"
+    )  # pnl=-0.08, cost=0.10, pct=-0.80 (bigger % loss, smaller $ loss)
+
+    s = build_statistics(factory).summary
+    assert s.largest_loss == pytest.approx(-1.00)  # trade C is the dollar-largest loss
+    assert s.largest_loss_pct == pytest.approx(-0.25)  # C's pct, not D's more-negative -0.80
+    assert s.average_loss_pct == pytest.approx((-0.25 + -0.80) / 2)
+
+
+def test_net_pnl_pct_is_net_pnl_over_total_cost_basis(factory) -> None:
+    store = PortfolioStore(factory)
+    h1 = _open(store, "m1", ts=100.0, price=0.40, qty=10.0)  # cost 4.00
+    store.close_position(
+        h1.position_id, sell_price=0.60, ts=200.0, close_reason="take_profit"
+    )  # pnl +2.00
+    h2 = _open(store, "m2", ts=101.0, price=0.50, qty=10.0)  # cost 5.00
+    store.close_position(
+        h2.position_id, sell_price=0.40, ts=201.0, close_reason="stop_loss"
+    )  # pnl -1.00
+
+    s = build_statistics(factory).summary
+    assert s.net_pnl == pytest.approx(1.00)
+    assert s.net_pnl_pct == pytest.approx(1.00 / 9.00)  # net_pnl / (4.00 + 5.00) total cost basis

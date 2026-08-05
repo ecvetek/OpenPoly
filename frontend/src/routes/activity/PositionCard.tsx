@@ -16,7 +16,7 @@
 import { Link } from 'react-router-dom'
 import { formatRelativeAgo, formatTimeRemaining, formatUTC } from '../../sections/news_source/time'
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
-import { formatPnl, pnlClass } from './format'
+import { formatPnl, formatPnlPercent, pnlClass, pnlPercent } from './format'
 import type { PositionRecord } from './portfolioTypes'
 
 const CLOSE_REASON_TONE: Record<string, string> = {
@@ -111,7 +111,7 @@ export function PositionCard({ p }: { p: PositionRecord }) {
           <span className="text-neutral-500">(${cost.toFixed(2)})</span>
           {p.status === 'open' && p.unrealized_pnl != null && (
             <span className={pnlClass(p.unrealized_pnl)}>
-              {formatPnl(p.unrealized_pnl)}
+              {formatPnl(p.unrealized_pnl)} ({formatPnlPercent(pnlPercent(p.unrealized_pnl, cost))})
             </span>
           )}
           <span
@@ -134,7 +134,7 @@ export function PositionCard({ p }: { p: PositionRecord }) {
                 {p.qty.toFixed(2)} @ {exitPrice.toFixed(3)}
               </span>
               <span className={pnlClass(p.realized_pnl)}>
-                {formatPnl(p.realized_pnl)}
+                {formatPnl(p.realized_pnl)} ({formatPnlPercent(pnlPercent(p.realized_pnl, cost))})
               </span>
               <span
                 className="ml-auto text-[10px] text-neutral-500"

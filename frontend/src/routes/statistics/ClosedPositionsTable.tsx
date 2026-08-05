@@ -18,7 +18,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { formatLocalDateTime } from '../../sections/news_source/time'
 import { StatusBadge } from '../activity/PositionCard'
 import type { PositionRecord } from '../activity/portfolioTypes'
-import { formatPnl, pnlClass } from './format'
+import { formatPnl, formatPnlPercent, pnlClass, pnlPercent } from './format'
 
 function exitPrice(p: PositionRecord): number | null {
   return p.closed_at !== null && p.realized_pnl !== null
@@ -83,7 +83,11 @@ export function ClosedPositionsTable({
                 <Td right>{p.avg_entry_price.toFixed(3)}</Td>
                 <Td right>{exit === null ? '—' : exit.toFixed(3)}</Td>
                 <Td right tone={pnlClass(p.realized_pnl)}>
-                  {p.realized_pnl === null ? '—' : formatPnl(p.realized_pnl)}
+                  {p.realized_pnl === null
+                    ? '—'
+                    : `${formatPnl(p.realized_pnl)} (${formatPnlPercent(
+                        pnlPercent(p.realized_pnl, p.qty * p.avg_entry_price),
+                      )})`}
                 </Td>
                 <Td>
                   <StatusBadge status="closed" closeReason={p.close_reason} />
