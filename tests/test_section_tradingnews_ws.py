@@ -24,7 +24,7 @@ def _item(id_: str, urgency: str, ts: float) -> NewsItem:
 
 
 def test_urgency_rank_includes_regular_at_low_tier() -> None:
-    """"regular" is tradingnews' actual default urgency value (see
+    """ "regular" is tradingnews' actual default urgency value (see
     ws_client.default_parse's fallback) — it must rank alongside "low" (the
     baseline), not fall through to 0 (which would make it fail every
     non-"all" filter, the opposite of "minimum urgency level")."""

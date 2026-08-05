@@ -118,7 +118,9 @@ def test_statistics_closed_positions_include_market_question(env) -> None:
         body = client.get("/api/statistics").json()
     finally:
         msm.store = saved_store
-    assert body["closed_positions"][0]["market_question"] == "Will the U.S. invade Iran before 2027?"
+    assert (
+        body["closed_positions"][0]["market_question"] == "Will the U.S. invade Iran before 2027?"
+    )
 
 
 def test_statistics_closed_positions_market_question_null_when_not_catalogued(env) -> None:

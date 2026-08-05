@@ -29,7 +29,11 @@ from openpoly.execution import ExecutorDispatcher, executor as executor_dispatch
 from openpoly.markets.manager import MarketSourceManager, manager as market_source_manager
 from openpoly.news.manager import NewsSourceManager, manager as news_source_manager
 from openpoly.runtime.exit_monitor import DEFAULT_TICK_INTERVAL_SECONDS, ExitMonitor, exit_monitor
-from openpoly.runtime.orchestrator import DEFAULT_QUEUE_MAXSIZE, PipelineOrchestrator, get_orchestrator
+from openpoly.runtime.orchestrator import (
+    DEFAULT_QUEUE_MAXSIZE,
+    PipelineOrchestrator,
+    get_orchestrator,
+)
 from openpoly.runtime.settlement_monitor import SettlementMonitor, settlement_monitor
 from openpoly.wallet.runtime_state import RuntimeState, runtime_state
 
@@ -177,7 +181,9 @@ def _check_market_feed(mgr: MarketSourceManager) -> SubsystemCheck:
         detail={
             "state": snap.state,
             "last_poll_at": snap.last_poll_at,
-            "seconds_since_last_poll": None if snap.last_poll_at is None else now - snap.last_poll_at,
+            "seconds_since_last_poll": None
+            if snap.last_poll_at is None
+            else now - snap.last_poll_at,
             "catalog_size": snap.catalog_size,
             "poll_count": snap.poll_count,
             "last_error": snap.last_error,
@@ -211,7 +217,9 @@ def _check_news_feed(mgr: NewsSourceManager) -> SubsystemCheck:
     )
 
 
-async def _check_market_access(rstate: RuntimeState, executor: ExecutorDispatcher) -> SubsystemCheck:
+async def _check_market_access(
+    rstate: RuntimeState, executor: ExecutorDispatcher
+) -> SubsystemCheck:
     if rstate.wallet is None:
         return SubsystemCheck(
             status="disabled", detail={"configured": False, "exec_mode": rstate.exec_mode}

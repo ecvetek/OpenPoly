@@ -250,9 +250,7 @@ def test_health_detail_paper_mode_unarmed_is_not_down(health_env) -> None:
     """Paper mode never dispatches to live, so an unarmed executor there is
     normal — only the balance read degrades."""
     overrides, client = health_env
-    overrides[hr.get_executor_dispatcher] = lambda: FakeExecutor(
-        balance_raw=None, live_ready=False
-    )
+    overrides[hr.get_executor_dispatcher] = lambda: FakeExecutor(balance_raw=None, live_ready=False)
     body = client.get("/api/health/detail").json()
     assert body["checks"]["market_access"]["status"] == "degraded"
 

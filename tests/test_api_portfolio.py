@@ -169,9 +169,7 @@ def test_equity_endpoint_summary_alltime_but_points_windowed(env) -> None:
         ts=old_ts,
         news_id="n1",
     )
-    store.close_position(
-        h.position_id, sell_price=0.55, ts=old_ts + 10, close_reason="take_profit"
-    )
+    store.close_position(h.position_id, sell_price=0.55, ts=old_ts + 10, close_reason="take_profit")
     body = client.get("/api/portfolio/equity").json()
     assert body["summary"]["realized"] == pytest.approx(1.50)
     assert body["points"] == []
@@ -196,9 +194,7 @@ def test_equity_endpoint_window_hours_param_widens_the_chart(env) -> None:
         ts=old_ts,
         news_id="n1",
     )
-    store.close_position(
-        h.position_id, sell_price=0.55, ts=old_ts + 10, close_reason="take_profit"
-    )
+    store.close_position(h.position_id, sell_price=0.55, ts=old_ts + 10, close_reason="take_profit")
     assert client.get("/api/portfolio/equity?window_hours=24").json()["points"] == []
     assert client.get("/api/portfolio/equity?window_hours=168").json()["points"] != []
 
@@ -221,9 +217,7 @@ def test_equity_endpoint_unrecognized_window_hours_falls_back_to_default(env) ->
         ts=old_ts,
         news_id="n1",
     )
-    store.close_position(
-        h.position_id, sell_price=0.55, ts=old_ts + 10, close_reason="take_profit"
-    )
+    store.close_position(h.position_id, sell_price=0.55, ts=old_ts + 10, close_reason="take_profit")
     # 999 isn't in the safelist -> falls back to the 24-hour default, so this
     # position (closed 3 days ago) still produces no points, same as the
     # default's own behavior in the sibling test above.
@@ -794,8 +788,11 @@ def test_get_position_unrealized_pnl_null_when_closed(env) -> None:
     store, client, _factory = env
     h = _open(store, "m1", "yes", "ty1")
     store.close_position(
-        h.position_id, sell_price=0.55, ts=200.0,
-        close_reason="take_profit", trigger="take_profit",
+        h.position_id,
+        sell_price=0.55,
+        ts=200.0,
+        close_reason="take_profit",
+        trigger="take_profit",
     )
     saved_store = msm.store
     try:
@@ -854,8 +851,14 @@ def test_get_position_includes_news_id(env) -> None:
 def test_get_position_news_id_null_when_no_linkage(env) -> None:
     store, client, _factory = env
     h = store.open_position(
-        market_id="m1", side="yes", token_id="ty1", condition_id="0xm1",
-        price=0.42, qty=10.0, ts=100.0, news_id=None,
+        market_id="m1",
+        side="yes",
+        token_id="ty1",
+        condition_id="0xm1",
+        price=0.42,
+        qty=10.0,
+        ts=100.0,
+        news_id=None,
     )
     body = client.get(f"/api/positions/{h.position_id}").json()
     assert body["news_id"] is None
@@ -917,8 +920,11 @@ def test_get_position_includes_exit_decision_when_closed(env) -> None:
     store, client, factory = env
     h = _open(store, "m1", "yes", "ty1")
     store.close_position(
-        h.position_id, sell_price=0.30, ts=200.0,
-        close_reason="stop_loss", trigger="stop_loss",
+        h.position_id,
+        sell_price=0.30,
+        ts=200.0,
+        close_reason="stop_loss",
+        trigger="stop_loss",
     )
     decision = ExitDecision(
         ts=200.0,
@@ -960,16 +966,30 @@ def test_get_position_exit_decision_ignores_other_positions_and_skips(env) -> No
     rows = [
         ExitDecisionRow(
             **ExitDecision(
-                ts=150.0, position_id=h1.position_id, market_id="m1", side="yes",
-                verdict="skip", trigger=None, return_pct=0.01, fill_price=None,
-                realized_pnl=None, reason="within threshold",
+                ts=150.0,
+                position_id=h1.position_id,
+                market_id="m1",
+                side="yes",
+                verdict="skip",
+                trigger=None,
+                return_pct=0.01,
+                fill_price=None,
+                realized_pnl=None,
+                reason="within threshold",
             ).to_dict()
         ),
         ExitDecisionRow(
             **ExitDecision(
-                ts=200.0, position_id=h2.position_id, market_id="m2", side="no",
-                verdict="ok", trigger="take_profit", return_pct=0.2, fill_price=0.6,
-                realized_pnl=3.0, reason="tp hit",
+                ts=200.0,
+                position_id=h2.position_id,
+                market_id="m2",
+                side="no",
+                verdict="ok",
+                trigger="take_profit",
+                return_pct=0.2,
+                fill_price=0.6,
+                realized_pnl=3.0,
+                reason="tp hit",
             ).to_dict()
         ),
     ]

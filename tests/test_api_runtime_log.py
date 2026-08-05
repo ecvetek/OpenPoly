@@ -408,8 +408,7 @@ async def test_analyzer_log_includes_polymarket_url_when_catalogued(db) -> None:
     finally:
         msm.store = saved_store
     assert (
-        r.json()["entries"][0]["market_polymarket_url"]
-        == "https://polymarket.com/event/event-slug"
+        r.json()["entries"][0]["market_polymarket_url"] == "https://polymarket.com/event/event-slug"
     )
     assert r.json()["entries"][0]["market_question"] == "Q?"
 

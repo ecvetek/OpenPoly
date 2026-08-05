@@ -125,7 +125,9 @@ def test_no_event_slug_when_absent():
 
 
 def test_polymarket_url_prefers_event_slug():
-    m = normalize_gamma_market(_raw(), event={"id": "e", "title": "E", "slug": "world-cup-2026", "tags": []})
+    m = normalize_gamma_market(
+        _raw(), event={"id": "e", "title": "E", "slug": "world-cup-2026", "tags": []}
+    )
     assert polymarket_url(m) == "https://polymarket.com/event/world-cup-2026"
 
 

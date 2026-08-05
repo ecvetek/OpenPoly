@@ -106,9 +106,7 @@ async def test_held_other_side_does_not_reconcile_wrong_side(store) -> None:
     """Holding the NO token must not reconcile-close an open YES position on the
     same condition (and vice-versa) — (condition, side) must match exactly."""
     pid = _open_position(store, condition_id="0xcid", side="yes")
-    rm = ReconciliationMonitor(
-        holdings_fetcher=_holdings({("0xcid", "no"): 5.0}), grace_seconds=0
-    )
+    rm = ReconciliationMonitor(holdings_fetcher=_holdings({("0xcid", "no"): 5.0}), grace_seconds=0)
     rm.configure(store)
     await rm._tick_once()
     rec = store.get_position(pid)
@@ -194,9 +192,7 @@ async def test_quantity_drift_alerts_but_does_not_mutate(store) -> None:
     untracked-holding case there is no close either — the position stays
     open exactly as the ledger already has it."""
     pid = _open_position(store, condition_id="0xcid", side="yes", qty=10.0)
-    rm = ReconciliationMonitor(
-        holdings_fetcher=_holdings({("0xcid", "yes"): 7.0}), grace_seconds=0
-    )
+    rm = ReconciliationMonitor(holdings_fetcher=_holdings({("0xcid", "yes"): 7.0}), grace_seconds=0)
     rm.configure(store)
     await rm._tick_once()
     rec = store.get_position(pid)
@@ -211,9 +207,7 @@ async def test_quantity_drift_alerts_but_does_not_mutate(store) -> None:
 
 async def test_quantity_drift_alert_fires_once_per_key(store) -> None:
     _open_position(store, condition_id="0xcid", side="yes", qty=10.0)
-    rm = ReconciliationMonitor(
-        holdings_fetcher=_holdings({("0xcid", "yes"): 7.0}), grace_seconds=0
-    )
+    rm = ReconciliationMonitor(holdings_fetcher=_holdings({("0xcid", "yes"): 7.0}), grace_seconds=0)
     rm.configure(store)
     await rm._tick_once()
     await rm._tick_once()

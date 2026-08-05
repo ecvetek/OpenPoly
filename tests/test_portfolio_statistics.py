@@ -97,7 +97,9 @@ def test_mixed_wins_losses_breakeven(factory) -> None:
     store = PortfolioStore(factory)
     for i, sell in enumerate([0.55, 0.50]):  # 2 wins
         h = _open(store, f"win{i}", ts=100.0 + i, price=0.40)
-        store.close_position(h.position_id, sell_price=sell, ts=200.0 + i, close_reason="take_profit")
+        store.close_position(
+            h.position_id, sell_price=sell, ts=200.0 + i, close_reason="take_profit"
+        )
     h = _open(store, "loss0", ts=103.0, price=0.40)  # 1 loss
     store.close_position(h.position_id, sell_price=0.25, ts=203.0, close_reason="stop_loss")
     h = _open(store, "be0", ts=104.0, price=0.40)  # 1 breakeven
@@ -125,9 +127,13 @@ def test_breakeven_realized_pnl_exactly_zero(factory) -> None:
 def test_average_loss_and_largest_loss_are_signed_not_magnitude(factory) -> None:
     store = PortfolioStore(factory)
     h1 = _open(store, "m1", ts=100.0, price=0.40)
-    store.close_position(h1.position_id, sell_price=0.25, ts=200.0, close_reason="stop_loss")  # -1.50
+    store.close_position(
+        h1.position_id, sell_price=0.25, ts=200.0, close_reason="stop_loss"
+    )  # -1.50
     h2 = _open(store, "m2", ts=101.0, price=0.50)
-    store.close_position(h2.position_id, sell_price=0.20, ts=201.0, close_reason="stop_loss")  # -3.00
+    store.close_position(
+        h2.position_id, sell_price=0.20, ts=201.0, close_reason="stop_loss"
+    )  # -3.00
 
     s = build_statistics(factory).summary
     assert s.average_loss == pytest.approx(-2.25)  # signed mean, not a positive magnitude
@@ -184,8 +190,12 @@ def test_pnl_curve_cumulative_ordered_by_closed_at(factory) -> None:
     h1 = _open(store, "m1", ts=50.0)
     h2 = _open(store, "m2", ts=60.0)
     # Close out of chronological insertion order: m2 first (loss), then m1 (win).
-    store.close_position(h2.position_id, sell_price=0.30, ts=150.0, close_reason="stop_loss")  # -1.0
-    store.close_position(h1.position_id, sell_price=0.60, ts=250.0, close_reason="take_profit")  # +2.0
+    store.close_position(
+        h2.position_id, sell_price=0.30, ts=150.0, close_reason="stop_loss"
+    )  # -1.0
+    store.close_position(
+        h1.position_id, sell_price=0.60, ts=250.0, close_reason="take_profit"
+    )  # +2.0
 
     curve = build_statistics(factory).pnl_curve
     assert [p.ts for p in curve] == [150.0, 250.0]
@@ -197,7 +207,9 @@ def test_closed_positions_capped_at_200_newest_first(factory) -> None:
     store = PortfolioStore(factory)
     for i in range(205):
         h = _open(store, f"m{i}", ts=float(i))
-        store.close_position(h.position_id, sell_price=0.50, ts=float(1000 + i), close_reason="take_profit")
+        store.close_position(
+            h.position_id, sell_price=0.50, ts=float(1000 + i), close_reason="take_profit"
+        )
 
     result = build_statistics(factory)
     assert result.closed_positions_truncated is True
@@ -209,9 +221,13 @@ def test_closed_positions_capped_at_200_newest_first(factory) -> None:
 def test_average_hold_seconds(factory) -> None:
     store = PortfolioStore(factory)
     h1 = _open(store, "m1", ts=100.0)
-    store.close_position(h1.position_id, sell_price=0.50, ts=200.0, close_reason="take_profit")  # 100s
+    store.close_position(
+        h1.position_id, sell_price=0.50, ts=200.0, close_reason="take_profit"
+    )  # 100s
     h2 = _open(store, "m2", ts=100.0)
-    store.close_position(h2.position_id, sell_price=0.50, ts=400.0, close_reason="take_profit")  # 300s
+    store.close_position(
+        h2.position_id, sell_price=0.50, ts=400.0, close_reason="take_profit"
+    )  # 300s
 
     s = build_statistics(factory).summary
     assert s.average_hold_seconds == pytest.approx(200.0)

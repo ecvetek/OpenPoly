@@ -75,16 +75,26 @@ class StatisticsSummary:
     wins: int
     losses: int
     breakeven: int
-    win_rate: float | None  # wins / (wins + losses); breakeven excluded from both terms. None if wins+losses == 0.
+    win_rate: (
+        float | None
+    )  # wins / (wins + losses); breakeven excluded from both terms. None if wins+losses == 0.
     gross_profit: float  # sum of positive realized_pnl — a magnitude, always >= 0.0
     gross_loss: float  # sum of abs(negative realized_pnl) — a magnitude, always >= 0.0 (needed for profit_factor; negate at display time)
     net_pnl: float  # gross_profit - gross_loss (signed)
-    profit_factor: float | None  # gross_profit / gross_loss; None only if gross_loss == 0.0 (so all-losses -> 0.0, not None)
+    profit_factor: (
+        float | None
+    )  # gross_profit / gross_loss; None only if gross_loss == 0.0 (so all-losses -> 0.0, not None)
     average_win: float | None  # gross_profit / wins; None if wins == 0
-    average_loss: float | None  # mean of the SIGNED losing realized_pnl values (<= 0.0); None if losses == 0
+    average_loss: (
+        float | None
+    )  # mean of the SIGNED losing realized_pnl values (<= 0.0); None if losses == 0
     largest_win: float | None  # max realized_pnl among wins; None if wins == 0
-    largest_loss: float | None  # min realized_pnl among losses (most negative, signed); None if losses == 0
-    average_hold_seconds: float | None  # mean(closed_at - opened_at) over positions_closed; None if positions_closed == 0
+    largest_loss: (
+        float | None
+    )  # min realized_pnl among losses (most negative, signed); None if losses == 0
+    average_hold_seconds: (
+        float | None
+    )  # mean(closed_at - opened_at) over positions_closed; None if positions_closed == 0
     close_reason_breakdown: dict[str, int]  # close_reason -> count, over positions_closed
 
 
@@ -94,7 +104,9 @@ class StatisticsResult:
     until: float | None
     summary: StatisticsSummary
     pnl_curve: tuple[PnlCurvePoint, ...]  # ascending by ts
-    closed_positions: tuple[PositionRecord, ...]  # newest-first, capped at CLOSED_POSITIONS_TABLE_LIMIT
+    closed_positions: tuple[
+        PositionRecord, ...
+    ]  # newest-first, capped at CLOSED_POSITIONS_TABLE_LIMIT
     closed_positions_truncated: bool  # True when positions_closed > CLOSED_POSITIONS_TABLE_LIMIT
 
 

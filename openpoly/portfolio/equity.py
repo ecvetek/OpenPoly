@@ -103,9 +103,7 @@ def build_equity_curve(
     with session_factory() as session:
         stmt = select(PositionRow)
         if since is not None:
-            stmt = stmt.where(
-                or_(PositionRow.closed_at.is_(None), PositionRow.closed_at >= since)
-            )
+            stmt = stmt.where(or_(PositionRow.closed_at.is_(None), PositionRow.closed_at >= since))
         positions = list(session.execute(stmt).scalars().all())
         if not positions:
             return EquityCurve((), 0.0, 0.0, 0.0, 0)

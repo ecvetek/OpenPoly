@@ -590,9 +590,7 @@ async def test_entry_fill_skipped_records_skip_reason() -> None:
     # Section decided ok, but the executor skipped (e.g. position already open) —
     # the skip still carries the blocking position's id through.
     orch, _, _, e_log = make_orchestrator(
-        executor=FakeExecutor(
-            filled=False, skip_reason="position_exists", skip_position_id=49
-        )
+        executor=FakeExecutor(filled=False, skip_reason="position_exists", skip_position_id=49)
     )
     await orch.start()
     try:
