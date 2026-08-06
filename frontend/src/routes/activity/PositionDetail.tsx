@@ -13,7 +13,7 @@
  * `PositionPostmortem`). Only once the market has cleanly resolved does
  * `frozenRef` take over and stop polling for good.
  */
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   formatLocalDateTime,
@@ -68,11 +68,16 @@ export function PositionDetail() {
   // new id (unreachable today since every nav entry point remounts, but a
   // real latent bug for any future in-place link between positions).
   const frozenRef = useRef<{ positionId: string; data: DetailData } | null>(null)
+  // Set right before a manual/forced refetch so the fetcher below skips the
+  // frozen short-circuit for exactly that one call — otherwise, once frozen,
+  // the postmortem's refresh button would be a permanent no-op.
+  const bypassFreezeRef = useRef(false)
   const { data, status, error, refetch } = usePoll<DetailData>(async () => {
     const pid = positionId ?? ''
-    if (frozenRef.current !== null && frozenRef.current.positionId === pid) {
+    if (frozenRef.current !== null && frozenRef.current.positionId === pid && !bypassFreezeRef.current) {
       return frozenRef.current.data
     }
+    bypassFreezeRef.current = false
     const position = await fetchPosition(pid)
     if (position === null) return { position: null, history: null }
     const history = await fetchPositionPriceHistory(position.id)
@@ -84,6 +89,26 @@ export function PositionDetail() {
     if (history.market_resolved) frozenRef.current = { positionId: pid, data: result }
     return result
   })
+  function forceRefresh() {
+    bypassFreezeRef.current = true
+    refetch()
+  }
+  // Once the market resolves, take one more forced refresh (bypassing the
+  // frozen cache) before flipping the postmortem into its final "Concluded"
+  // state — a visible "one more refresh, then conclude" beat rather than
+  // silently trusting whichever poll happened to first observe resolution.
+  const [concluded, setConcluded] = useState(false)
+  const finalizingRef = useRef(false)
+  useEffect(() => {
+    if (!data?.history?.market_resolved || concluded) return
+    if (!finalizingRef.current) {
+      finalizingRef.current = true
+      forceRefresh()
+      return
+    }
+    finalizingRef.current = false
+    setConcluded(true)
+  }, [data, concluded])
   const [closing, setClosing] = useState(false)
   const [closeStatus, setCloseStatus] = useState<string | null>(null)
 
@@ -412,6 +437,19 @@ export function PositionDetail() {
         </div>
       )}
 
+      {/* Postmortem: for any closed position — compares what actually
+         happened against holding to settlement (once resolved) or shows the
+         price trend since close (while still pending). Sits above the chart
+         so the verdict is visible before scrolling to the price history. */}
+      {data.history && (
+        <PositionPostmortem
+          position={p}
+          priceHistory={data.history}
+          onRefresh={forceRefresh}
+          concluded={concluded}
+        />
+      )}
+
       <div className="rounded border border-neutral-800 p-3">
         {status === 'error' && (
           <div className="mb-2 rounded border border-red-700/50 bg-red-900/20 px-3 py-2 text-[11px] text-red-200">
@@ -436,11 +474,6 @@ export function PositionDetail() {
           />
         )}
       </div>
-
-      {/* Postmortem: only for a closed, losing position — compares what
-         actually happened against holding to settlement (once resolved) or
-         shows the price trend since close (while still pending). */}
-      {data.history && <PositionPostmortem position={p} priceHistory={data.history} />}
     </div>
   )
 }

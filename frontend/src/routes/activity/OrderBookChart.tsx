@@ -36,6 +36,12 @@ export type OrderBookChartProps = {
 
 type MidPoint = { time: UTCTimestamp; value: number }
 
+// Lifecycle stages the chart auto-fits to, in order. Ranked so the fit
+// effect only ever moves forward (open → closed → resolved), never re-fits
+// for a stage it's already reached.
+type FitStage = 'none' | 'open' | 'closed' | 'resolved'
+const FIT_RANK: Record<FitStage, number> = { none: 0, open: 1, closed: 2, resolved: 3 }
+
 type Derived = {
   mid: MidPoint[]
   band: BandData[]
@@ -104,6 +110,12 @@ export function OrderBookChart({
   const bandRef = useRef<ISeriesApi<'Custom'> | null>(null)
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
   const bySecondRef = useRef<Map<number, OrderBookSnapshot>>(new Map())
+  // Auto-fit only at the three lifecycle transitions below — not on every
+  // poll tick. Otherwise the mid-close backend backfill (sparse CLOB
+  // candles, growing time window) triggers a fitContent() on every 3s poll
+  // forever, repeatedly re-zooming and squeezing the dense trading window
+  // into a shrinking fraction of the chart.
+  const fittedRef = useRef<FitStage>('none')
 
   const { mid, band, bySecond } = useMemo(
     () => derive(snapshots, depth, pricePoints),
@@ -205,7 +217,11 @@ export function OrderBookChart({
       })
     }
     markersRef.current?.setMarkers(markers.sort((a, b) => (a.time as number) - (b.time as number)))
-    chartRef.current?.timeScale().fitContent()
+    const stage: FitStage = resolved ? 'resolved' : exit ? 'closed' : mid.length > 0 ? 'open' : 'none'
+    if (FIT_RANK[stage] > FIT_RANK[fittedRef.current]) {
+      chartRef.current?.timeScale().fitContent()
+      fittedRef.current = stage
+    }
   }, [mid, band, bySecond, entry, exit, resolved])
 
   return (

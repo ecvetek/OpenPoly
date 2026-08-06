@@ -1,18 +1,20 @@
 /**
- * Postmortem for a closed, losing position — hindsight on whether closing
- * was the right call, using price data collected after close through the
- * market's resolution (see PositionDetail's use of
+ * Postmortem for a closed position — hindsight on whether closing when we
+ * did was the right call, using price data collected after close through
+ * the market's resolution (see PositionDetail's use of
  * `fetchPositionPriceHistory`, which keeps polling past `closed_at` for
  * exactly this).
  *
  * Two regimes:
  * - Market resolved cleanly (`market_resolved` + a definite `winning_side`):
  *   compares the actual realized P&L against the hypothetical P&L of
- *   holding to settlement (0 or 1 for the held side) — a definite verdict.
+ *   holding to settlement (0 or 1 for the held side) — a definite verdict,
+ *   rendered as "Concluded" once PositionDetail has done its final refresh.
  * - Not yet resolved: shows the price range since close as a "here's what
- *   happened so far" signal, no verdict.
+ *   happened so far" signal, no verdict yet.
  */
 import type { ReactNode } from 'react'
+import { RefreshButton } from '../../components/RefreshButton'
 import { formatPnl, pnlClass } from './format'
 import type { PositionPriceHistory } from './orderBookClient'
 import type { PositionRecord } from './portfolioTypes'
@@ -20,6 +22,8 @@ import type { PositionRecord } from './portfolioTypes'
 export type PositionPostmortemProps = {
   position: PositionRecord
   priceHistory: PositionPriceHistory
+  onRefresh: () => void
+  concluded: boolean
 }
 
 function postClosePrices(position: PositionRecord, history: PositionPriceHistory): number[] {
@@ -38,17 +42,40 @@ function postClosePrices(position: PositionRecord, history: PositionPriceHistory
   return prices
 }
 
-function Card({ children }: { children: ReactNode }) {
+function Card({
+  children,
+  onRefresh,
+  concluded,
+}: {
+  children: ReactNode
+  onRefresh: () => void
+  concluded: boolean
+}) {
   return (
     <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-1.5">
-      <div className="text-[11px] text-neutral-400">Postmortem</div>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-[11px]">
+          <span className="text-neutral-400">Postmortem</span>
+          {concluded && (
+            <span className="px-1.5 py-0.5 text-[10px] font-mono uppercase rounded border border-emerald-700/50 bg-emerald-900/20 text-emerald-300">
+              Concluded
+            </span>
+          )}
+        </div>
+        <RefreshButton onClick={onRefresh} title="Refresh postmortem" />
+      </div>
       {children}
     </div>
   )
 }
 
-export function PositionPostmortem({ position, priceHistory }: PositionPostmortemProps) {
-  if (position.status !== 'closed' || position.realized_pnl === null || position.realized_pnl >= 0) {
+export function PositionPostmortem({
+  position,
+  priceHistory,
+  onRefresh,
+  concluded,
+}: PositionPostmortemProps) {
+  if (position.status !== 'closed' || position.realized_pnl === null) {
     return null
   }
   const exitPrice = position.avg_entry_price + position.realized_pnl / position.qty
@@ -56,7 +83,7 @@ export function PositionPostmortem({ position, priceHistory }: PositionPostmorte
   if (priceHistory.market_resolved) {
     if (priceHistory.winning_side === null) {
       return (
-        <Card>
+        <Card onRefresh={onRefresh} concluded={concluded}>
           <p className="text-[12px] text-neutral-300">
             Market resolved with a disputed/split outcome — no clean hold-to-settlement comparison.
           </p>
@@ -68,7 +95,7 @@ export function PositionPostmortem({ position, priceHistory }: PositionPostmorte
     const delta = holdPnl - position.realized_pnl
     const closingWasRight = delta <= 0
     return (
-      <Card>
+      <Card onRefresh={onRefresh} concluded={concluded}>
         <p className="text-[12px] text-neutral-300">
           Market resolved <span className="font-semibold text-neutral-100">{priceHistory.winning_side.toUpperCase()}</span> (
           settled at {settlementPrice.toFixed(0)}). Holding to settlement would have realized{' '}
@@ -78,8 +105,10 @@ export function PositionPostmortem({ position, priceHistory }: PositionPostmorte
         </p>
         <p className={`text-[12px] font-semibold ${closingWasRight ? 'text-emerald-300' : 'text-red-300'}`}>
           {closingWasRight
-            ? `Closing early was right — it saved you ${formatPnl(Math.abs(delta))}.`
-            : `Closing early cost you ${formatPnl(Math.abs(delta))} — holding would have won.`}
+            ? `Closing when we did was the right call — it saved ${formatPnl(Math.abs(delta))} versus holding to settlement. This exit worked as intended.`
+            : `Holding to settlement would have done ${formatPnl(Math.abs(delta))} better — worth reviewing whether the exit${
+                position.exit_decision?.trigger ? ` (${position.exit_decision.trigger})` : ''
+              } fired too early here.`}
         </p>
       </Card>
     )
@@ -88,7 +117,7 @@ export function PositionPostmortem({ position, priceHistory }: PositionPostmorte
   const prices = postClosePrices(position, priceHistory)
   if (prices.length === 0) {
     return (
-      <Card>
+      <Card onRefresh={onRefresh} concluded={concluded}>
         <p className="text-[12px] text-neutral-500">
           Market hasn't resolved yet, and no price data has come in since close.
         </p>
@@ -103,7 +132,7 @@ export function PositionPostmortem({ position, priceHistory }: PositionPostmorte
   // look wrong in hindsight, so far.
   const movedAgainstTheClose = position.side === 'yes' ? latest > exitPrice : latest < exitPrice
   return (
-    <Card>
+    <Card onRefresh={onRefresh} concluded={concluded}>
       <p className="text-[12px] text-neutral-300 font-mono">
         Since close: {low.toFixed(3)} – {high.toFixed(3)}, now {latest.toFixed(3)} (closed at{' '}
         {exitPrice.toFixed(3)}) — market hasn't resolved yet.
