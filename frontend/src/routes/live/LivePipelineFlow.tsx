@@ -3,13 +3,18 @@
  * news_source → embedding → analyzer → entry → exit chain, but as a
  * read-only "is it actually doing something" visual: one box per stage,
  * today's count, and a brief pulse when a stage's count ticks up between
- * polls. Exit isn't part of the per-news join (it's driven by the exit
- * monitor's own sweep, not this news chain), so its count comes from
- * today's statistics instead — still the same "closed" concept the user
- * means by "closing positions".
+ * polls.
+ *
+ * Every count is a true unbounded "since local midnight" number — not
+ * derived from the (display-capped) activity-feed cards array, which would
+ * silently undercount on a busy day. News/embedding/analyzer come from
+ * newsClient.ts's fetchNewsPipelineSince totals; entry/exit come from
+ * /api/statistics' positions_opened/positions_closed, which are already
+ * true aggregate counts (see openpoly/portfolio/statistics.py) and a
+ * better fit for "opened"/"closed" than trying to infer "filled" off a
+ * capped join anyway.
  */
 import { useEffect, useRef, useState } from 'react'
-import type { NewsPipelineCard } from '../activity/newsTypes'
 
 type Stage = 'news' | 'embedding' | 'analyzer' | 'entry' | 'exit'
 
@@ -55,16 +60,19 @@ function PipelineNode({
 }
 
 export function LivePipelineFlow({
-  cards,
+  newsCount,
+  embeddingCount,
+  analyzerCount,
+  openedToday,
   closedToday,
 }: {
-  cards: NewsPipelineCard[]
+  newsCount: number
+  embeddingCount: number
+  analyzerCount: number
+  openedToday: number
   closedToday: number
 }) {
-  const newsCount = cards.length
-  const embeddingCount = cards.filter((c) => c.embedding !== null).length
-  const analyzerCount = cards.filter((c) => c.analyzer !== null).length
-  const entryCount = cards.filter((c) => c.entry?.fill_status === 'filled').length
+  const entryCount = openedToday
   const exitCount = closedToday
   const counts: Record<Stage, number> = {
     news: newsCount,

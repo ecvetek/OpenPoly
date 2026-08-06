@@ -367,6 +367,39 @@ async def test_analyzer_log_returns_appended_entries(db) -> None:
     assert body["last_at"] == 11.0
 
 
+async def test_analyzer_log_total_since_uncapped_by_limit(db) -> None:
+    """`total` (via `since`) is a true count independent of `limit` — the
+    Live dashboard's "N AI calls today" tile needs this, not just
+    `len(entries)`, which `limit` bounds."""
+    calls = [
+        AnalyzerCall(
+            ts=float(i),
+            news_id=f"n{i}",
+            news_content_preview="x",
+            urgency="low",
+            verdict="ok",
+            p_model=0.5,
+            confidence="medium",
+            market_id=None,
+            latency_ms=1,
+        )
+        for i in range(5)
+    ]
+    for c in calls:
+        analyzer_log.append(c)
+    _seed_analyzer_rows(db, *calls)
+
+    client = await _client()
+    try:
+        r = await client.get("/api/analyzer/log?since=2&limit=1")
+    finally:
+        await client.aclose()
+    body = r.json()
+    # ts=2,3,4 (3 rows) match `since=2`; `limit=1` still caps `entries`.
+    assert body["total"] == 3
+    assert len(body["entries"]) == 1
+
+
 async def test_analyzer_log_includes_polymarket_url_when_catalogued(db) -> None:
     import json
     from openpoly.markets.manager import manager as msm

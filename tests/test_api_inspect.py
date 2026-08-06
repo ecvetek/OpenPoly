@@ -158,7 +158,7 @@ def test_inspect_news_empty(tmp_path):
         body = TestClient(app).get("/api/inspect/news").json()
     finally:
         app.dependency_overrides.clear()
-    assert body == {"count": 0, "news": []}
+    assert body == {"count": 0, "total": 0, "news": []}
 
 
 def test_inspect_news_limit(tmp_path):
@@ -170,6 +170,22 @@ def test_inspect_news_limit(tmp_path):
         app.dependency_overrides.clear()
     assert body["count"] == 3
     assert [n["news_id"] for n in body["news"]] == ["n9", "n8", "n7"]
+
+
+def test_inspect_news_since_and_total_uncapped_by_limit(tmp_path):
+    """`total` (via since) is a true count independent of `limit` — the Live
+    dashboard's "N news today" tile needs this, not just `count`
+    (len(rows), bounded by limit)."""
+    factory = _seed_news(tmp_path, [_news(f"n{i}", float(i)) for i in range(10)])
+    app.dependency_overrides[get_session_factory] = lambda: factory
+    try:
+        body = TestClient(app).get("/api/inspect/news?since=5&limit=2").json()
+    finally:
+        app.dependency_overrides.clear()
+    # n5..n9 (5 items) match `since=5`; `limit=2` still caps the returned rows.
+    assert body["total"] == 5
+    assert body["count"] == 2
+    assert [n["news_id"] for n in body["news"]] == ["n9", "n8"]
 
 
 # ---------- /api/inspect/order-books ----------

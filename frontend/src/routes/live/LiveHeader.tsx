@@ -1,7 +1,8 @@
 /**
  * Live page header — overall system status, paper/live mode, a self-ticking
- * wall clock (independent of the data poll, so the page never looks frozen
- * even between polls), and how stale the last fetch is.
+ * 24-hour wall clock (independent of the data poll, so the page never looks
+ * frozen even between polls), how stale the last fetch is, and the refresh-
+ * interval selector.
  */
 import { useEffect, useState } from 'react'
 import { Dot } from '../../components/Dot'
@@ -24,21 +25,39 @@ const STATUS_COPY: Record<SubsystemStatus, string> = {
   disabled: 'Disabled',
 }
 
+// This page runs unattended, so unlike Overview/Statistics/Health's picker
+// there's no "off" option.
+const REFRESH_OPTIONS: ReadonlyArray<{ readonly label: string; readonly ms: number }> = [
+  { label: '5s', ms: 5000 },
+  { label: '10s', ms: 10000 },
+  { label: '30s', ms: 30000 },
+  { label: '60s', ms: 60000 },
+]
+
 function useClock(): string {
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000)
     return () => clearInterval(t)
   }, [])
-  return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return now.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
 }
 
 export function LiveHeader({
   health,
   fetchedAt,
+  refreshMs,
+  onRefreshChange,
 }: {
   health: HealthDetailResponse | null
   fetchedAt: number | null
+  refreshMs: number
+  onRefreshChange: (ms: number) => void
 }) {
   const clock = useClock()
   const execMode = health?.checks.market_access?.detail.exec_mode as string | undefined
@@ -46,10 +65,6 @@ export function LiveHeader({
 
   return (
     <div className="flex items-center gap-4 flex-wrap px-4 sm:px-6 pt-4 pb-3">
-      <h1 className="text-2xl font-semibold text-neutral-100 tracking-tight">
-        openPoly <span className="text-neutral-500 font-normal">· Live</span>
-      </h1>
-
       <span
         className={`px-2.5 py-1 text-xs font-semibold uppercase tracking-wide rounded border ${
           isLive
@@ -69,6 +84,23 @@ export function LiveHeader({
       )}
 
       <div className="ml-auto flex items-center gap-4">
+        <div className="flex items-center gap-1 text-[10px] text-neutral-500">
+          <span>refresh</span>
+          {REFRESH_OPTIONS.map((opt) => (
+            <button
+              key={opt.label}
+              type="button"
+              onClick={() => onRefreshChange(opt.ms)}
+              className={`rounded px-1.5 py-0.5 ${
+                refreshMs === opt.ms
+                  ? 'bg-blue-600 text-white'
+                  : 'border border-neutral-700 text-neutral-400'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
         <span className="text-[11px] text-neutral-500">
           data as of {fetchedAt === null ? '—' : `${ago(fetchedAt)} ago`}
         </span>

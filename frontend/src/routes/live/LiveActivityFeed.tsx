@@ -10,11 +10,23 @@ import type { CardState, NewsPipelineCard } from '../activity/newsTypes'
 
 const MAX_ROWS = 20
 
+// Mirrors NewsCard.tsx's STATE_BADGE/STATE_LABEL — same 6-state model.
 const STATE_TONE: Record<CardState, string> = {
   filled: 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50',
+  not_filled: 'bg-orange-900/40 text-orange-300 border-orange-700/50',
+  ai_rejected: 'bg-purple-900/40 text-purple-300 border-purple-700/50',
   skipped: 'bg-neutral-800 text-neutral-400 border-neutral-700/50',
   errored: 'bg-red-900/40 text-red-300 border-red-700/50',
   pending: 'bg-amber-900/40 text-amber-300 border-amber-700/50',
+}
+
+const STATE_LABEL: Record<CardState, string> = {
+  filled: 'filled',
+  not_filled: 'not filled',
+  ai_rejected: 'ai rejected',
+  skipped: 'skipped',
+  errored: 'errored',
+  pending: 'pending',
 }
 
 const URGENCY_DOT: Record<string, string> = {
@@ -65,7 +77,7 @@ export function LiveActivityFeed({ cards }: { cards: NewsPipelineCard[] }) {
               <span
                 className={`px-1.5 py-0.5 text-[9px] uppercase rounded border shrink-0 ${STATE_TONE[c.state]}`}
               >
-                {c.state}
+                {STATE_LABEL[c.state]}
               </span>
             </div>
           ))

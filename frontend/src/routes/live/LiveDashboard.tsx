@@ -1,10 +1,11 @@
 /**
- * Live — the TV dashboard. Fixed 3s auto-refresh (no on/off picker; this
- * page is meant to run unattended), composed entirely from existing
+ * Live — the TV dashboard. Auto-refreshing on a user-selectable interval
+ * (5s/10s/30s/60s, see LiveHeader), composed entirely from existing
  * endpoints via fetchLiveSnapshot(). Hero row is all-time (mirrors
  * Overview's stat cards); the Today row and the pipeline/feed panels are
  * scoped to the local calendar day.
  */
+import { useState } from 'react'
 import { StatCard } from '../../components/StatCard'
 import { usePoll } from '../activity/usePoll'
 import { EquityChart } from '../activity/EquityChart'
@@ -16,14 +17,15 @@ import { LiveOpenPositions } from './LiveOpenPositions'
 import { LivePipelineFlow } from './LivePipelineFlow'
 import { fetchLiveSnapshot, type LiveSnapshot } from './liveClient'
 
-const POLL_MS = 3000
+const DEFAULT_REFRESH_MS = 5000
 
 function fmtUsd(n: number | null | undefined): string {
   return n === null || n === undefined ? '—' : `$${n.toFixed(2)}`
 }
 
 export function LiveDashboard() {
-  const { data, status, error } = usePoll<LiveSnapshot>(fetchLiveSnapshot, POLL_MS)
+  const [refreshMs, setRefreshMs] = useState(DEFAULT_REFRESH_MS)
+  const { data, status, error } = usePoll<LiveSnapshot>(fetchLiveSnapshot, refreshMs)
 
   if (data === null) {
     return (
@@ -35,17 +37,28 @@ export function LiveDashboard() {
     )
   }
 
-  const { equity, wallet, statisticsToday, positions, newsPipelineToday, newsPipelineTruncated, health } =
-    data
+  const {
+    equity,
+    wallet,
+    statisticsToday,
+    positions,
+    newsPipelineToday,
+    newsPipelineTotals,
+    health,
+  } = data
   const s = statisticsToday?.summary ?? null
   const eq = equity?.summary ?? null
   const noWallet = wallet !== null && !wallet.configured
-  const embedToday = newsPipelineToday.filter((c) => c.embedding !== null).length
-  const analyzeToday = newsPipelineToday.filter((c) => c.analyzer !== null).length
+  const aiCallsToday = newsPipelineTotals.embedding + newsPipelineTotals.analyzer
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4 px-4 sm:px-6 pb-6">
-      <LiveHeader health={health} fetchedAt={data.fetchedAt} />
+      <LiveHeader
+        health={health}
+        fetchedAt={data.fetchedAt}
+        refreshMs={refreshMs}
+        onRefreshChange={setRefreshMs}
+      />
 
       {status === 'error' && (
         <div className="rounded border border-red-700/50 bg-red-900/20 px-3 py-2 text-[11px] text-red-200">
@@ -97,17 +110,12 @@ export function LiveDashboard() {
 
       {/* Today row. */}
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
-        <StatCard
-          label="News today"
-          value={String(newsPipelineToday.length)}
-          tone="text-neutral-100"
-          sub={newsPipelineTruncated ? `${newsPipelineToday.length}+` : undefined}
-        />
+        <StatCard label="News today" value={String(newsPipelineTotals.news)} tone="text-neutral-100" />
         <StatCard
           label="AI calls today"
-          value={String(embedToday + analyzeToday)}
+          value={String(aiCallsToday)}
           tone="text-neutral-100"
-          sub={`embed ${embedToday} · analyze ${analyzeToday}`}
+          sub={`embed ${newsPipelineTotals.embedding} · analyze ${newsPipelineTotals.analyzer}`}
         />
         <StatCard label="Opened today" value={s === null ? '—' : String(s.positions_opened)} tone="text-neutral-100" />
         <StatCard label="Closed today" value={s === null ? '—' : String(s.positions_closed)} tone="text-neutral-100" />
@@ -134,7 +142,13 @@ export function LiveDashboard() {
               <EquityChart points={equity.points} />
             )}
           </div>
-          <LivePipelineFlow cards={newsPipelineToday} closedToday={s?.positions_closed ?? 0} />
+          <LivePipelineFlow
+            newsCount={newsPipelineTotals.news}
+            embeddingCount={newsPipelineTotals.embedding}
+            analyzerCount={newsPipelineTotals.analyzer}
+            openedToday={s?.positions_opened ?? 0}
+            closedToday={s?.positions_closed ?? 0}
+          />
         </div>
 
         <div className="flex flex-col gap-4 min-h-0">

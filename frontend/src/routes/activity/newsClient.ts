@@ -19,15 +19,30 @@ import type {
 // matching the backend's own NEWS_LIMIT_MAX in inspect_routes.py).
 export const DEFAULT_NEWS_LIMIT = 25
 
-export async function fetchNewsPipeline(
-  newsLimit: number = DEFAULT_NEWS_LIMIT,
+// Accurate, `limit`-independent counts read off each raw response's `total`
+// (news) / `total` (section logs) field — see inspect_routes.py's
+// `inspect_news` and runtime_routes.py's `_count_since`. Distinct from the
+// joined `cards` array's length, which is capped at whatever `limit` was
+// requested.
+export type NewsPipelineTotals = {
+  news: number
+  embedding: number
+  analyzer: number
+  entry: number
+}
+
+// Shared fetch-4-endpoints-and-join body, parameterized by the query string
+// so both the News tab's plain `limit` fetch and the Live dashboard's
+// `since`-scoped fetch go through one implementation.
+async function fetchPipelineJoin(
+  qs: string,
   signal?: AbortSignal,
-): Promise<NewsPipelineCard[]> {
+): Promise<{ cards: NewsPipelineCard[]; totals: NewsPipelineTotals }> {
   const [newsRes, embRes, anRes, enRes] = await Promise.allSettled([
-    fetchJson<{ news?: NewsItem[] }>(`/api/inspect/news?limit=${newsLimit}`, signal),
-    fetchJson<{ entries?: EmbeddingCall[] }>(`/api/embedding/log?limit=${newsLimit}`, signal),
-    fetchJson<{ entries?: AnalyzerCallEntry[] }>(`/api/analyzer/log?limit=${newsLimit}`, signal),
-    fetchJson<{ entries?: EntryDecision[] }>(`/api/entry/log?limit=${newsLimit}`, signal),
+    fetchJson<{ news?: NewsItem[]; total?: number }>(`/api/inspect/news?${qs}`, signal),
+    fetchJson<{ entries?: EmbeddingCall[]; total?: number }>(`/api/embedding/log?${qs}`, signal),
+    fetchJson<{ entries?: AnalyzerCallEntry[]; total?: number }>(`/api/analyzer/log?${qs}`, signal),
+    fetchJson<{ entries?: EntryDecision[]; total?: number }>(`/api/entry/log?${qs}`, signal),
   ])
 
   if (newsRes.status === 'rejected') throw newsRes.reason
@@ -37,7 +52,7 @@ export async function fetchNewsPipeline(
   const anByNews = indexNewest(extractEntries<AnalyzerCallEntry>(anRes))
   const enByNews = indexNewest(extractEntries<EntryDecision>(enRes))
 
-  return [...news]
+  const cards = [...news]
     .sort((a, b) => b.received_at - a.received_at)
     .map((n): NewsPipelineCard => {
       const embedding = embByNews.get(n.news_id) ?? null
@@ -51,6 +66,34 @@ export async function fetchNewsPipeline(
         state: deriveState(embedding, analyzer, entry),
       }
     })
+
+  return {
+    cards,
+    totals: {
+      news: newsRes.value?.total ?? news.length,
+      embedding: totalOf(embRes),
+      analyzer: totalOf(anRes),
+      entry: totalOf(enRes),
+    },
+  }
+}
+
+export async function fetchNewsPipeline(
+  newsLimit: number = DEFAULT_NEWS_LIMIT,
+  signal?: AbortSignal,
+): Promise<NewsPipelineCard[]> {
+  const { cards } = await fetchPipelineJoin(`limit=${newsLimit}`, signal)
+  return cards
+}
+
+// Live dashboard variant — same join, plus `since` (epoch seconds) and the
+// accurate, un-capped totals needed for "N news / AI calls today" tiles.
+export async function fetchNewsPipelineSince(
+  since: number,
+  limit: number = DEFAULT_NEWS_LIMIT,
+  signal?: AbortSignal,
+): Promise<{ cards: NewsPipelineCard[]; totals: NewsPipelineTotals }> {
+  return fetchPipelineJoin(`since=${since}&limit=${limit}`, signal)
 }
 
 // Newest-per-news_id wins. Section rings rarely duplicate (each section
@@ -114,6 +157,14 @@ function extractEntries<T>(
 ): T[] {
   if (settled.status !== 'fulfilled') return []
   return settled.value?.entries ?? []
+}
+
+// A rejected/degraded section log contributes 0 to its total rather than
+// throwing — matches extractEntries' same non-news-endpoints-degrade-
+// gracefully convention (see this file's top comment).
+function totalOf(settled: PromiseSettledResult<{ total?: number }>): number {
+  if (settled.status !== 'fulfilled') return 0
+  return settled.value?.total ?? 0
 }
 
 async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {

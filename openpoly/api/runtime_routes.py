@@ -23,7 +23,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.db.engine import get_session_factory
@@ -85,6 +85,21 @@ def _entries_from_db(
     return [{col: getattr(r, col) for col in cols} for r in reversed(rows)]
 
 
+def _count_since(
+    factory: sessionmaker[Session], row_cls: type, since: float | None
+) -> int:
+    """True unbounded count of rows at/after ``since`` (or every row when
+    ``since`` is None) — independent of ``limit``, via a separate ``COUNT``
+    query. ``_entries_from_db`` above caps at ``SECTION_LOG_LIMIT_MAX`` for
+    the returned ``entries`` list; callers that need an accurate "how many
+    since X" number (the Live dashboard) read this instead."""
+    stmt = select(func.count()).select_from(row_cls)
+    if since is not None:
+        stmt = stmt.where(row_cls.ts >= since)
+    with factory() as session:
+        return session.execute(stmt).scalar_one()
+
+
 def _attach_polymarket_links(
     entries: list[dict[str, Any]],
     market_id_key: str,
@@ -108,6 +123,11 @@ class SectionLogResponse(BaseModel):
     last_at: float | None
     queue_depth: int
     state: str
+    # True count of rows at/after `since` (see _count_since) — independent of
+    # `limit`/`entries`' length. Only set on the embedding/analyzer/entry
+    # routes (the ones the Live dashboard's `since`-scoped counts need);
+    # None on exit/settlement, which don't accept `since`.
+    total: int | None = None
     # Embedding-only: background warm-cache events (model load / cache reload /
     # warm cycles). None on the analyzer / entry routes — they have no warm loop.
     warm: list[dict[str, Any]] | None = None
@@ -133,6 +153,7 @@ class SectionLogResponse(BaseModel):
 @router.get("/embedding/log", response_model=SectionLogResponse)
 def get_embedding_log(
     limit: int = 200,
+    since: float | None = None,
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> SectionLogResponse:
     orch = get_orchestrator()
@@ -147,12 +168,14 @@ def get_embedding_log(
         queue_depth=orch.queue_depth,
         state=orch.state,
         warm=[e.to_dict() for e in embedding_warm_log.entries(limit=limit)],
+        total=_count_since(factory, EmbeddingCallRow, since),
     )
 
 
 @router.get("/analyzer/log", response_model=SectionLogResponse)
 def get_analyzer_log(
     limit: int = 200,
+    since: float | None = None,
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> SectionLogResponse:
     orch = get_orchestrator()
@@ -164,6 +187,7 @@ def get_analyzer_log(
         last_at=analyzer_log.last_at,
         queue_depth=orch.queue_depth,
         state=orch.state,
+        total=_count_since(factory, AnalyzerCallRow, since),
     )
 
 
@@ -221,6 +245,7 @@ def test_analyzer(req: AnalyzerTestRequest) -> AnalyzerTestResponse:
 @router.get("/entry/log", response_model=SectionLogResponse)
 def get_entry_log(
     limit: int = 200,
+    since: float | None = None,
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> SectionLogResponse:
     orch = get_orchestrator()
@@ -230,6 +255,7 @@ def get_entry_log(
         last_at=entry_log.last_at,
         queue_depth=orch.queue_depth,
         state=orch.state,
+        total=_count_since(factory, EntryDecisionRow, since),
     )
 
 

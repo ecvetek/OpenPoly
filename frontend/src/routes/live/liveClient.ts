@@ -10,7 +10,7 @@
  * its counters over naturally on the next poll tick.
  */
 import { fetchEquity, type EquityResponse } from '../activity/equityClient'
-import { fetchNewsPipeline } from '../activity/newsClient'
+import { fetchNewsPipelineSince, type NewsPipelineTotals } from '../activity/newsClient'
 import type { NewsPipelineCard } from '../activity/newsTypes'
 import type { PositionRecord } from '../activity/portfolioTypes'
 import { fetchWalletBalance, type WalletBalance } from '../activity/walletClient'
@@ -18,26 +18,50 @@ import { fetchHealthDetail, type HealthDetailResponse } from '../health/healthCl
 import { fetchStatistics, type StatisticsResponse } from '../statistics/statisticsClient'
 import { todayRange } from './todayRange'
 
-// Same ceiling the backend enforces (SECTION_LOG_LIMIT_MAX / NEWS_LIMIT_MAX)
-// — generous for a grain-scale bot's daily volume, but if a day's activity
-// hits this exactly, `newsPipelineTruncated` flags that today's counts may
-// undercount (mirrors `closed_positions_truncated` in /api/statistics).
-const NEWS_PIPELINE_LIMIT = 500
+// Purely a display cap for the activity-feed ticker now — the "N today"
+// stat cards read the backend's own `since`-scoped `total` (see
+// newsClient.ts's fetchNewsPipelineSince), which is independent of this
+// limit. Only the top ~20 of this ever render at once, so this just needs
+// to comfortably cover that.
+const NEWS_TICKER_LIMIT = 300
+
+// GET /api/portfolio/equity's window_hours is an int that must be one of
+// the backend's EQUITY_WINDOW_OPTIONS_HOURS safelist (1/6/12/24/168/720 —
+// openpoly/api/portfolio_routes.py); anything else either 422s (a
+// fractional value like "hours since midnight" isn't a valid int) or
+// silently falls back to 24h. Round up to the smallest safelisted bucket
+// that still covers today so far, same duplication convention
+// OverviewTab.tsx's WINDOW_OPTIONS already uses for this safelist.
+function equityWindowHours(hoursSinceMidnight: number): 1 | 6 | 12 | 24 {
+  if (hoursSinceMidnight <= 1) return 1
+  if (hoursSinceMidnight <= 6) return 6
+  if (hoursSinceMidnight <= 12) return 12
+  return 24
+}
 
 export type LiveSnapshot = {
   equity: EquityResponse | null
   wallet: WalletBalance | null
   statisticsToday: StatisticsResponse | null
   positions: PositionRecord[] | null
-  /** Every fetched pipeline card whose news arrived since local midnight. */
+  /** Pipeline cards for the activity-feed ticker, capped at NEWS_TICKER_LIMIT. */
   newsPipelineToday: NewsPipelineCard[]
-  newsPipelineTruncated: boolean
+  /** Accurate, uncapped counts since local midnight — for the stat cards. */
+  newsPipelineTotals: NewsPipelineTotals
   health: HealthDetailResponse | null
   fetchedAt: number
 }
 
+const EMPTY_TOTALS: NewsPipelineTotals = { news: 0, embedding: 0, analyzer: 0, entry: 0 }
+
+// LIMIT_MAX on GET /api/positions (openpoly/api/portfolio_routes.py) — the
+// route returns open+closed newest-first, unbounded by `limit` otherwise
+// defaults to 100, so an open position older than the 100 most recent rows
+// overall could silently drop off the Live page without this.
+const POSITIONS_LIMIT = 500
+
 async function fetchPositions(): Promise<PositionRecord[]> {
-  const r = await fetch('/api/positions')
+  const r = await fetch(`/api/positions?limit=${POSITIONS_LIMIT}`)
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   const body = (await r.json()) as { positions: PositionRecord[] }
   return body.positions
@@ -55,24 +79,21 @@ export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
   const { since, hoursSinceMidnight } = todayRange()
 
   const [equity, wallet, statisticsToday, positions, newsPipeline, health] = await Promise.all([
-    settle(fetchEquity(hoursSinceMidnight)),
+    settle(fetchEquity(equityWindowHours(hoursSinceMidnight))),
     settle(fetchWalletBalance()),
     settle(fetchStatistics(since, null)),
     settle(fetchPositions()),
-    settle(fetchNewsPipeline(NEWS_PIPELINE_LIMIT)),
+    settle(fetchNewsPipelineSince(since, NEWS_TICKER_LIMIT)),
     settle(fetchHealthDetail()),
   ])
-
-  const allCards = newsPipeline ?? []
-  const newsPipelineToday = allCards.filter((c) => c.news.received_at >= since)
 
   return {
     equity,
     wallet,
     statisticsToday,
     positions,
-    newsPipelineToday,
-    newsPipelineTruncated: allCards.length >= NEWS_PIPELINE_LIMIT,
+    newsPipelineToday: newsPipeline?.cards ?? [],
+    newsPipelineTotals: newsPipeline?.totals ?? EMPTY_TOTALS,
     health,
     fetchedAt: Date.now() / 1000,
   }

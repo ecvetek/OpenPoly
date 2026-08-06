@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.db.engine import get_session_factory
@@ -76,20 +76,34 @@ def inspect_markets() -> dict[str, Any]:
 @router.get("/api/inspect/news")
 def inspect_news(
     limit: int = NEWS_LIMIT_DEFAULT,
+    since: float | None = None,
     factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> dict[str, Any]:
-    """Persisted news items, newest first (by ``received_at``)."""
+    """Persisted news items, newest first (by ``received_at``).
+
+    ``since`` (epoch seconds, optional) filters to items received at or
+    after that instant, and — unlike ``count`` (``len(rows)``, bounded by
+    ``limit``) — ``total`` is a true unbounded count of every matching row
+    via a separate ``COUNT`` query, for callers (the Live dashboard) that
+    need an accurate "how many today" number independent of how many rows
+    were actually fetched for display.
+    """
     limit = max(1, min(limit, NEWS_LIMIT_MAX))
+    stmt = select(NewsItemRow)
+    count_stmt = select(func.count()).select_from(NewsItemRow)
+    if since is not None:
+        stmt = stmt.where(NewsItemRow.received_at >= since)
+        count_stmt = count_stmt.where(NewsItemRow.received_at >= since)
     with factory() as session:
+        total = session.execute(count_stmt).scalar_one()
         rows = (
-            session.execute(
-                select(NewsItemRow).order_by(NewsItemRow.received_at.desc()).limit(limit)
-            )
+            session.execute(stmt.order_by(NewsItemRow.received_at.desc()).limit(limit))
             .scalars()
             .all()
         )
     return {
         "count": len(rows),
+        "total": total,
         "news": [
             {
                 "id": r.id,
