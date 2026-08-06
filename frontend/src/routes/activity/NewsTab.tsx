@@ -1,11 +1,13 @@
 /**
  * News — single stream of NewsCards (v16).
  *
- * Filter chips at top (All / Filled / Skipped / Errored), default All
- * per D2; D6 semantics fall out of the card's terminal state derived in
- * newsClient — Filled/Skipped/Errored each show only `state === filter`,
- * so embedding-skipped news ends up under "Skipped" (where it belongs)
- * and is hidden from "Filled" / "Errored" buckets.
+ * Filter chips at top (All / Filled / Not Filled / AI Rejected / Skipped
+ * / Errored), default All per D2; D6 semantics fall out of the card's
+ * terminal state derived in newsClient — each non-"all" chip shows only
+ * `state === filter`, so e.g. an entry-stage skip ends up under "Not
+ * Filled" and an embedding-stage skip ends up under "Skipped", each
+ * hidden from the other buckets. See CardState in newsTypes.ts for the
+ * full precedence.
  *
  * Limit selector (25/50/100/200/500/1000, default 25): sets `newsLimit`
  * directly; the section-log endpoints (embedding / analyzer / entry) are
@@ -25,9 +27,24 @@ import { NewsCard } from './NewsCard'
 import type { NewsPipelineCard } from './newsTypes'
 import { usePoll } from './usePoll'
 
-type Filter = 'all' | 'filled' | 'skipped' | 'errored'
+type Filter =
+  | 'all'
+  | 'filled'
+  | 'not_filled'
+  | 'ai_rejected'
+  | 'skipped'
+  | 'errored'
 
 const NEWS_LIMIT_OPTIONS = [25, 50, 100, 200, 500, 1000] as const
+
+const FILTER_LABELS: Record<Filter, string> = {
+  all: 'All',
+  filled: 'Filled',
+  not_filled: 'Not Filled',
+  ai_rejected: 'AI Rejected',
+  skipped: 'Skipped',
+  errored: 'Errored',
+}
 
 function FilterChip({
   label,
@@ -64,11 +81,21 @@ export function NewsTab() {
   )
 
   const counts = useMemo(() => {
-    const r = { all: 0, filled: 0, skipped: 0, errored: 0, pending: 0 }
+    const r = {
+      all: 0,
+      filled: 0,
+      not_filled: 0,
+      ai_rejected: 0,
+      skipped: 0,
+      errored: 0,
+      pending: 0,
+    }
     if (!cards) return r
     r.all = cards.length
     for (const c of cards) {
       if (c.state === 'filled') r.filled++
+      else if (c.state === 'not_filled') r.not_filled++
+      else if (c.state === 'ai_rejected') r.ai_rejected++
       else if (c.state === 'skipped') r.skipped++
       else if (c.state === 'errored') r.errored++
       else r.pending++
@@ -115,6 +142,18 @@ export function NewsTab() {
             onClick={() => setFilter('filled')}
           />
           <FilterChip
+            label="Not Filled"
+            count={counts.not_filled}
+            active={filter === 'not_filled'}
+            onClick={() => setFilter('not_filled')}
+          />
+          <FilterChip
+            label="AI Rejected"
+            count={counts.ai_rejected}
+            active={filter === 'ai_rejected'}
+            onClick={() => setFilter('ai_rejected')}
+          />
+          <FilterChip
             label="Skipped"
             count={counts.skipped}
             active={filter === 'skipped'}
@@ -155,7 +194,7 @@ export function NewsTab() {
         <div className="rounded border border-neutral-800 px-3 py-6 text-center text-[11px] text-neutral-500">
           {filter === 'all'
             ? 'No news yet — waiting for the upstream WS to push.'
-            : `No "${filter}" news right now — try All to see everything.`}
+            : `No "${FILTER_LABELS[filter]}" news right now — try All to see everything.`}
         </div>
       ) : (
         <div className="flex flex-col gap-3">

@@ -72,10 +72,14 @@ function indexNewest<T extends { news_id: string; ts: number }>(
 // verdict 'ok' just means it emitted an OrderIntent; the executor may
 // still have skipped (live_not_ready) or errored downstream.
 //
-//   filled  — entry produced a position
-//   errored — any stage hit an error or error-verdict
-//   skipped — any stage skipped / fail_open, OR executor returned a non-filled status
-//   pending — news exists, nothing downstream yet
+//   filled      — entry produced a position
+//   errored     — any stage hit an error or error-verdict, or any stage
+//                 returned 'fail_open' (degraded, not a clean pass)
+//   not_filled  — analyzer 'ok', but entry skipped (min_edge, spread, ...)
+//                 or entry 'ok' with the executor refusing to fill
+//   ai_rejected — embedding passed, analyzer's verdict was 'skip'
+//   skipped     — embedding-stage skip only (no analyzer call happened)
+//   pending     — news exists, nothing downstream yet
 function deriveState(
   emb: EmbeddingCall | null,
   an: AnalyzerCallEntry | null,
@@ -84,9 +88,9 @@ function deriveState(
   if (en?.fill_status === 'filled') return 'filled'
 
   const anyError = Boolean(
-    emb?.verdict === 'error' || emb?.error ||
-    an?.verdict === 'error' || an?.error ||
-    en?.verdict === 'error' || en?.error,
+    emb?.verdict === 'error' || emb?.error || emb?.verdict === 'fail_open' ||
+    an?.verdict === 'error' || an?.error || an?.verdict === 'fail_open' ||
+    en?.verdict === 'error' || en?.error || en?.verdict === 'fail_open',
   )
   if (anyError) return 'errored'
 
@@ -94,13 +98,13 @@ function deriveState(
     en?.verdict === 'ok' &&
     en?.fill_status != null &&
     en.fill_status !== 'filled'
-  const anySkip = Boolean(
-    emb?.verdict === 'skip' ||
-    an?.verdict === 'skip' || an?.verdict === 'fail_open' ||
-    en?.verdict === 'skip' ||
-    executorRefused,
-  )
-  if (anySkip) return 'skipped'
+  if (en != null && (en.verdict === 'skip' || executorRefused)) {
+    return 'not_filled'
+  }
+
+  if (an != null && an.verdict === 'skip') return 'ai_rejected'
+
+  if (emb?.verdict === 'skip') return 'skipped'
 
   return 'pending'
 }

@@ -97,13 +97,29 @@ export type EntryDecision = {
   signals_json: string | null
 }
 
-// Terminal state of one news's journey through the pipeline.
-//   - filled:   entry produced a position (fill_status === 'filled')
-//   - errored:  any stage errored
-//   - skipped:  embedding / analyzer / entry skipped (and no later error)
-//   - pending:  news exists but no downstream stage yet (or in-flight)
+// Terminal state of one news's journey through the pipeline. Precedence
+// (most-specific wins) when deriving a single state: filled > errored >
+// not_filled > ai_rejected > skipped > pending.
+//   - filled:      entry produced a position (fill_status === 'filled')
+//   - errored:     any stage errored (verdict 'error' / non-null error),
+//                   or any stage returned 'fail_open' (degraded, not a
+//                   clean pass — treated as an error condition)
+//   - not_filled:  analyzer passed 'ok', but no fill happened for a
+//                   non-error reason — entry itself skipped (min_edge,
+//                   spread, heat_cap, ...) or entry said 'ok' but the
+//                   executor refused (price moved, no liquidity, ...)
+//   - ai_rejected: embedding passed, but the analyzer's verdict was
+//                   'skip' (its reject outcome)
+//   - skipped:     embedding-stage skip only (no analyzer call happened)
+//   - pending:     news exists but no downstream stage yet (or in-flight)
 // Filter chip semantics (D6) build on this.
-export type CardState = 'filled' | 'skipped' | 'errored' | 'pending'
+export type CardState =
+  | 'filled'
+  | 'not_filled'
+  | 'ai_rejected'
+  | 'skipped'
+  | 'errored'
+  | 'pending'
 
 // Join product — one per NewsItem (1:1 by news_id). Each non-news stage
 // is null when the news item hasn't progressed there yet (e.g. analyzer

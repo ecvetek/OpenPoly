@@ -32,6 +32,8 @@ import type { CardState, NewsPipelineCard, Verdict } from './newsTypes'
 
 const STATE_BORDER: Record<CardState, string> = {
   filled: 'border-emerald-700/50',
+  not_filled: 'border-orange-700/50',
+  ai_rejected: 'border-purple-700/50',
   skipped: 'border-neutral-700/50',
   errored: 'border-red-700/50',
   pending: 'border-amber-700/50',
@@ -39,9 +41,20 @@ const STATE_BORDER: Record<CardState, string> = {
 
 const STATE_BADGE: Record<CardState, string> = {
   filled: 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50',
+  not_filled: 'bg-orange-900/40 text-orange-300 border-orange-700/50',
+  ai_rejected: 'bg-purple-900/40 text-purple-300 border-purple-700/50',
   skipped: 'bg-neutral-800 text-neutral-300 border-neutral-700/50',
   errored: 'bg-red-900/40 text-red-300 border-red-700/50',
   pending: 'bg-amber-900/40 text-amber-300 border-amber-700/50',
+}
+
+const STATE_LABEL: Record<CardState, string> = {
+  filled: 'filled',
+  not_filled: 'not filled',
+  ai_rejected: 'ai rejected',
+  skipped: 'skipped',
+  errored: 'errored',
+  pending: 'pending',
 }
 
 const URGENCY_BADGE: Record<string, string> = {
@@ -196,7 +209,7 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
             #{news.id}
           </span>
           <Badge tone={urgencyTone} label={news.urgency || 'regular'} />
-          <Badge tone={STATE_BADGE[state]} label={state} />
+          <Badge tone={STATE_BADGE[state]} label={STATE_LABEL[state]} />
           <span
             className="ml-auto text-[10px] text-neutral-500"
             title={formatUTC(news.received_at)}
