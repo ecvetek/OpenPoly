@@ -122,14 +122,23 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 def _taker_fee_rate(raw: dict[str, Any]) -> float | None:
-    """Provisional taker fee as a rate (fraction).
+    """Provisional taker fee as a rate (fraction), e.g. ``0.05`` = 5%.
 
-    Gamma exposes ``takerBaseFee`` in basis points (e.g. 1000 -> 0.10). v8 §0.1
-    the zero-fee rule treats the CLOB ``/fee-rate`` endpoint as the only authority —
-    fetch layer may override this. ``feesEnabled is False`` is a definitive zero.
+    Gamma's real fee source is per-category: ``feeSchedule.rate`` carries the
+    exact rate from Polymarket's published fee schedule (crypto 0.07, sports
+    0.05, politics 0.04, ...), used verbatim — no unit conversion needed.
+    ``takerBaseFee`` (basis points) is a legacy field Gamma still populates
+    but is now flat (0 or 1000) regardless of category; kept only as a
+    fallback for the rare case ``feeSchedule`` is absent. ``feesEnabled is
+    False`` is a definitive zero.
     """
     if raw.get("feesEnabled") is False:
         return 0.0
+    schedule = raw.get("feeSchedule")
+    if isinstance(schedule, dict):
+        rate = _to_float(schedule.get("rate"))
+        if rate is not None:
+            return rate
     bps = _to_float(raw.get("takerBaseFee"))
     return None if bps is None else bps / 10_000.0
 

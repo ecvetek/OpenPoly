@@ -81,14 +81,29 @@ def test_fail_closed_defaults():
     assert m.enable_order_book is False
 
 
+def test_fee_schedule_rate_used_verbatim():
+    # Real politics market shape: feeSchedule.rate carries the category rate.
+    schedule = {"exponent": 1, "rate": 0.04, "takerOnly": True, "rebateRate": 0.25}
+    m = normalize_gamma_market(_raw(feesEnabled=True, feeSchedule=schedule))
+    assert m.taker_fee_rate == 0.04
+
+
 def test_fee_basis_points_to_rate():
-    # Real sports market shape: feesEnabled True, takerBaseFee 1000 bps.
+    # Legacy shape (no feeSchedule): feesEnabled True, takerBaseFee 1000 bps.
     m = normalize_gamma_market(_raw(feesEnabled=True, takerBaseFee=1000))
     assert m.taker_fee_rate == 0.1
 
 
+def test_fee_schedule_malformed_rate_falls_back():
+    # feeSchedule present but its rate isn't numeric -> fall back to takerBaseFee.
+    m = normalize_gamma_market(
+        _raw(feesEnabled=True, feeSchedule={"rate": "not-a-number"}, takerBaseFee=1000)
+    )
+    assert m.taker_fee_rate == 0.1
+
+
 def test_fee_unknown_is_none():
-    # feesEnabled true but no takerBaseFee -> fee is genuinely unknown.
+    # feesEnabled true but no feeSchedule or takerBaseFee -> fee is genuinely unknown.
     m = normalize_gamma_market(_raw(feesEnabled=True))
     assert m.taker_fee_rate is None
 
