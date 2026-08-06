@@ -7,6 +7,7 @@ import {
   useParams,
 } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
+import { BacktestPage } from './routes/BacktestPage'
 import { CanvasPage } from './routes/CanvasPage'
 import { HealthPage } from './routes/HealthPage'
 import { LivePage } from './routes/LivePage'
@@ -53,6 +54,7 @@ function App() {
           <Route path="activity/positions/:positionId" element={<PositionDetailRedirect />} />
           <Route path="activity/news" element={<Navigate to="/news" replace />} />
           <Route path="statistics" element={<StatisticsPage />} />
+          <Route path="backtest" element={<BacktestPage />} />
           <Route path="health" element={<HealthPage />} />
           {/* "runs" / "portfolio" were earlier names for this tab; redirect
               any stale link. */}

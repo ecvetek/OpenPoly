@@ -29,9 +29,15 @@ function exitPrice(p: PositionRecord): number | null {
 export function ClosedPositionsTable({
   positions,
   truncated,
+  linkable = true,
 }: {
   positions: PositionRecord[]
   truncated: boolean
+  // False for backtest results: those positions carry synthetic ids that
+  // don't exist in the real database, so a /positions/:id link would be
+  // broken/misleading. Defaults true — unchanged behavior for the real
+  // Statistics page, the only caller before backtest.
+  linkable?: boolean
 }) {
   const navigate = useNavigate()
 
@@ -64,18 +70,29 @@ export function ClosedPositionsTable({
             return (
               <tr
                 key={p.id}
-                onClick={() => navigate(`/positions/${p.id}`)}
-                className="cursor-pointer border-b border-neutral-900 last:border-0 hover:bg-neutral-900/60"
+                onClick={linkable ? () => navigate(`/positions/${p.id}`) : undefined}
+                className={`border-b border-neutral-900 last:border-0 ${
+                  linkable ? 'cursor-pointer hover:bg-neutral-900/60' : ''
+                }`}
               >
                 <Td>
-                  <Link
-                    to={`/positions/${p.id}`}
-                    onClick={(e) => e.stopPropagation()}
-                    className="text-neutral-300 hover:underline"
-                    title={p.market_question ?? p.condition_id}
-                  >
-                    {p.market_question ?? `${p.condition_id.slice(0, 16)}…`}
-                  </Link>
+                  {linkable ? (
+                    <Link
+                      to={`/positions/${p.id}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-neutral-300 hover:underline"
+                      title={p.market_question ?? p.condition_id}
+                    >
+                      {p.market_question ?? `${p.condition_id.slice(0, 16)}…`}
+                    </Link>
+                  ) : (
+                    <span
+                      className="text-neutral-300"
+                      title={p.market_question ?? p.condition_id}
+                    >
+                      {p.market_question ?? `${p.condition_id.slice(0, 16)}…`}
+                    </span>
+                  )}
                 </Td>
                 <Td tone={p.side === 'yes' ? 'text-emerald-300' : 'text-sky-300'}>
                   {p.side.toUpperCase()}

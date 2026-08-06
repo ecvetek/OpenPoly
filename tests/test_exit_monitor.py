@@ -156,6 +156,28 @@ def _monitor(portfolio: _FakePortfolio, executor: _FakeExecutor) -> ExitMonitor:
     return m
 
 
+def test_tick_skips_entirely_while_backtest_active() -> None:
+    """A backtest replay swaps the live MarketStore global for historical
+    data — the live exit sweep must never evaluate positions (or fire a real
+    sell) while that swap is in effect (see openpoly.backtest.guard's module
+    docstring)."""
+    from openpoly.backtest.guard import backtest_active, set_backtest_active
+
+    assert backtest_active() is False  # sanity: test isolation
+    market_source_manager.store.set_order_books(
+        [_book("t1", bid=0.55)]
+    )  # would trigger take_profit
+    ex = _FakeExecutor()
+    m = _monitor(_FakePortfolio([_held(1, "t1", avg=0.40)]), ex)
+    set_backtest_active(True)
+    try:
+        m._tick_once()
+    finally:
+        set_backtest_active(False)
+    assert ex.calls == []
+    assert exit_log.entries() == []
+
+
 # ---------- close paths ----------
 
 

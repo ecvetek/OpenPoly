@@ -35,6 +35,7 @@ from typing import Any, Literal, Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from openpoly.backtest.guard import backtest_active
 from openpoly.db.tables import OrderBookSnapshot
 from openpoly.execution import ExecResult
 from openpoly.execution import executor as _executor_singleton
@@ -350,6 +351,15 @@ class ExitMonitor:
         holds no longer write a log entry to ``exit_log`` (only ok / error
         closes do), but they DO count towards ``last_tick.reason_counts``."""
         if self._portfolio is None:
+            return
+        # A backtest replay swaps the live MarketStore global for historical
+        # data for its duration — see openpoly.backtest.guard's module
+        # docstring for why this check exists (there is no way to pause this
+        # monitor via the API, so the live exit sweep must skip itself for
+        # the swap window instead, rather than risk running the real exit
+        # section — and a real sell — against frozen historical data).
+        if backtest_active():
+            self._record_tick_event("tick_ok", detail="skipped: backtest in progress")
             return
         ts = time.time()
         try:

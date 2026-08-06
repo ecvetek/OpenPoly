@@ -9,7 +9,7 @@
  */
 import Form from '@rjsf/core'
 import type { IChangeEvent } from '@rjsf/core'
-import type { RegistryWidgetsType, RJSFSchema, UiSchema } from '@rjsf/utils'
+import type { RJSFSchema, UiSchema } from '@rjsf/utils'
 import validator from '@rjsf/validator-ajv8'
 import { useMemo } from 'react'
 
@@ -18,57 +18,8 @@ import { TestConnectionRow } from '../sections/news_source/TestConnectionRow'
 import { entriesForType, findEntry } from '../sections/catalog'
 import { useCatalogStore } from '../sections/catalogStore'
 import { ImplPicker } from './ImplPicker'
-import { RefWidget } from './RefWidget'
-import { TagListWidget } from './TagListWidget'
+import { buildSchemaFormUiSchema, SCHEMA_FORM_WIDGETS, type SchemaNode } from './schemaForm'
 import { useCanvasStore, type SectionNodeType } from './store'
-
-// Any config field whose key ends in `_ref` is a secret reference — render it
-// with the stored-key picker instead of a raw text input.
-const WIDGETS: RegistryWidgetsType = {
-  refWidget: RefWidget,
-  tagListWidget: TagListWidget,
-}
-
-// A JSON Schema node, loosely typed to match `param_schema`'s own
-// `Record<string, unknown>` shape (see sections/types.ts).
-type SchemaNode = Record<string, unknown>
-
-function resolveRef(node: SchemaNode, defs: Record<string, SchemaNode>): SchemaNode {
-  const ref = node.$ref
-  if (typeof ref === 'string') {
-    const name = ref.replace('#/$defs/', '')
-    return defs[name] ?? node
-  }
-  return node
-}
-
-// Recursively route `*_ref` fields through RefWidget and array-of-strings
-// fields through TagListWidget, at any nesting depth (rjsf's default array
-// UI depends on Bootstrap CSS/glyphicon fonts we don't ship — see
-// TagListWidget.tsx). Resolves `$ref`s (pydantic nests sub-model schemas
-// under `$defs`, e.g. market_source's `filter: MarketFilterConfig`).
-function buildUiSchema(node: SchemaNode, defs: Record<string, SchemaNode>): UiSchema {
-  const resolved = resolveRef(node, defs)
-  const props = (resolved.properties ?? {}) as Record<string, SchemaNode>
-  const ui: UiSchema = {}
-  for (const [key, rawChild] of Object.entries(props)) {
-    const child = resolveRef(rawChild, defs)
-    if (key.endsWith('_ref')) {
-      ui[key] = { 'ui:widget': 'refWidget' }
-      continue
-    }
-    const items = child.items as SchemaNode | undefined
-    if (child.type === 'array' && items?.type === 'string' && items.enum === undefined) {
-      ui[key] = { 'ui:widget': 'tagListWidget' }
-      continue
-    }
-    if (child.type === 'object' && child.properties) {
-      const nested = buildUiSchema(child, defs)
-      if (Object.keys(nested).length > 0) ui[key] = nested
-    }
-  }
-  return ui
-}
 
 export function ConfigTab({ node }: { node: SectionNodeType }) {
   const updateBulk = useCanvasStore((s) => s.updateNodeConfigBulk)
@@ -99,7 +50,7 @@ export function ConfigTab({ node }: { node: SectionNodeType }) {
     if (!entry) return {}
     const schema = entry.param_schema as SchemaNode
     const defs = (schema.$defs ?? {}) as Record<string, SchemaNode>
-    return buildUiSchema(schema, defs)
+    return buildSchemaFormUiSchema(schema, defs)
   }, [entry])
 
   return (
@@ -140,7 +91,7 @@ export function ConfigTab({ node }: { node: SectionNodeType }) {
             <Form
               schema={entry.param_schema as RJSFSchema}
               uiSchema={uiSchema}
-              widgets={WIDGETS}
+              widgets={SCHEMA_FORM_WIDGETS}
               formData={node.data.config}
               validator={validator}
               liveValidate

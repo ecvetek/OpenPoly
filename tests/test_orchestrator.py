@@ -434,6 +434,33 @@ async def test_happy_path_runs_all_three_stages() -> None:
     assert e_entry.position_id == 1
 
 
+async def test_entry_skips_while_backtest_active() -> None:
+    """A backtest replay swaps the live MarketStore global for historical
+    data — the live entry section must never run while that swap is in
+    effect (see openpoly.backtest.guard's module docstring), since it could
+    make a real trading decision off frozen historical data. FakeEntry's
+    call_count staying 0 proves the section itself was never invoked, not
+    just that its result was discarded."""
+    from openpoly.backtest.guard import backtest_active, set_backtest_active
+
+    assert backtest_active() is False  # sanity: test isolation
+    entry = FakeEntry()
+    orch, _emb_log, _a_log, e_log = make_orchestrator(entry=entry)
+    await orch.start()
+    set_backtest_active(True)
+    try:
+        orch.enqueue(_item("n1"))
+        await _drain(orch)
+    finally:
+        set_backtest_active(False)
+        await orch.stop()
+    assert entry.call_count == 0
+    assert len(e_log.entries()) == 1
+    e_entry = e_log.entries()[0]
+    assert e_entry.verdict == "skip"
+    assert e_entry.reason == "backtest_in_progress"
+
+
 async def test_multiple_items_processed_in_order() -> None:
     orch, emb_log, a_log, e_log = make_orchestrator()
     await orch.start()

@@ -26,6 +26,7 @@ from typing import Literal, Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from openpoly.backtest.guard import backtest_active
 from openpoly.embedding.models import MarketCandidates
 from openpoly.news.ring_buffer import NewsItem
 from openpoly.runtime.section_log import (
@@ -403,21 +404,32 @@ class PipelineOrchestrator:
         error: str | None
         intent: OrderIntent | None = None
         signals_json: str | None = None
-        try:
-            out = await asyncio.to_thread(
-                self._entry.run,
-                SectionInput(tick_type="event", payload=ar),
-            )
-            verdict = str(out.verdict)
-            reason = out.reason
-            error = out.reason if verdict == "error" else None
-            signals_json = json.dumps(out.signals) if out.signals else None
-            if verdict == "ok" and isinstance(out.payload, OrderIntent):
-                intent = out.payload
-        except Exception as exc:  # noqa: BLE001 — section impl is user code
-            verdict = "error"
-            reason = None
-            error = repr(exc)[:200]
+        # A backtest replay swaps the live MarketStore global for historical
+        # data for its duration — see openpoly.backtest.guard's module
+        # docstring for why this check exists (there is no way to pause this
+        # orchestrator via the API, so the live entry decision must skip
+        # itself for the swap window instead, rather than risk running the
+        # real entry section against frozen historical order-book data).
+        if backtest_active():
+            verdict = "skip"
+            reason = "backtest_in_progress"
+            error = None
+        else:
+            try:
+                out = await asyncio.to_thread(
+                    self._entry.run,
+                    SectionInput(tick_type="event", payload=ar),
+                )
+                verdict = str(out.verdict)
+                reason = out.reason
+                error = out.reason if verdict == "error" else None
+                signals_json = json.dumps(out.signals) if out.signals else None
+                if verdict == "ok" and isinstance(out.payload, OrderIntent):
+                    intent = out.payload
+            except Exception as exc:  # noqa: BLE001 — section impl is user code
+                verdict = "error"
+                reason = None
+                error = repr(exc)[:200]
 
         # Execution stage — only when the section produced an OrderIntent.
         fill_status: str | None = None

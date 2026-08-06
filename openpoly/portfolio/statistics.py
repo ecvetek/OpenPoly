@@ -158,7 +158,14 @@ def build_statistics(
     """Realized trading-performance summary over ``[since, until)``. Both
     bounds ``None`` means all-time (no filtering) — safe here, unlike
     ``equity.py``'s windowing requirement, since ``position`` only grows with
-    actual trades."""
+    actual trades.
+
+    Thin DB-query wrapper around ``aggregate_closed_positions`` — the actual
+    P&L math lives there, as a pure function over already-fetched records, so
+    ``openpoly.backtest``'s engine can call it directly with its own
+    simulated positions and never risk its numbers drifting from this live
+    page's.
+    """
     with session_factory() as session:
         opened_stmt = select(func.count()).select_from(PositionRow)
         if since is not None:
@@ -178,6 +185,29 @@ def build_statistics(
         closed_stmt = closed_stmt.order_by(PositionRow.closed_at.asc())
         closed_rows = list(session.execute(closed_stmt).scalars().all())
 
+    closed_records = [_to_record(r) for r in closed_rows]
+    return aggregate_closed_positions(
+        closed_records,
+        positions_opened=positions_opened,
+        since=since,
+        until=until,
+    )
+
+
+def aggregate_closed_positions(
+    closed_records: list[PositionRecord],
+    *,
+    positions_opened: int,
+    since: float | None = None,
+    until: float | None = None,
+) -> StatisticsResult:
+    """Pure aggregation over an already-fetched set of closed positions —
+    ``closed_records`` must be ascending by ``closed_at`` (the P&L curve and
+    win/loss/hold-time math all depend on that order), no DB access here.
+    ``since``/``until`` are pass-through values embedded in the result, not
+    used in the math — the caller already scoped ``closed_records`` to
+    whatever window (or none) it wanted.
+    """
     wins = losses = breakeven = 0
     gross_profit = 0.0
     gross_loss = 0.0  # magnitude, >= 0.0
@@ -194,11 +224,11 @@ def build_statistics(
     pnl_curve: list[PnlCurvePoint] = []
     total_cost_basis = 0.0
 
-    for row in closed_rows:  # ascending by closed_at
-        pnl = row.realized_pnl or 0.0
+    for record in closed_records:  # ascending by closed_at
+        pnl = record.realized_pnl or 0.0
         cumulative += pnl
-        pnl_curve.append(PnlCurvePoint(ts=row.closed_at, cumulative_pnl=cumulative))  # type: ignore[arg-type]
-        cost = row.qty * row.avg_entry_price
+        pnl_curve.append(PnlCurvePoint(ts=record.closed_at, cumulative_pnl=cumulative))  # type: ignore[arg-type]
+        cost = record.qty * record.avg_entry_price
         pct = (pnl / cost) if cost > 0 else None
         if cost > 0:
             total_cost_basis += cost
@@ -214,11 +244,11 @@ def build_statistics(
             loss_pcts.append(pct)
         else:
             breakeven += 1
-        hold_seconds.append(row.closed_at - row.opened_at)  # type: ignore[operator]
-        reason = row.close_reason or "unknown"
+        hold_seconds.append(record.closed_at - record.opened_at)  # type: ignore[operator]
+        reason = record.close_reason or "unknown"
         close_reason_counts[reason] = close_reason_counts.get(reason, 0) + 1
 
-    positions_closed = len(closed_rows)
+    positions_closed = len(closed_records)
     net_pnl = gross_profit - gross_loss
     # largest_win/largest_loss pct pairs with the SAME trade as the dollar
     # figure (index into the parallel *_pnls list), not an independently
@@ -255,9 +285,9 @@ def build_statistics(
         largest_loss_pct=largest_loss_pct,
     )
 
-    newest_first = list(reversed(closed_rows))
+    newest_first = list(reversed(closed_records))
     truncated = len(newest_first) > CLOSED_POSITIONS_TABLE_LIMIT
-    closed_positions = tuple(_to_record(r) for r in newest_first[:CLOSED_POSITIONS_TABLE_LIMIT])
+    closed_positions = tuple(newest_first[:CLOSED_POSITIONS_TABLE_LIMIT])
 
     return StatisticsResult(
         since=since,

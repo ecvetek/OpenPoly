@@ -24,6 +24,7 @@ const NAV_ITEMS = [
   { to: '/positions', label: 'Positions' },
   { to: '/news', label: 'News' },
   { to: '/statistics', label: 'Statistics' },
+  { to: '/backtest', label: 'Backtest' },
   { to: '/health', label: 'Health' },
 ]
 

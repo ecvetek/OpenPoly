@@ -20,6 +20,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import FastAPI
 
+from openpoly.api.backtest_routes import router as backtest_router
 from openpoly.api.canvas_routes import router as canvas_router
 from openpoly.api.health_routes import router as health_router
 from openpoly.api.inspect_routes import router as inspect_router
@@ -308,6 +309,7 @@ app.include_router(portfolio_router)
 app.include_router(statistics_router)
 app.include_router(wallet_router)
 app.include_router(canvas_router)
+app.include_router(backtest_router)
 app.include_router(debug_router)
 app.include_router(health_router)
 
