@@ -9,6 +9,7 @@ import {
 import { AppShell } from './components/AppShell'
 import { CanvasPage } from './routes/CanvasPage'
 import { HealthPage } from './routes/HealthPage'
+import { LivePage } from './routes/LivePage'
 import { OverviewPage } from './routes/OverviewPage'
 import { PositionsPage } from './routes/PositionsPage'
 import { NewsPage } from './routes/NewsPage'
@@ -37,6 +38,7 @@ function App() {
           <Route path="strategy" element={<CanvasPage />} />
           {/* "canvas" was the earlier name for this page; redirect stale links. */}
           <Route path="canvas" element={<Navigate to="/strategy" replace />} />
+          <Route path="live" element={<LivePage />} />
           <Route path="overview" element={<OverviewPage />} />
           <Route path="positions" element={<PositionsPage />}>
             <Route index element={<PositionsTab />} />

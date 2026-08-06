@@ -38,6 +38,8 @@ import type {
   PricePoint,
 } from '../../routes/activity/orderBookClient'
 import type { CloseAllResult } from '../../setting/walletStore'
+import type { WalletBalance } from '../../routes/activity/walletClient'
+import type { HealthDetailResponse } from '../../routes/health/healthClient'
 // The canvas StatusIndicators read the FULL log envelope (counters / last_at /
 // queue_depth / state …), not just `entries` like the News tab does. Returning
 // only `{entries}` left `last_at` undefined → formatUTC(undefined) crashed the
@@ -241,6 +243,50 @@ function round2(n: number): number {
 }
 
 const equityResponse = buildEquity()
+
+// ---- wallet balance (Overview cards + Live hero row) ----------------------
+// Numbers loosely reconcile with the open positions' cost basis above
+// (9.98 + 8.54 ≈ 18.5 committed) against the $50 grain-scale starting
+// capital — close enough for a demo screenshot, not meant to foot exactly.
+
+const walletBalance: WalletBalance = {
+  configured: true,
+  usdc: 28.15,
+  positions_value: 21.62,
+  total: 49.77,
+  ts: NOW,
+}
+
+// ---- health detail (Health page + Live header status pill) ----------------
+
+const healthDetail: HealthDetailResponse = {
+  status: 'ok',
+  timestamp: NOW,
+  checks: {
+    app: { status: 'ok', detail: { uptime_seconds: 6 * HOUR } },
+    database: { status: 'ok', detail: { tables: {}, writers: {}, unhealthy_writers: [] } },
+    market_feed: {
+      status: 'ok',
+      detail: { state: 'running', last_poll_at: NOW - 120, catalog_size: 412, poll_count: 88, last_error: null },
+    },
+    news_feed: {
+      status: 'ok',
+      detail: { state: 'connected', last_msg_at: NOW - 8, total_recv: 214, buffer_size: 200, reconnect_attempts: 0, last_error: null },
+    },
+    market_access: {
+      status: 'ok',
+      detail: { configured: true, exec_mode: 'paper', live_ready: false, usdc: walletBalance.usdc },
+    },
+    pipeline: { status: 'ok', detail: { state: 'running', queue_depth: 0, queue_maxsize: 256 } },
+    exit_monitor: {
+      status: 'ok',
+      detail: { state: 'running', last_tick_at: NOW - 12, open_positions: 2, blocked: 0 },
+    },
+    settlement_monitor: { status: 'ok', detail: { state: 'running' } },
+    embedding: { status: 'ok', detail: { state: 'running' } },
+    reconciliation: { status: 'disabled', detail: { reason: 'monitor not wired' } },
+  },
+}
 
 // ---- order book history (Position detail) --------------------------------
 
@@ -590,5 +636,16 @@ export const activityRoutes: MockRoute[] = [
     pattern: /^\/api\/exit\/log$/,
     kind: 'read',
     handler: () => exitLogResponse,
+  },
+
+  // Wallet balance (Overview cards + Live hero row) + composite health
+  // report (Health page + Live header status pill).
+  {
+    pattern: /^\/api\/wallet\/balance$/,
+    handler: () => walletBalance,
+  },
+  {
+    pattern: /^\/api\/health\/detail$/,
+    handler: () => healthDetail,
   },
 ]

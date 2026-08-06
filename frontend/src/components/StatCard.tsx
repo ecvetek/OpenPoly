@@ -5,6 +5,7 @@ export function StatCard({
   sub,
   pctValue,
   pctTone,
+  size = 'default',
 }: {
   label: string
   value: string
@@ -16,13 +17,21 @@ export function StatCard({
   // context text ("opened in range").
   pctValue?: string
   pctTone?: string
+  // 'lg' bumps the value/label type up a notch for glance-from-a-distance
+  // contexts (the Live TV dashboard's hero row). Defaults to the original
+  // sizing so every existing call site is unaffected.
+  size?: 'default' | 'lg'
 }) {
   return (
-    <div className="rounded border border-neutral-800 px-3 py-2.5">
-      <div className="text-[10px] uppercase tracking-wide text-neutral-500">
+    <div className={`rounded border border-neutral-800 ${size === 'lg' ? 'px-4 py-4' : 'px-3 py-2.5'}`}>
+      <div
+        className={`uppercase tracking-wide text-neutral-500 ${size === 'lg' ? 'text-xs' : 'text-[10px]'}`}
+      >
         {label}
       </div>
-      <div className={`mt-1 text-xl font-mono font-semibold ${tone}`}>
+      <div
+        className={`mt-1 font-mono font-semibold ${tone} ${size === 'lg' ? 'text-4xl' : 'text-xl'}`}
+      >
         {value}
         {pctValue !== undefined && (
           <span className={`ml-1.5 text-xs font-mono ${pctTone ?? tone}`}>
