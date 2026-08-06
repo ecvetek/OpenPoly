@@ -160,14 +160,16 @@ export function ModeSwitchDialog({ target, onClose }: Props) {
         <p className="text-xs text-neutral-400 leading-relaxed">
           {isLive ? (
             <>
-              Live mode signs and submits real IOC orders on Polygon mainnet with
-              the configured wallet (Polymarket CLOB).{' '}
+              Live mode signs and submits real GTC orders on Polygon mainnet
+              with the configured wallet (Polymarket CLOB), crossing the
+              spread like a market order; any unfilled remainder is cancelled
+              immediately.{' '}
               <span className="text-amber-300">
-                Settlement detection (slice E) and kill-switch enforcement (A4)
-                are not yet implemented — open positions will not auto-close on
-                market resolution, and there is no hard daily-loss / drawdown
-                brake beyond the entry-side heat_cap. Monitor positions
-                manually until those land.
+                Positions auto-close when a market resolves, but on-chain CTF
+                redemption (claiming winnings back to pUSD) is not automated
+                — redeem manually. heat_cap and the kill-switch only block
+                new entries; nothing force-closes existing open positions on
+                a loss limit.
               </span>
             </>
           ) : (
