@@ -1,6 +1,7 @@
 import type {
   ConfigValues,
   RuntimeCatalogEntry,
+  SectionImplRef,
   SectionType,
 } from './types'
 
@@ -59,20 +60,45 @@ export function defaultsFromSchema(schema: Record<string, unknown>): ConfigValue
   return out
 }
 
-export function defaultConfigForType(
+/** Every catalog entry registered for `type` — the pool the variant-selector
+ * dropdown picks from. Order follows the catalog itself (backend's scan()
+ * order), so the first entry is a stable "default" when no impl is recorded
+ * yet (new node, or a canvas that predates the selector). */
+export function entriesForType(
   type: SectionType,
   catalog: RuntimeCatalogEntry[],
-): ConfigValues {
-  const entry = catalog.find((e) => e.type === type)
-  if (!entry) return {}
-  return defaultsFromSchema(entry.param_schema)
+): RuntimeCatalogEntry[] {
+  return catalog.filter((e) => e.type === type)
 }
 
+/** Resolve one catalog entry for `type`, preferring an exact `(module,
+ * name)` match when `impl` is given, falling back to the first entry for
+ * that type otherwise. The fallback covers both a canvas node that
+ * predates the variant selector (no `impl` recorded) and one whose
+ * recorded impl no longer exists in the catalog (deleted user_section) —
+ * same "never leave the UI with nothing to render" contract either way. */
 export function findEntry(
   type: SectionType,
   catalog: RuntimeCatalogEntry[],
+  impl?: SectionImplRef,
 ): RuntimeCatalogEntry | undefined {
+  if (impl) {
+    const exact = catalog.find(
+      (e) => e.type === type && e.module === impl.module && e.name === impl.name,
+    )
+    if (exact) return exact
+  }
   return catalog.find((e) => e.type === type)
+}
+
+export function defaultConfigForType(
+  type: SectionType,
+  catalog: RuntimeCatalogEntry[],
+  impl?: SectionImplRef,
+): ConfigValues {
+  const entry = findEntry(type, catalog, impl)
+  if (!entry) return {}
+  return defaultsFromSchema(entry.param_schema)
 }
 
 /**

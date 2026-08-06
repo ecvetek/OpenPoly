@@ -98,3 +98,30 @@ def section_config(section_type: str) -> dict[str, Any]:
             cfg = node.get("config")
             return dict(cfg) if isinstance(cfg, dict) else {}
     return {}
+
+
+def section_impl(section_type: str) -> tuple[str, str] | None:
+    """The ``(module, name)`` of the first canvas node of ``section_type``'s
+    recorded implementation choice, or ``None`` when no template is
+    persisted, no such node exists, or the node predates the variant
+    selector (no ``impl`` field) — the back-compat path for every canvas
+    saved before this feature shipped. Caller falls back to the hardcoded
+    default section class in that case, same shape as ``section_config``'s
+    own "no node → {} → caller uses Config defaults" contract.
+    """
+    template = load_template()
+    if not template:
+        return None
+    nodes = template.get("nodes")
+    if not isinstance(nodes, list):
+        return None
+    for node in nodes:
+        if isinstance(node, dict) and node.get("sectionType") == section_type:
+            impl = node.get("impl")
+            if not isinstance(impl, dict):
+                return None
+            module, name = impl.get("module"), impl.get("name")
+            if isinstance(module, str) and isinstance(name, str) and module and name:
+                return module, name
+            return None
+    return None

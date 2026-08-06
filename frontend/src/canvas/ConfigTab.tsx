@@ -15,8 +15,9 @@ import { useMemo } from 'react'
 
 import { AnalyzerTestRow } from '../sections/analyzer/AnalyzerTestRow'
 import { TestConnectionRow } from '../sections/news_source/TestConnectionRow'
-import { findEntry } from '../sections/catalog'
+import { entriesForType, findEntry } from '../sections/catalog'
 import { useCatalogStore } from '../sections/catalogStore'
+import { ImplPicker } from './ImplPicker'
 import { RefWidget } from './RefWidget'
 import { TagListWidget } from './TagListWidget'
 import { useCanvasStore, type SectionNodeType } from './store'
@@ -71,15 +72,20 @@ function buildUiSchema(node: SchemaNode, defs: Record<string, SchemaNode>): UiSc
 
 export function ConfigTab({ node }: { node: SectionNodeType }) {
   const updateBulk = useCanvasStore((s) => s.updateNodeConfigBulk)
+  const updateImpl = useCanvasStore((s) => s.updateNodeImpl)
   const entries = useCatalogStore((s) => s.entries)
   const source = useCatalogStore((s) => s.source)
   const status = useCatalogStore((s) => s.status)
   const error = useCatalogStore((s) => s.error)
 
   const sectionType = node.data.sectionType
-  const entry = useMemo(
-    () => findEntry(sectionType, entries),
+  const implOptions = useMemo(
+    () => entriesForType(sectionType, entries),
     [entries, sectionType],
+  )
+  const entry = useMemo(
+    () => findEntry(sectionType, entries, node.data.impl),
+    [entries, sectionType, node.data.impl],
   )
 
   const obsoleteFields = useMemo(() => {
@@ -121,6 +127,15 @@ export function ConfigTab({ node }: { node: SectionNodeType }) {
         </div>
       ) : (
         <>
+          {implOptions.length > 1 && (
+            <ImplPicker
+              entries={implOptions}
+              selected={entry}
+              onChange={(next) =>
+                updateImpl(node.id, { module: next.module, name: next.name })
+              }
+            />
+          )}
           <div className="openpoly-rjsf">
             <Form
               schema={entry.param_schema as RJSFSchema}

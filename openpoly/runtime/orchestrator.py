@@ -492,6 +492,31 @@ _singleton: PipelineOrchestrator | None = None
 _C = TypeVar("_C", bound=BaseModel)
 
 
+def _resolve_section_class(section_type: str, default_cls: type) -> type:
+    """Resolve the canvas-recorded implementation for ``section_type``,
+    falling back to ``default_cls`` when no canvas node exists, the node
+    predates the variant selector (no ``impl`` field), or the recorded impl
+    can no longer be resolved (deleted user_section, renamed class, failed
+    contract test). Never blocks startup — same "a stale or hand-broken
+    canvas can never block startup" stance as ``_canvas_config`` below."""
+    from openpoly.runtime.canvas_store import section_impl
+    from openpoly.sections._registry import resolve_impl
+
+    rec = section_impl(section_type)
+    if rec is None:
+        return default_cls
+    try:
+        return resolve_impl(section_type, *rec)
+    except Exception as exc:  # noqa: BLE001 — a bad canvas impl choice must not break startup
+        logger.warning(
+            "canvas impl %r for section %r unresolvable (%s); using default",
+            rec,
+            section_type,
+            exc,
+        )
+        return default_cls
+
+
 def _canvas_config(config_cls: type[_C], section_type: str) -> _C:
     """Build a section Config from the persisted canvas node config, falling
     back to the Config's own defaults on a missing node or invalid values — so
@@ -523,30 +548,38 @@ def get_orchestrator() -> PipelineOrchestrator:
             embedding_log,
             entry_log,
         )
-        from openpoly.sections.analyzer.llm_v0 import (
-            LLMAnalyzerConfig,
-            LLMAnalyzerV0,
-        )
-        from openpoly.sections.embedding.minilm_v0 import (
-            EmbeddingFilterConfig,
-            EmbeddingFilterV0,
-        )
-        from openpoly.sections.entry.edge_threshold_v0 import (
-            EdgeThresholdConfig,
-            EdgeThresholdEntryV0,
-        )
+        from openpoly.sections.analyzer.llm_v0 import LLMAnalyzerV0
+        from openpoly.sections.embedding.minilm_v0 import EmbeddingFilterV0
+        from openpoly.sections.entry.edge_threshold_v0 import EdgeThresholdEntryV0
 
-        _singleton = PipelineOrchestrator(
-            embedding_section=EmbeddingFilterV0(_canvas_config(EmbeddingFilterConfig, "embedding")),
-            analyzer_section=LLMAnalyzerV0(_canvas_config(LLMAnalyzerConfig, "analyzer")),
-            entry_section=EdgeThresholdEntryV0(
-                _canvas_config(EdgeThresholdConfig, "entry"),
+        # canvas variant selector: resolve the canvas-recorded impl per
+        # section type, falling back to the hardcoded defaults above for a
+        # canvas that predates the selector or names an unresolvable impl.
+        embedding_cls = _resolve_section_class("embedding", EmbeddingFilterV0)
+        analyzer_cls = _resolve_section_class("analyzer", LLMAnalyzerV0)
+        entry_cls = _resolve_section_class("entry", EdgeThresholdEntryV0)
+
+        # portfolio_provider isn't part of the Section Protocol (only
+        # Config/run() are), so a resolved entry impl isn't guaranteed to
+        # accept it — fall back to the no-kwarg constructor rather than
+        # crashing startup on a well-formed but differently-shaped impl.
+        entry_config = _canvas_config(entry_cls.Config, "entry")
+        try:
+            entry_section = entry_cls(
+                entry_config,
                 # Lazy: executor's portfolio is configured *after* the
                 # orchestrator (and entry section) is built, so we hand
                 # entry a closure it calls per run() instead of the store
                 # itself. Returns None until executor.configure_paper() lands.
                 portfolio_provider=lambda: executor.portfolio,
-            ),
+            )
+        except TypeError:
+            entry_section = entry_cls(entry_config)
+
+        _singleton = PipelineOrchestrator(
+            embedding_section=embedding_cls(_canvas_config(embedding_cls.Config, "embedding")),
+            analyzer_section=analyzer_cls(_canvas_config(analyzer_cls.Config, "analyzer")),
+            entry_section=entry_section,
             executor=executor,
             embedding_log_store=embedding_log,
             analyzer_log_store=analyzer_log,

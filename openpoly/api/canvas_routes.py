@@ -192,21 +192,30 @@ async def _apply_canvas_reload(
     from openpoly.runtime import orchestrator as orch_mod
     from openpoly.runtime.exit_monitor import exit_monitor
 
-    def _section_config(template: dict | None, section_type: str) -> dict:
+    def _section_node(template: dict | None, section_type: str) -> tuple[dict, dict | None]:
+        """(config, impl) of the first node of ``section_type``. ``impl`` is
+        included in the comparison below so that switching which
+        implementation a node runs — the canvas variant selector — triggers
+        a hot-reload even when the config dict itself is unchanged (e.g.
+        switching to another impl's defaults that happen to match)."""
         if template is None:
-            return {}
+            return {}, None
         for node in template.get("nodes") or []:
             if isinstance(node, dict) and node.get("sectionType") == section_type:
                 cfg = node.get("config")
-                return dict(cfg) if isinstance(cfg, dict) else {}
-        return {}
+                impl = node.get("impl")
+                return (
+                    dict(cfg) if isinstance(cfg, dict) else {},
+                    dict(impl) if isinstance(impl, dict) else None,
+                )
+        return {}, None
 
     # Sections owned by the orchestrator.
     orchestrator_section_types = ("embedding", "analyzer", "entry")
     for stype in orchestrator_section_types:
-        old_cfg = _section_config(old_template, stype)
-        new_cfg = _section_config(new_template, stype)
-        if old_cfg == new_cfg:
+        old_node = _section_node(old_template, stype)
+        new_node = _section_node(new_template, stype)
+        if old_node == new_node:
             continue
         try:
             new_inst = _build_section(stype)
@@ -237,8 +246,8 @@ async def _apply_canvas_reload(
                 logger.exception("canvas reload: failed to reconfigure embedding manager")
 
     # Exit section is held by exit_monitor, not orchestrator.
-    old_exit = _section_config(old_template, "exit")
-    new_exit = _section_config(new_template, "exit")
+    old_exit = _section_node(old_template, "exit")
+    new_exit = _section_node(new_template, "exit")
     if old_exit != new_exit:
         try:
             new_exit_inst = _build_section("exit")
@@ -253,42 +262,43 @@ async def _apply_canvas_reload(
 
 
 def _build_section(section_type: str):
-    """Build a fresh section instance from the canvas-resolved config."""
-    from openpoly.runtime.orchestrator import _canvas_config
+    """Build a fresh section instance from the canvas-resolved impl + config.
+
+    Resolves the concrete class via ``_resolve_section_class`` (falling back
+    to the same hardcoded default ``get_orchestrator()`` uses for a canvas
+    that predates the variant selector or names an unresolvable impl), then
+    builds it from that class's own ``Config`` — generic over whichever impl
+    was actually chosen rather than hardcoded per section_type.
+    """
+    from openpoly.runtime.orchestrator import _canvas_config, _resolve_section_class
 
     if section_type == "embedding":
-        from openpoly.sections.embedding.minilm_v0 import (
-            EmbeddingFilterConfig,
-            EmbeddingFilterV0,
-        )
+        from openpoly.sections.embedding.minilm_v0 import EmbeddingFilterV0
 
-        return EmbeddingFilterV0(_canvas_config(EmbeddingFilterConfig, "embedding"))
+        cls = _resolve_section_class("embedding", EmbeddingFilterV0)
+        return cls(_canvas_config(cls.Config, "embedding"))
     if section_type == "analyzer":
-        from openpoly.sections.analyzer.llm_v0 import (
-            LLMAnalyzerConfig,
-            LLMAnalyzerV0,
-        )
+        from openpoly.sections.analyzer.llm_v0 import LLMAnalyzerV0
 
-        return LLMAnalyzerV0(_canvas_config(LLMAnalyzerConfig, "analyzer"))
+        cls = _resolve_section_class("analyzer", LLMAnalyzerV0)
+        return cls(_canvas_config(cls.Config, "analyzer"))
     if section_type == "entry":
         from openpoly.execution import executor
-        from openpoly.sections.entry.edge_threshold_v0 import (
-            EdgeThresholdConfig,
-            EdgeThresholdEntryV0,
-        )
+        from openpoly.sections.entry.edge_threshold_v0 import EdgeThresholdEntryV0
 
+        cls = _resolve_section_class("entry", EdgeThresholdEntryV0)
+        config = _canvas_config(cls.Config, "entry")
         # Mirror orchestrator's portfolio_provider closure — entry asks for
         # the live PortfolioStore lazily because the executor's portfolio is
-        # attached after sections are constructed.
-        return EdgeThresholdEntryV0(
-            _canvas_config(EdgeThresholdConfig, "entry"),
-            portfolio_provider=lambda: executor.portfolio,
-        )
+        # attached after sections are constructed. Not part of the Section
+        # Protocol, so a resolved impl isn't guaranteed to accept it.
+        try:
+            return cls(config, portfolio_provider=lambda: executor.portfolio)
+        except TypeError:
+            return cls(config)
     if section_type == "exit":
-        from openpoly.sections.exit.threshold_v0 import (
-            ThresholdExitConfig,
-            ThresholdExitV0,
-        )
+        from openpoly.sections.exit.threshold_v0 import ThresholdExitV0
 
-        return ThresholdExitV0(_canvas_config(ThresholdExitConfig, "exit"))
+        cls = _resolve_section_class("exit", ThresholdExitV0)
+        return cls(_canvas_config(cls.Config, "exit"))
     raise ValueError(f"unknown section_type: {section_type}")

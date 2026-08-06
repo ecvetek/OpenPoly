@@ -26,3 +26,8 @@ export type RuntimeCatalogEntry = {
   param_schema: Record<string, unknown>
   source: 'builtin' | 'user'
 }
+
+// Identifies one catalog entry's concrete impl class — the (module, name)
+// pair a canvas node records to say "run THIS implementation" once more
+// than one exists for its sectionType (the variant selector).
+export type SectionImplRef = { module: string; name: string }

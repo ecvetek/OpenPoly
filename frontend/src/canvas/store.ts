@@ -10,9 +10,9 @@ import {
   type XYPosition,
 } from '@xyflow/react'
 import { create } from 'zustand'
-import { defaultConfigForType } from '../sections/catalog'
+import { defaultConfigForType, entriesForType } from '../sections/catalog'
 import { useCatalogStore } from '../sections/catalogStore'
-import type { ConfigValues, SectionType } from '../sections/types'
+import type { ConfigValues, SectionImplRef, SectionType } from '../sections/types'
 import { isValidConnection } from './edgeRules'
 import { SEED_TEMPLATE } from './seedTemplate'
 import {
@@ -27,6 +27,10 @@ import {
 export type SectionNodeData = {
   sectionType: SectionType
   config: ConfigValues
+  // Which catalog entry this node runs, when more than one exists for its
+  // sectionType. Absent on nodes loaded from a canvas that predates the
+  // variant selector — findEntry()'s first-match fallback covers that.
+  impl?: SectionImplRef
 } & Record<string, unknown>
 
 export type SectionNodeType = Node<SectionNodeData, 'section'>
@@ -78,6 +82,10 @@ type CanvasState = {
   setSelectedNodeId: (id: string | null) => void
   updateNodeConfig: (id: string, key: string, value: ConfigValue) => void
   updateNodeConfigBulk: (id: string, config: ConfigValues) => void
+  // Switch which catalog impl a node runs. Resets the node's config to the
+  // new impl's schema defaults — old values can't safely carry over across
+  // a Config shape change, so this deliberately doesn't try to merge them.
+  updateNodeImpl: (id: string, impl: SectionImplRef) => void
   setTemplateName: (name: string) => void
   serialize: () => Template
   loadTemplate: (template: Template) => void
@@ -126,7 +134,7 @@ function templateToCanvas(t: Template): {
     id: n.id,
     type: 'section',
     position: n.position,
-    data: { sectionType: n.sectionType, config: n.config },
+    data: { sectionType: n.sectionType, config: n.config, impl: n.impl },
   }))
   const edges: Edge[] = t.edges.map((e, i) => ({
     id: `e-${e.source}-${e.target}-${i}`,
@@ -243,6 +251,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       const s = get()
       if (s.nodes.some((n) => n.data.sectionType === type)) return
       const entries = useCatalogStore.getState().entries
+      // Default a freshly-added node to the first catalog entry for its
+      // type, matching the implicit behavior every node had before the
+      // variant selector existed — a brand-new node always carries an
+      // explicit impl rather than relying on the backend's fallback.
+      const first = entriesForType(type, entries)[0]
+      const impl: SectionImplRef | undefined = first
+        ? { module: first.module, name: first.name }
+        : undefined
       const id = newId()
       set({
         nodes: [
@@ -253,7 +269,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
             position,
             data: {
               sectionType: type,
-              config: defaultConfigForType(type, entries),
+              config: defaultConfigForType(type, entries, impl),
+              impl,
             },
           },
         ],
@@ -283,6 +300,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       }))
       scheduleAutosave()
     },
+    updateNodeImpl: (id, impl) => {
+      const entries = useCatalogStore.getState().entries
+      set((s) => ({
+        nodes: s.nodes.map((n) => {
+          if (n.id !== id) return n
+          const config = defaultConfigForType(n.data.sectionType, entries, impl)
+          return { ...n, data: { ...n.data, impl, config } }
+        }),
+      }))
+      scheduleAutosave()
+    },
     setTemplateName: (name) => {
       set({ templateName: name })
       scheduleAutosave()
@@ -298,6 +326,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
           sectionType: n.data.sectionType,
           position: n.position,
           config: n.data.config,
+          ...(n.data.impl ? { impl: n.data.impl } : {}),
         })),
         edges: s.edges.map((e) => ({ source: e.source, target: e.target })),
       }

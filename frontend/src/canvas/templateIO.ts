@@ -3,7 +3,7 @@ import {
   MOCK_RUNTIME_CATALOG,
   SECTION_ORDER,
 } from '../sections/catalog'
-import type { ConfigValues, SectionType } from '../sections/types'
+import type { ConfigValues, SectionImplRef, SectionType } from '../sections/types'
 
 export const TEMPLATE_VERSION = 3
 export const STORAGE_KEY = 'openpoly.template.draft'
@@ -13,6 +13,12 @@ export type TemplateNode = {
   sectionType: SectionType
   position: { x: number; y: number }
   config: ConfigValues
+  // Which of the (possibly several) catalog entries for `sectionType` this
+  // node runs. Optional and purely additive — a canvas saved before the
+  // variant selector shipped has no `impl` field at all, and the backend's
+  // `_resolve_section_class` falls back to its hardcoded default in that
+  // case, so no TEMPLATE_VERSION bump / migration step is needed here.
+  impl?: SectionImplRef
 }
 
 export type TemplateEdge = {

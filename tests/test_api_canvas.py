@@ -334,3 +334,118 @@ async def test_canvas_reload_skips_reconfigure_when_embedding_config_unchanged(
     await _apply_canvas_reload(template, template)
 
     assert called is False
+
+
+# ---------- hot-reload: canvas variant selector ----------
+
+
+def _entry_node(config: dict | None = None, impl: dict | None = None) -> dict:
+    node: dict = {"id": "entry-1", "sectionType": "entry", "config": config or {}}
+    if impl is not None:
+        node["impl"] = impl
+    return {"version": 1, "nodes": [node]}
+
+
+def _analyzer_impl_node(impl: dict | None, config: dict | None = None) -> dict:
+    node: dict = {"id": "a1", "sectionType": "analyzer", "config": config or {}}
+    if impl is not None:
+        node["impl"] = impl
+    return {"version": 1, "nodes": [node]}
+
+
+def test_build_section_without_impl_field_uses_hardcoded_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canvas node with no ``impl`` field (every canvas saved before the
+    variant selector shipped) must still build the original hardcoded
+    default class — the back-compat path."""
+    from openpoly.api.canvas_routes import _build_section
+    from openpoly.runtime.canvas_store import save_template
+    from openpoly.sections.entry.edge_threshold_v0 import EdgeThresholdEntryV0
+
+    monkeypatch.setenv("OPENPOLY_CANVAS_STORE", str(tmp_path / "canvas.json"))
+    save_template(_entry_node())
+
+    section = _build_section("entry")
+    assert isinstance(section, EdgeThresholdEntryV0)
+
+
+def test_build_section_with_valid_impl_builds_alternate_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canvas node naming a valid alternate impl builds THAT class, not
+    the hardcoded default — the actual variant-selection behavior."""
+    from openpoly.api.canvas_routes import _build_section
+    from openpoly.runtime.canvas_store import save_template
+
+    monkeypatch.setenv("OPENPOLY_CANVAS_STORE", str(tmp_path / "canvas.json"))
+    save_template(
+        _analyzer_impl_node(
+            impl={
+                "module": "tests.fixtures.dummies.analyzer.good_v0",
+                "name": "DummyGoodAnalyzer",
+            }
+        )
+    )
+
+    section = _build_section("analyzer")
+    assert type(section).__name__ == "DummyGoodAnalyzer"
+
+
+def test_build_section_with_unresolvable_impl_falls_back_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A recorded impl that can no longer be resolved (deleted user_section,
+    renamed class) must fall back to the hardcoded default rather than
+    crashing the canvas reload / pipeline startup, and log a warning."""
+    import logging
+
+    from openpoly.api.canvas_routes import _build_section
+    from openpoly.runtime.canvas_store import save_template
+    from openpoly.sections.analyzer.llm_v0 import LLMAnalyzerV0
+
+    caplog.set_level(logging.WARNING, logger="openpoly.runtime.orchestrator")
+    monkeypatch.setenv("OPENPOLY_CANVAS_STORE", str(tmp_path / "canvas.json"))
+    save_template(
+        _analyzer_impl_node(
+            impl={"module": "openpoly.sections.analyzer.does_not_exist", "name": "Nope"}
+        )
+    )
+
+    section = _build_section("analyzer")
+    assert isinstance(section, LLMAnalyzerV0)
+    assert "unresolvable" in caplog.text
+
+
+async def test_canvas_reload_hot_reloads_on_impl_change_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Switching only which impl a node runs (config dict unchanged) must
+    still trigger a hot-reload — the diff has to compare impl, not just
+    config, or picking a new variant from the canvas dropdown would
+    silently do nothing until the next restart."""
+    from openpoly.api.canvas_routes import _apply_canvas_reload
+    from openpoly.runtime import orchestrator as orch_mod
+    from openpoly.runtime.canvas_store import save_template
+
+    monkeypatch.setenv("OPENPOLY_CANVAS_STORE", str(tmp_path / "canvas.json"))
+
+    old_template = _analyzer_impl_node(impl=None)
+    new_template = _analyzer_impl_node(
+        impl={
+            "module": "tests.fixtures.dummies.analyzer.good_v0",
+            "name": "DummyGoodAnalyzer",
+        }
+    )
+    save_template(new_template)
+
+    calls: list[str] = []
+
+    async def fake_replace_section(section_type: str, new_inst: object) -> None:
+        calls.append(section_type)
+
+    monkeypatch.setattr(orch_mod, "replace_section", fake_replace_section)
+
+    await _apply_canvas_reload(old_template, new_template)
+
+    assert "analyzer" in calls

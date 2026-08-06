@@ -71,7 +71,7 @@ function InspectorPanel({
   const sectionType = node.data.sectionType
   const display = TYPE_DISPLAY[sectionType]
   const accent = TYPE_ACCENT[sectionType]
-  const entry = findEntry(sectionType, entries)
+  const entry = findEntry(sectionType, entries, node.data.impl)
   const tabs = INSPECTOR_TABS[sectionType]
 
   const [activeKey, setActiveKey] = useState<string>(tabs[0]?.key ?? 'config')

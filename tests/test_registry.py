@@ -7,7 +7,7 @@ import logging
 import pytest
 
 from openpoly.sections._contract_test import ContractFailure, validate
-from openpoly.sections._registry import scan
+from openpoly.sections._registry import resolve_impl, scan
 
 
 FIXTURE_PKG = "tests.fixtures.dummies"
@@ -104,3 +104,31 @@ def test_validate_bad_capability_raises() -> None:
 
     with pytest.raises(ContractFailure, match="unknown capability"):
         validate(Bad)
+
+
+def test_resolve_impl_returns_the_class() -> None:
+    cls = resolve_impl("analyzer", "tests.fixtures.dummies.analyzer.good_v0", "DummyGoodAnalyzer")
+    assert cls.__name__ == "DummyGoodAnalyzer"
+    assert cls.SECTION_TYPE == "analyzer"
+
+
+def test_resolve_impl_bad_module_raises() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        resolve_impl("analyzer", "tests.fixtures.dummies.analyzer.does_not_exist", "X")
+
+
+def test_resolve_impl_bad_class_name_raises() -> None:
+    with pytest.raises(AttributeError):
+        resolve_impl("analyzer", "tests.fixtures.dummies.analyzer.good_v0", "NotAClass")
+
+
+def test_resolve_impl_section_type_mismatch_raises() -> None:
+    with pytest.raises(ContractFailure, match="SECTION_TYPE"):
+        resolve_impl("entry", "tests.fixtures.dummies.analyzer.good_v0", "DummyGoodAnalyzer")
+
+
+def test_resolve_impl_contract_test_failure_raises() -> None:
+    with pytest.raises(ContractFailure, match="CONTRACT_TEST failed"):
+        resolve_impl(
+            "analyzer", "tests.fixtures.dummies.analyzer.contract_fail", "DummyContractFail"
+        )

@@ -12,7 +12,7 @@ import type { SectionNodeType } from './store'
 export function SectionNode({ data, selected }: NodeProps<SectionNodeType>) {
   const display = TYPE_DISPLAY[data.sectionType]
   const entries = useCatalogStore((s) => s.entries)
-  const entry = findEntry(data.sectionType, entries)
+  const entry = findEntry(data.sectionType, entries, data.impl)
   const hasInput =
     data.sectionType === 'entry' ||
     data.sectionType === 'embedding' ||

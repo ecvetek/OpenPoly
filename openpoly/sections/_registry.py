@@ -64,6 +64,30 @@ def _extract_section_classes(module_name: str) -> list[type[Any]]:
     return out
 
 
+def resolve_impl(section_type: str, module: str, name: str) -> type[Any]:
+    """Resolve a concrete section class from a canvas-recorded (module, name)
+    pair — the dynamic counterpart to the hardcoded imports orchestrator.py /
+    canvas_routes.py used before the canvas variant selector existed.
+
+    Runs the same ``validate()`` (protocol conformance + CONTRACT_TEST) that
+    ``scan()`` already runs on every catalog entry, so a dynamically-resolved
+    class gets the identical safety net — no separate validation path to keep
+    in sync. Raises ``ContractFailure`` (bad SECTION_TYPE, failed contract) or
+    ``ModuleNotFoundError``/``AttributeError`` (module/class no longer exists,
+    e.g. a deleted user_section) on any failure; callers decide the fallback,
+    mirroring ``_canvas_config``'s "a stale canvas must never block startup"
+    stance rather than swallowing errors here.
+    """
+    mod = importlib.import_module(module)
+    cls = getattr(mod, name)
+    if not isinstance(cls, type):
+        raise ContractFailure(f"{module}.{name} is not a class")
+    if getattr(cls, "SECTION_TYPE", None) != section_type:
+        raise ContractFailure(f"{module}.{name}.SECTION_TYPE != {section_type!r}")
+    validate(cls)
+    return cls
+
+
 def scan(
     packages: Iterable[tuple[str, str]] = DEFAULT_PACKAGES,
 ) -> list[CatalogEntry]:
