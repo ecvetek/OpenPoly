@@ -27,7 +27,20 @@ from openpoly.sections._base import SectionInput, SectionOutput
 
 
 Side = Literal["yes", "no"]
-Trigger = Literal["take_profit", "stop_loss", "peak_drawdown"]
+# scale_out / post_scale_out_stop / final_take_profit are produced only by
+# exit.scale_out_v0.ScaleOutExitV0, not by this module — added here because
+# CloseIntent.trigger is a shared, imported type (see MarkedPosition's
+# ``scaled_out`` field below for the same reasoning). Literal is a
+# static-typing device only, so widening it is a no-op for ThresholdExitV0,
+# which only ever produces the original three values.
+Trigger = Literal[
+    "take_profit",
+    "stop_loss",
+    "peak_drawdown",
+    "scale_out",
+    "post_scale_out_stop",
+    "final_take_profit",
+]
 
 
 @dataclass(frozen=True)
@@ -45,6 +58,12 @@ class MarkedPosition:
     qty: float
     current_price: float
     peak_price: float
+    # True once this position has already taken a partial scale-out sell.
+    # Only exit.scale_out_v0.ScaleOutExitV0 reads this — ThresholdExitV0
+    # ignores it, so this is a no-op for the baseline exit section. Injected
+    # by ExitMonitor from its own per-position tracking (mirrors peak_price),
+    # not read from the DB directly — see ExitMonitor.bootstrap_scaled_out.
+    scaled_out: bool = False
 
 
 @dataclass(frozen=True)

@@ -36,6 +36,7 @@ class _PaperLike(Protocol):
         close_reason,
         ts: float,
         trigger: str | None = None,
+        qty: float | None = None,
     ) -> ExecResult: ...
 
 
@@ -48,6 +49,7 @@ class _LiveLike(Protocol):
         close_reason,
         ts: float,
         trigger: str | None = None,
+        qty: float | None = None,
     ) -> ExecResult: ...
     def get_collateral_balance_raw(self) -> int | None: ...
 
@@ -119,12 +121,15 @@ class ExecutorDispatcher:
         close_reason,
         ts: float,
         trigger: str | None = None,
+        qty: float | None = None,
     ) -> ExecResult:
         if runtime_state.exec_mode == "live":
             if self._live is None:
                 logger.warning("dispatch sell: live mode but live executor unconfigured")
                 return ExecResult.skip("live_not_ready")
             return self._live.execute_sell(
-                position, close_reason=close_reason, ts=ts, trigger=trigger
+                position, close_reason=close_reason, ts=ts, trigger=trigger, qty=qty
             )
-        return self._paper.execute_sell(position, close_reason=close_reason, ts=ts, trigger=trigger)
+        return self._paper.execute_sell(
+            position, close_reason=close_reason, ts=ts, trigger=trigger, qty=qty
+        )

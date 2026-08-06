@@ -43,10 +43,14 @@ from openpoly.runtime.exit_monitor import exit_monitor
 from openpoly.runtime.settlement_monitor import settlement_monitor
 from openpoly.runtime import reconciliation_monitor as _recon_mod
 from openpoly.runtime.reconciliation_monitor import ReconciliationMonitor
-from openpoly.runtime.orchestrator import _canvas_config, get_orchestrator
+from openpoly.runtime.orchestrator import (
+    _canvas_config,
+    _resolve_section_class,
+    get_orchestrator,
+)
 from openpoly.sections._registry import CatalogEntry, scan
 from openpoly.sections.embedding.minilm_v0 import EmbeddingFilterConfig
-from openpoly.sections.exit.threshold_v0 import ThresholdExitConfig, ThresholdExitV0
+from openpoly.sections.exit.threshold_v0 import ThresholdExitV0
 from openpoly.sections.news_source.tradingnews_ws import TradingNewsWSConfig
 from openpoly.wallet.runtime_state import runtime_state
 
@@ -168,8 +172,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # silently ignores anything saved in the canvas UI (take_profit_pct,
     # stop_loss_pct, peak_drawdown_pct, etc.) until the operator happens to
     # re-save the exit node while the process is already running.
-    exit_cfg = _canvas_config(ThresholdExitConfig, "exit")
-    await exit_monitor.replace_exit_section(ThresholdExitV0(exit_cfg))
+    # canvas variant selector: resolve the canvas-recorded exit impl at
+    # startup too, not just on a later hot-reload PUT — otherwise a restart
+    # after picking a non-default impl on the canvas would silently boot back
+    # onto ThresholdExitV0 until the operator happened to re-save the canvas
+    # while the process was already running (same class of staleness bug the
+    # comment above describes for config values).
+    exit_cls = _resolve_section_class("exit", ThresholdExitV0)
+    exit_cfg = _canvas_config(exit_cls.Config, "exit")
+    await exit_monitor.replace_exit_section(exit_cls(exit_cfg))
     # Configure with its own PortfolioStore, then start ticking.
     exit_monitor.configure(PortfolioStore(get_session_factory()))
     # Rebuild each open position's true historical peak price from
@@ -178,6 +189,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # instead of its real high, disabling drawdown-based stop protection
     # until a new peak organically forms.
     exit_monitor.bootstrap_peaks(get_session_factory())
+    # Same restart-staleness concern as bootstrap_peaks, for the scale-out
+    # exit's "already took its partial profit" flag — see
+    # ExitMonitor.bootstrap_scaled_out's docstring.
+    exit_monitor.bootstrap_scaled_out()
     await exit_monitor.start()
     # Settlement monitor (slice E) — closes resolved-market positions at 0/1
     # directly via PortfolioStore (no broker tx). Independent from exit_monitor

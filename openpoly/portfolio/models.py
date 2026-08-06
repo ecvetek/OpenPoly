@@ -24,6 +24,9 @@ CloseReason = Literal[
     "kill_switch",
     "manual",
     "reconciled",
+    "scale_out",
+    "post_scale_out_stop",
+    "final_take_profit",
 ]
 
 

@@ -113,8 +113,15 @@ class PaperExecutor:
         close_reason: CloseReason,
         ts: float,
         trigger: str | None = None,
+        qty: float | None = None,
     ) -> ExecResult:
         """Close a held position at the level-1 bid of its own token's book.
+
+        ``qty`` requests a partial sell (e.g. a scale-out) — defaults to the
+        full remaining ``position.qty`` for every existing caller (settlement,
+        manual close, the baseline exit section). Still capped by
+        ``position.qty`` so a caller can never request more than is actually
+        held.
 
         Reads ``position.token_id`` directly, so a close never depends on the
         market still being in the live catalog. Skips when the order book /
@@ -135,13 +142,14 @@ class PaperExecutor:
             return ExecResult.skip("no_bid_liquidity")
 
         bid_price, bid_size = book.bids[0]
-        qty = min(position.qty, bid_size)
-        if qty * bid_price < MIN_FILL_USD:
+        requested = min(qty, position.qty) if qty is not None else position.qty
+        fill_qty = min(requested, bid_size)
+        if fill_qty * bid_price < MIN_FILL_USD:
             return ExecResult.skip("dust")
 
         self._store.record_sell(
             position.position_id,
-            sold_qty=qty,
+            sold_qty=fill_qty,
             sell_price=bid_price,
             ts=ts,
             close_reason=close_reason,
@@ -151,7 +159,7 @@ class PaperExecutor:
             "sell filled: %s %s qty=%.4f/%.4f @ %.4f (position %d, %s)",
             position.market_id,
             position.side,
-            qty,
+            fill_qty,
             position.qty,
             bid_price,
             position.position_id,
@@ -159,6 +167,6 @@ class PaperExecutor:
         )
         return ExecResult.ok(
             price=bid_price,
-            qty=qty,
+            qty=fill_qty,
             position_id=position.position_id,
         )

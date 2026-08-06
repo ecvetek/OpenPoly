@@ -22,6 +22,7 @@ from openpoly.markets.store import MarketStore
 from openpoly.portfolio import HeldPosition, PortfolioStore
 from openpoly.runtime.exit_monitor import ExitMonitor
 from openpoly.runtime.section_log import ExitDecision, exit_log
+from openpoly.sections.exit.scale_out_v0 import ScaleOutExitConfig, ScaleOutExitV0
 from openpoly.sections.exit.threshold_v0 import (
     ThresholdExitConfig,
     ThresholdExitV0,
@@ -96,18 +97,22 @@ class _FakeExecutor:
         close_reason: str,
         ts: float,
         trigger: str | None,
+        qty: float | None = None,
     ) -> ExecResult:
         self.calls.append(
             {
                 "position_id": position.position_id,
                 "close_reason": close_reason,
                 "trigger": trigger,
+                "qty": qty,
             }
         )
         if self._exc is not None:
             raise self._exc
         return self._result or ExecResult.ok(
-            price=0.55, qty=position.qty, position_id=position.position_id
+            price=0.55,
+            qty=(qty if qty is not None else position.qty),
+            position_id=position.position_id,
         )
 
 
@@ -129,11 +134,16 @@ class _BlockingExecutor:
         close_reason: str,
         ts: float,
         trigger: str | None,
+        qty: float | None = None,
     ) -> ExecResult:
         self.calls += 1
         self.started.set()
         self.release.wait(timeout=5)
-        return ExecResult.ok(price=0.55, qty=position.qty, position_id=position.position_id)
+        return ExecResult.ok(
+            price=0.55,
+            qty=(qty if qty is not None else position.qty),
+            position_id=position.position_id,
+        )
 
 
 def _monitor(portfolio: _FakePortfolio, executor: _FakeExecutor) -> ExitMonitor:
@@ -159,6 +169,7 @@ def test_take_profit_triggers_execute_sell() -> None:
             "position_id": 1,
             "close_reason": "take_profit",
             "trigger": "take_profit",
+            "qty": 20.0,  # ThresholdExitV0's CloseIntent.qty is always the full remaining qty
         }
     ]
     e = exit_log.entries()[0]
@@ -602,3 +613,180 @@ def test_bootstrap_peaks_no_snapshot_falls_back_to_entry(tmp_path) -> None:
     monitor.bootstrap_peaks(sf)
     # No snapshots after opened_at → peak defaults to avg_entry_price (0.40).
     assert monitor._peak[held.position_id] == pytest.approx(0.40)
+
+
+# ---------- scale-out exit: qty threading + _scaled_out lifecycle ----------
+
+
+def test_scale_out_fill_sets_scaled_out_and_keeps_peak_tracked() -> None:
+    """A scale-out fill (partial — the remainder stays open) must mark
+    self._scaled_out[position_id] and must NOT pop self._peak: the remainder
+    still needs peak tracking for its own peak_drawdown check."""
+    market_source_manager.store.set_order_books([_book("t1", bid=0.65)])
+    # ScaleOutExitConfig defaults: scale_out_trigger_pct=0.20, fraction=0.5.
+    # (0.65-0.40)/0.40 = 0.625 ≥ 0.20 → scale_out, qty = 20 * 0.5 = 10.
+    ex = _FakeExecutor(result=ExecResult.ok(price=0.65, qty=10.0, position_id=1))
+    monitor = ExitMonitor(
+        exit_section=ScaleOutExitV0(ScaleOutExitConfig()),
+        executor=ex,
+        tick_interval_seconds=3600,
+    )
+    monitor.configure(_FakePortfolio([_held(1, "t1", avg=0.40)]))  # qty=20
+    monitor._tick_once()
+
+    assert ex.calls[0]["trigger"] == "scale_out"
+    assert ex.calls[0]["qty"] == pytest.approx(10.0)
+    assert monitor._scaled_out[1] is True
+    assert 1 in monitor._peak  # NOT dropped — position is still open
+    e = exit_log.entries()[0]
+    assert e.verdict == "ok"
+    assert e.trigger == "scale_out"
+
+
+def test_scaled_out_position_evaluates_post_scale_out_rules() -> None:
+    """Once _scaled_out[position_id] is set, the section must be fed
+    MarkedPosition.scaled_out=True — proven by a return that would hold
+    under the pre-scale-out rules (no stop_loss at -2%) but closes under
+    the post-scale-out breakeven stop (default 0.0)."""
+    market_source_manager.store.set_order_books([_book("t1", bid=0.39)])  # -2.5%
+    remainder = HeldPosition(
+        position_id=1,
+        market_id="m1",
+        side="yes",
+        token_id="t1",
+        condition_id="0xm1",
+        qty=10.0,  # already reduced by a prior scale-out
+        avg_entry_price=0.40,
+        opened_at=1.0,
+    )
+    ex = _FakeExecutor(result=ExecResult.ok(price=0.39, qty=10.0, position_id=1))
+    monitor = ExitMonitor(
+        exit_section=ScaleOutExitV0(ScaleOutExitConfig()),
+        executor=ex,
+        tick_interval_seconds=3600,
+    )
+    monitor.configure(_FakePortfolio([remainder]))
+    monitor._scaled_out[1] = True  # simulate a scale-out that already happened
+
+    monitor._tick_once()
+
+    assert ex.calls[0]["trigger"] == "post_scale_out_stop"
+    assert ex.calls[0]["qty"] == pytest.approx(10.0)
+
+
+def test_post_scale_out_full_close_pops_both_peak_and_scaled_out() -> None:
+    """A full close of the (already scaled-out) remainder must pop BOTH
+    self._peak and self._scaled_out — the position is actually gone, so
+    neither should linger for a future position_id."""
+    market_source_manager.store.set_order_books([_book("t1", bid=0.39)])
+    remainder = HeldPosition(
+        position_id=1,
+        market_id="m1",
+        side="yes",
+        token_id="t1",
+        condition_id="0xm1",
+        qty=10.0,
+        avg_entry_price=0.40,
+        opened_at=1.0,
+    )
+    ex = _FakeExecutor(result=ExecResult.ok(price=0.39, qty=10.0, position_id=1))
+    monitor = ExitMonitor(
+        exit_section=ScaleOutExitV0(ScaleOutExitConfig()),
+        executor=ex,
+        tick_interval_seconds=3600,
+    )
+    monitor.configure(_FakePortfolio([remainder]))
+    monitor._scaled_out[1] = True
+    monitor._peak[1] = 0.50
+
+    monitor._tick_once()
+
+    assert 1 not in monitor._scaled_out
+    assert 1 not in monitor._peak
+
+
+def test_scaled_out_pruned_when_position_closes_via_other_path() -> None:
+    """A position that scaled-out and then closed via settlement / manual /
+    reconciliation (not this monitor) must have its _scaled_out entry
+    pruned by the same self-heal loop that already prunes _peak — otherwise
+    it leaks for the life of the process."""
+    monitor = ExitMonitor(
+        exit_section=ScaleOutExitV0(ScaleOutExitConfig()),
+        executor=_FakeExecutor(),
+        tick_interval_seconds=3600,
+    )
+    monitor.configure(_FakePortfolio([]))  # no open positions this sweep
+    monitor._scaled_out[42] = True  # stale — position 42 closed elsewhere
+    monitor._peak[42] = 0.60
+
+    monitor._tick_once()
+
+    assert 42 not in monitor._scaled_out
+    assert 42 not in monitor._peak
+
+
+def test_bootstrap_scaled_out_seeds_from_prior_scale_out_fill(tmp_path) -> None:
+    db_path = tmp_path / "openpoly_scaled_out.db"
+    engine = make_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    sf = make_session_factory(engine)
+
+    pf = PortfolioStore(sf)
+    held = pf.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="t1",
+        condition_id="0xm1",
+        qty=20.0,
+        price=0.40,
+        ts=100.0,
+        news_id="n1",
+    )
+    # Simulate a scale-out that already happened before this restart.
+    pf.record_sell(
+        held.position_id,
+        sold_qty=10.0,
+        sell_price=0.65,
+        ts=150.0,
+        close_reason="scale_out",
+        trigger="scale_out",
+    )
+
+    monitor = ExitMonitor(
+        exit_section=ScaleOutExitV0(ScaleOutExitConfig()),
+        executor=_FakeExecutor(),
+        tick_interval_seconds=3600,
+    )
+    monitor.configure(pf)
+    monitor.bootstrap_scaled_out()
+
+    assert monitor._scaled_out[held.position_id] is True
+
+
+def test_bootstrap_scaled_out_no_prior_fill_does_not_seed(tmp_path) -> None:
+    db_path = tmp_path / "openpoly_no_scaled_out.db"
+    engine = make_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    sf = make_session_factory(engine)
+
+    pf = PortfolioStore(sf)
+    held = pf.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="t1",
+        condition_id="0xm1",
+        qty=20.0,
+        price=0.40,
+        ts=100.0,
+        news_id="n1",
+    )
+
+    monitor = ExitMonitor(
+        exit_section=ScaleOutExitV0(ScaleOutExitConfig()),
+        executor=_FakeExecutor(),
+        tick_interval_seconds=3600,
+    )
+    monitor.configure(pf)
+    monitor.bootstrap_scaled_out()
+
+    assert held.position_id not in monitor._scaled_out

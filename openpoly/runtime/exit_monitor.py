@@ -54,6 +54,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TICK_INTERVAL_SECONDS = 30  # matches ThresholdExitConfig's own default
 TICK_EVENT_RING_MAXLEN = 200  # mirrors markets.manager.EVENT_RING_MAXLEN
+# Mirrors portfolio.store._QTY_EPS — same "close vs. reduce" epsilon
+# record_sell uses, applied here to decide whether a fill actually closed
+# the position (drop tracked state) or just reduced it (keep tracking).
+_QTY_EPS = 1e-6
 
 State = Literal["stopped", "running"]
 
@@ -96,7 +100,14 @@ class TickSummary:
         }
 
 
-_CLOSE_REASONS = ("stop_loss", "peak_drawdown", "take_profit")
+_CLOSE_REASONS = (
+    "stop_loss",
+    "peak_drawdown",
+    "take_profit",
+    "scale_out",
+    "post_scale_out_stop",
+    "final_take_profit",
+)
 
 
 class _ExitSection(Protocol):
@@ -115,6 +126,7 @@ class _Executor(Protocol):
         close_reason: str,
         ts: float,
         trigger: str | None,
+        qty: float | None = None,
     ) -> ExecResult: ...
 
 
@@ -150,6 +162,13 @@ class ExitMonitor:
         # Process-restart loses anything not in that table — accepted trade-off
         # for keeping runtime state out of the database schema.
         self._peak: dict[int, float] = {}
+        # Per-position "has this position already taken its scale-out partial
+        # sell" flag — same lifecycle as ``self._peak`` (rebuilt at startup by
+        # ``bootstrap_scaled_out``, updated on a scale-out fill, dropped when
+        # the position fully closes, pruned if it closes via another path).
+        # Only ``exit.scale_out_v0.ScaleOutExitV0`` reads this (injected into
+        # MarkedPosition.scaled_out); the baseline ThresholdExitV0 ignores it.
+        self._scaled_out: dict[int, bool] = {}
         # Tick telemetry (v18) — the "is the monitor working" heartbeat,
         # surfaced via /api/exit/log so the canvas badge / Closes tab can show
         # liveness without flooding exit_log with a skip entry per position per
@@ -249,6 +268,31 @@ class ExitMonitor:
                 self._peak[held.position_id] = peak
         logger.info("exit monitor: bootstrap_peaks loaded %d positions", len(self._peak))
 
+    def bootstrap_scaled_out(self) -> None:
+        """Rebuild per-position ``scaled_out`` flags from the fill ledger.
+
+        Unlike ``bootstrap_peaks`` (which reads ``order_book_snapshot``
+        directly and so needs a raw session factory), this goes through
+        ``PortfolioStore.has_scale_out_fill`` — a prior sell fill with
+        ``trigger == "scale_out"`` on that position_id — so it only needs
+        the already-injected ``self._portfolio``.
+
+        Without this, a restart mid-position would forget the partial sell
+        already happened, re-fire the pre-scale-out branch, and sell
+        ``scale_out_fraction`` of the *already-reduced* qty — a real drift
+        bug, not just redundant work. Called once at startup, before
+        ``start()``, same as ``bootstrap_peaks``.
+        """
+        if self._portfolio is None:
+            return
+        opens = self._portfolio.get_open_positions()
+        if not opens:
+            return
+        for held in opens:
+            if self._portfolio.has_scale_out_fill(held.position_id):
+                self._scaled_out[held.position_id] = True
+        logger.info("exit monitor: bootstrap_scaled_out loaded %d positions", len(self._scaled_out))
+
     # ---------- lifecycle ----------
 
     async def start(self) -> None:
@@ -321,6 +365,8 @@ class ExitMonitor:
             open_ids = {held.position_id for held in opens}
             for stale_id in set(self._peak) - open_ids:
                 del self._peak[stale_id]
+            for stale_id in set(self._scaled_out) - open_ids:
+                del self._scaled_out[stale_id]
             reason_counts: dict[str, int] = {}
             for held in opens:
                 try:
@@ -372,6 +418,7 @@ class ExitMonitor:
             qty=held.qty,
             current_price=current_price,
             peak_price=peak_price,
+            scaled_out=self._scaled_out.get(held.position_id, False),
         )
         out = self._exit.run(SectionInput(tick_type="hard", payload=marked))
         return_pct = out.signals.get("return_pct")
@@ -383,7 +430,7 @@ class ExitMonitor:
 
         intent = out.payload
         result = self._executor.execute_sell(
-            held, close_reason=intent.trigger, ts=ts, trigger=intent.trigger
+            held, close_reason=intent.trigger, ts=ts, trigger=intent.trigger, qty=intent.qty
         )
         if result.filled and result.price is not None:
             # Mark against the qty that actually filled, not the qty we asked
@@ -393,9 +440,19 @@ class ExitMonitor:
             # partial close, while the DB's own realized_pnl was correct.
             filled_qty = result.qty if result.qty is not None else held.qty
             realized = (result.price - held.avg_entry_price) * filled_qty
-            # Position is closed; drop its peak so a future re-entry on the
-            # same position_id (shouldn't happen, but be safe) starts fresh.
-            self._peak.pop(held.position_id, None)
+            # A scale-out (or a liquidity-thin full-close attempt) can fill
+            # less than held.qty and leave the position open with the
+            # remainder — record_sell's own close-or-reduce decision (same
+            # epsilon it uses). Only drop this position's tracked state once
+            # it's ACTUALLY gone; popping peak/scaled_out on a still-open
+            # remainder would lose exactly the state the post-scale-out phase
+            # needs, and re-arm a scale-out that already fired.
+            position_closed = filled_qty >= held.qty - _QTY_EPS
+            if position_closed:
+                self._peak.pop(held.position_id, None)
+                self._scaled_out.pop(held.position_id, None)
+            elif intent.trigger == "scale_out":
+                self._scaled_out[held.position_id] = True
             self._log(
                 held,
                 ts,

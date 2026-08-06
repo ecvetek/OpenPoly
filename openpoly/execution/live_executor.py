@@ -345,7 +345,13 @@ class LiveExecutor:
         close_reason: CloseReason,
         ts: float,
         trigger: str | None = None,
+        qty: float | None = None,
     ) -> ExecResult:
+        """``qty`` requests a partial sell (e.g. a scale-out) — defaults to
+        the full remaining ``position.qty`` for every existing caller
+        (settlement, manual close, the baseline exit section). Still capped
+        by ``position.qty`` so a caller can never request more than is
+        actually held."""
         catalog = market_source_manager.store
         market = catalog.get(position.market_id)
         if market is None:
@@ -359,7 +365,8 @@ class LiveExecutor:
         # SELL uses its own (finer, 4-decimal) precision rule — see
         # _quantize_sell_size's docstring for why reusing the BUY quantizer
         # here was a real bug (permanently stranded fractional-share dust).
-        size = _quantize_sell_size(position.qty)
+        requested = min(qty, position.qty) if qty is not None else position.qty
+        size = _quantize_sell_size(requested)
         if size <= 0:
             return ExecResult.skip("min_notional_below_floor")
 

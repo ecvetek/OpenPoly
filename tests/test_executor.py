@@ -194,6 +194,54 @@ def test_sell_capped_by_bid_depth_leaves_remainder_open(store) -> None:
     assert store.get_open_position("m1", "yes") is None
 
 
+def test_sell_qty_none_sells_full_remaining_by_default(store) -> None:
+    """Default (qty=None) preserves every existing full-close caller's
+    behavior exactly — settlement, manual close, and the baseline exit
+    section never pass qty at all."""
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=100.0))
+    ex = Executor(store)
+    ex.execute_buy(_intent(qty=20.0), news_id="n1", ts=1.0)
+    held = store.get_open_position("m1", "yes")
+    assert held is not None
+    r = ex.execute_sell(held, close_reason="take_profit", ts=200.0, trigger="take_profit")
+    assert r.filled
+    assert r.qty == 20.0
+    assert store.get_open_position("m1", "yes") is None
+
+
+def test_sell_partial_qty_leaves_remainder_open(store) -> None:
+    """A scale-out exit requests a partial qty — the remainder stays open
+    with the reduced amount, same as a liquidity-constrained partial."""
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=100.0))
+    ex = Executor(store)
+    ex.execute_buy(_intent(qty=20.0), news_id="n1", ts=1.0)
+    held = store.get_open_position("m1", "yes")
+    assert held is not None
+
+    r = ex.execute_sell(held, close_reason="scale_out", ts=200.0, trigger="scale_out", qty=10.0)
+    assert r.filled
+    assert r.qty == 10.0
+
+    still_open = store.get_open_position("m1", "yes")
+    assert still_open is not None
+    assert still_open.qty == pytest.approx(10.0)
+
+
+def test_sell_partial_qty_capped_by_position_qty(store) -> None:
+    """Requesting more than the position actually holds is capped, not
+    over-sold — a caller can never sell more than position.qty."""
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=100.0))
+    ex = Executor(store)
+    ex.execute_buy(_intent(qty=20.0), news_id="n1", ts=1.0)
+    held = store.get_open_position("m1", "yes")
+    assert held is not None
+
+    r = ex.execute_sell(held, close_reason="manual", ts=200.0, qty=999.0)
+    assert r.filled
+    assert r.qty == 20.0
+    assert store.get_open_position("m1", "yes") is None
+
+
 def test_sell_skips_when_bid_depth_is_dust(store) -> None:
     _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=100.0))
     ex = Executor(store)

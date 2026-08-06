@@ -331,6 +331,109 @@ def test_sell_success_closes_position(store) -> None:
     assert len(clob.allowance_updates) >= 1
 
 
+def test_sell_qty_none_sells_full_remaining_by_default(store) -> None:
+    """Default (qty=None) reproduces test_sell_success_closes_position's
+    behavior exactly — proof the new optional param is additive, not a
+    behavior change for existing full-close callers."""
+    m = _market("m1")
+    _populate(m, _book(m.yes_token_id, bid=0.55))
+    held = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id=m.yes_token_id,
+        condition_id=m.condition_id,
+        price=0.40,
+        qty=10.0,
+        ts=100.0,
+        news_id="n",
+    )
+    clob = _FakeClob(
+        order_response={
+            "success": True,
+            "orderID": "0xSELL",
+            "status": "matched",
+            "makingAmount": "10.0",
+            "takingAmount": "5.5",
+            "transactionsHashes": ["0xSTX"],
+        }
+    )
+    le = LiveExecutor(portfolio=store, clob_client=clob)
+    r = le.execute_sell(held, close_reason="take_profit", ts=200.0)
+    assert r.filled is True
+    assert r.qty == pytest.approx(10.0)
+    assert clob.posted[0]["order_args"].size == pytest.approx(10.0)
+    rec = store.get_position(held.position_id)
+    assert rec is not None and rec.status == "closed"
+
+
+def test_sell_partial_qty_requests_only_that_size(store) -> None:
+    """A scale-out exit passes qty=<partial> — the order submitted to the
+    CLOB must request only that amount, not the full held position, and the
+    remainder stays open."""
+    m = _market("m1")
+    _populate(m, _book(m.yes_token_id, bid=0.55))
+    held = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id=m.yes_token_id,
+        condition_id=m.condition_id,
+        price=0.40,
+        qty=10.0,
+        ts=100.0,
+        news_id="n",
+    )
+    clob = _FakeClob(
+        order_response={
+            "success": True,
+            "orderID": "0xSCALEOUT",
+            "status": "matched",
+            "makingAmount": "4.0",
+            "takingAmount": "2.2",
+            "transactionsHashes": ["0xSTX"],
+        }
+    )
+    le = LiveExecutor(portfolio=store, clob_client=clob)
+    r = le.execute_sell(held, close_reason="scale_out", ts=200.0, trigger="scale_out", qty=4.0)
+    assert r.filled is True
+    assert r.qty == pytest.approx(4.0)
+    assert clob.posted[0]["order_args"].size == pytest.approx(4.0)
+    rec = store.get_position(held.position_id)
+    assert rec is not None and rec.status == "open"
+    assert rec.qty == pytest.approx(6.0)
+
+
+def test_sell_partial_qty_capped_by_position_qty(store) -> None:
+    """Requesting more than the position holds is capped, not over-sold."""
+    m = _market("m1")
+    _populate(m, _book(m.yes_token_id, bid=0.55))
+    held = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id=m.yes_token_id,
+        condition_id=m.condition_id,
+        price=0.40,
+        qty=10.0,
+        ts=100.0,
+        news_id="n",
+    )
+    clob = _FakeClob(
+        order_response={
+            "success": True,
+            "orderID": "0xSELL",
+            "status": "matched",
+            "makingAmount": "10.0",
+            "takingAmount": "5.5",
+            "transactionsHashes": ["0xSTX"],
+        }
+    )
+    le = LiveExecutor(portfolio=store, clob_client=clob)
+    r = le.execute_sell(held, close_reason="manual", ts=200.0, qty=999.0)
+    assert r.filled is True
+    assert clob.posted[0]["order_args"].size == pytest.approx(10.0)
+    rec = store.get_position(held.position_id)
+    assert rec is not None and rec.status == "closed"
+
+
 def test_sell_quantizes_fractional_dust_qty_not_to_zero(store) -> None:
     """A fractional-share position (normal after a partial fill or partial
     close) must still be sellable. _quantize_sell_size floors to 4 decimals

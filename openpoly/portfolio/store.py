@@ -298,6 +298,23 @@ class PortfolioStore:
             )
             return [_to_fill(r) for r in rows]
 
+    def has_scale_out_fill(self, position_id: int) -> bool:
+        """True iff this position has a prior sell fill with
+        ``trigger == "scale_out"`` — backs ``ExitMonitor.bootstrap_scaled_out``,
+        which reconstructs "has this position already taken its partial
+        profit" at process restart (the exit section itself holds no
+        cross-tick state; see MarkedPosition.scaled_out in threshold_v0.py).
+        Same targeted-query shape as ``news_id_for_position``."""
+        with self._session_factory() as session:
+            stmt = (
+                select(FillRow.id)
+                .where(FillRow.position_id == position_id)
+                .where(FillRow.action == "sell")
+                .where(FillRow.trigger == "scale_out")
+                .limit(1)
+            )
+            return session.execute(stmt).scalar_one_or_none() is not None
+
     def news_id_for_position(self, position_id: int) -> str | None:
         """Look up the news_id that triggered this position's BUY fill.
 
