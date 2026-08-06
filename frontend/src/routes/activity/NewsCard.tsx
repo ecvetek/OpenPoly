@@ -128,6 +128,43 @@ function PendingStageFallback() {
   )
 }
 
+function formatSignalValue(v: unknown): string {
+  if (typeof v === 'number') {
+    if (Number.isInteger(v)) return String(v)
+    return v.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')
+  }
+  return String(v)
+}
+
+// Generic key:value rendering of the entry section's raw `signals` payload
+// at decision time. Shape varies by skip reason — edge/min_edge/spread/
+// held_price for the edge-threshold checks, heat_cap_usd/open_cost for
+// heat_cap, daily_pnl_usd/limit_usd for kill_daily_loss, etc. — so this
+// stays a flat dump rather than a bespoke per-field layout.
+function formatSignals(json: string | null): string | null {
+  if (!json) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const entries = Object.entries(parsed as Record<string, unknown>)
+  if (entries.length === 0) return null
+  return entries.map(([k, v]) => `${k} ${formatSignalValue(v)}`).join(' · ')
+}
+
+function EntrySignalsLine({ json }: { json: string | null }) {
+  const text = formatSignals(json)
+  if (!text) return null
+  return (
+    <div className="text-[11px] text-neutral-600 font-mono break-words">
+      {text}
+    </div>
+  )
+}
+
 export function NewsCard({ card }: { card: NewsPipelineCard }) {
   const { news, embedding, analyzer, entry, state } = card
   const urgencyKey = (news.urgency ?? 'regular').toLowerCase()
@@ -404,6 +441,7 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
                 reason: {entry.reason}
               </div>
             )}
+            <EntrySignalsLine json={entry.signals_json} />
             {entry.error && (
               <div className="text-[11px] text-red-400 font-mono break-all">
                 {entry.error}

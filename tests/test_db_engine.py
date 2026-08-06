@@ -88,3 +88,44 @@ def test_ensure_fill_live_columns_migrates_old_db(tmp_path) -> None:
         cols = {r[1] for r in conn.execute(text("PRAGMA table_info(fill)")).fetchall()}
     assert "order_id" in cols
     assert "tx_hash" in cols
+
+
+def test_ensure_entry_decision_live_columns_migrates_old_db(tmp_path) -> None:
+    """Old DB without signals_json: migration adds it, idempotent."""
+    from sqlalchemy import text
+    from openpoly.db.manager import _ensure_entry_decision_live_columns
+
+    engine = make_engine(f"sqlite:///{tmp_path}/x.db")
+    # Simulate old schema by creating entry_decision without signals_json
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+            CREATE TABLE entry_decision (
+                id INTEGER PRIMARY KEY,
+                ts FLOAT NOT NULL,
+                news_id VARCHAR NOT NULL,
+                ar_p_model FLOAT,
+                ar_market_id VARCHAR,
+                verdict VARCHAR NOT NULL,
+                side VARCHAR,
+                qty FLOAT,
+                price FLOAT,
+                reason VARCHAR,
+                latency_ms INTEGER NOT NULL,
+                error VARCHAR,
+                fill_status VARCHAR,
+                fill_price FLOAT,
+                fill_qty FLOAT,
+                position_id INTEGER
+            )
+        """)
+        )
+    _ensure_entry_decision_live_columns(engine)
+    with engine.begin() as conn:
+        cols = {r[1] for r in conn.execute(text("PRAGMA table_info(entry_decision)")).fetchall()}
+    assert "signals_json" in cols
+    # Second run is a no-op
+    _ensure_entry_decision_live_columns(engine)
+    with engine.begin() as conn:
+        cols = {r[1] for r in conn.execute(text("PRAGMA table_info(entry_decision)")).fetchall()}
+    assert "signals_json" in cols

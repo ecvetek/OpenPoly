@@ -18,6 +18,7 @@ second).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -397,6 +398,7 @@ class PipelineOrchestrator:
         reason: str | None
         error: str | None
         intent: OrderIntent | None = None
+        signals_json: str | None = None
         try:
             out = await asyncio.to_thread(
                 self._entry.run,
@@ -405,6 +407,7 @@ class PipelineOrchestrator:
             verdict = str(out.verdict)
             reason = out.reason
             error = out.reason if verdict == "error" else None
+            signals_json = json.dumps(out.signals) if out.signals else None
             if verdict == "ok" and isinstance(out.payload, OrderIntent):
                 intent = out.payload
         except Exception as exc:  # noqa: BLE001 — section impl is user code
@@ -453,6 +456,7 @@ class PipelineOrchestrator:
                 fill_price=fill_price,
                 fill_qty=fill_qty,
                 position_id=position_id,
+                signals_json=signals_json,
             )
         )
 

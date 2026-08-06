@@ -440,6 +440,15 @@ const entryLog: EntryDecision[] = [
     fill_price: 0.52,
     fill_qty: 19.2,
     position_id: 101,
+    signals_json: JSON.stringify({
+      side: 'yes',
+      edge: 0.06,
+      spread: 0.02,
+      p_model: 0.78,
+      held_price: 0.52,
+      min_edge: 0.05,
+      max_spread: 0.05,
+    }),
   },
 ]
 

@@ -296,6 +296,8 @@ class EdgeThresholdEntryV0:
             "spread": round(spread, 4),
             "p_model": res.p_model,
             "held_price": held_price,
+            "min_edge": self.config.min_edge,
+            "max_spread": self.config.max_spread,
         }
 
         if edge < self.config.min_edge:

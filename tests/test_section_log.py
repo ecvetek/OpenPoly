@@ -304,6 +304,7 @@ def test_entry_decision_to_dict_shape() -> None:
         "fill_price",
         "fill_qty",
         "position_id",
+        "signals_json",
     }
     assert d == asdict(e)
 

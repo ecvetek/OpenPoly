@@ -150,6 +150,7 @@ def test_edge_below_min_edge_skips() -> None:
     assert out.verdict == "skip"
     assert out.reason == "edge below min_edge"
     assert out.signals["edge"] == pytest.approx(0.02)
+    assert out.signals["min_edge"] == pytest.approx(0.05)
 
 
 def test_spread_above_max_spread_skips() -> None:
@@ -158,6 +159,8 @@ def test_spread_above_max_spread_skips() -> None:
     out = _run(EdgeThresholdEntryV0(EdgeThresholdConfig()), _ar(p_model=0.70))
     assert out.verdict == "skip"
     assert out.reason == "spread above max_spread"
+    assert out.signals["spread"] == pytest.approx(0.20)
+    assert out.signals["max_spread"] == pytest.approx(0.05)
 
 
 # ---------- ok path / sizing ----------

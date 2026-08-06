@@ -89,6 +89,12 @@ export type EntryDecision = {
   fill_price: number | null
   fill_qty: number | null
   position_id: number | null
+  // Raw JSON dump of the entry section's SectionOutput.signals at decision
+  // time — shape varies by skip reason (edge/min_edge/spread/held_price for
+  // the edge-threshold checks, heat_cap_usd/open_cost for heat_cap, etc.).
+  // Null for reasons the section didn't attach signals to, and for rows
+  // persisted before this field existed.
+  signals_json: string | null
 }
 
 // Terminal state of one news's journey through the pipeline.

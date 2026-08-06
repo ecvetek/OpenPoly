@@ -67,6 +67,19 @@ def _ensure_fill_live_columns(engine: Engine) -> None:
             logger.info("migration: added fill.tx_hash")
 
 
+def _ensure_entry_decision_live_columns(engine: Engine) -> None:
+    """Idempotent migration: add the signals_json column to entry_decision if
+    missing (older DBs predate the entry-signals surfacing). New DBs get the
+    column via init_db()'s create_all and skip this entirely."""
+    with engine.begin() as conn:
+        existing = {
+            r[1] for r in conn.execute(text("PRAGMA table_info(entry_decision)")).fetchall()
+        }
+        if "signals_json" not in existing:
+            conn.execute(text("ALTER TABLE entry_decision ADD COLUMN signals_json TEXT"))
+            logger.info("migration: added entry_decision.signals_json")
+
+
 class DatabaseConfig(BaseModel):
     """Config for the ``database`` section.
 
@@ -102,6 +115,7 @@ class DatabaseManager:
         self._engine = engine or get_engine()
         init_db(self._engine)
         _ensure_fill_live_columns(self._engine)
+        _ensure_entry_decision_live_columns(self._engine)
         factory = make_session_factory(self._engine)
         self._book_writer = WriteBehindWriter(make_order_book_sink(factory))
         self._news_writer = WriteBehindWriter(make_news_sink(factory))

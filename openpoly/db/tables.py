@@ -165,6 +165,7 @@ class EntryDecisionRow(Base):
     fill_price: Mapped[float | None]
     fill_qty: Mapped[float | None]
     position_id: Mapped[int | None] = mapped_column(index=True)
+    signals_json: Mapped[str | None]
 
 
 class ExitDecisionRow(Base):

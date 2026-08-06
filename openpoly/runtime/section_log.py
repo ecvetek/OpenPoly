@@ -144,6 +144,7 @@ class EntryDecision:
     fill_price: float | None = None
     fill_qty: float | None = None
     position_id: int | None = None
+    signals_json: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
