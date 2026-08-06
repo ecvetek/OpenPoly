@@ -7,7 +7,7 @@ entry gate (that runs later, on the single matched market, with fresh data).
 
 Filter logic mirrors a prior project's ``sync_markets`` + the v8 trading spec:
 
-  - §0.1 zero-fee rule — only ``taker_fee_rate == 0`` (fail-closed on ``None``)
+  - §0.1 fee ceiling — ``taker_fee_rate <= max_fee`` (fail-closed on ``None``)
   - §6 Gate 2 liveness / Gate 4 expiry / Gate 5 market quality
 
 Each market is either kept or rejected with a single stable reason label.
@@ -28,7 +28,7 @@ from openpoly.markets.models import Market
 REJECT_RESOLVED = "market_resolved"
 REJECT_EXCLUDED_TAG = "excluded_tag"
 REJECT_NULL_FEE = "null_fee_rate"
-REJECT_FEE_NOT_ZERO = "fee_not_zero"
+REJECT_FEE_TOO_HIGH = "fee_too_high"
 REJECT_MISSING_END_DATE = "missing_end_date"
 REJECT_NEAR_EXPIRY = "near_expiry"
 REJECT_LOW_VOLUME = "low_volume"
@@ -41,9 +41,11 @@ class MarketFilterConfig(BaseModel):
     """Tunable thresholds for the discovery filter. Pydantic so it can be
     embedded in the market_source section Config and auto-rendered in the UI."""
 
-    require_zero_fee: bool = Field(
-        default=True,
-        description="Drop markets with a non-zero taker fee (v8 zero-fee rule).",
+    max_fee: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Drop markets whose taker fee rate exceeds this (fraction, e.g. 0.05 = 5%).",
     )
     min_hours_to_expiry: float = Field(
         default=24.0,
@@ -113,12 +115,11 @@ def evaluate_market(
     if hit:
         return FilterDecision("reject", REJECT_EXCLUDED_TAG, ",".join(hit))
 
-    # 3. Zero-fee rule — fail-closed when the fee is unknown.
-    if config.require_zero_fee:
-        if market.taker_fee_rate is None:
-            return FilterDecision("reject", REJECT_NULL_FEE)
-        if market.taker_fee_rate > 0:
-            return FilterDecision("reject", REJECT_FEE_NOT_ZERO, f"{market.taker_fee_rate:g}")
+    # 3. Fee ceiling — fail-closed when the fee is unknown.
+    if market.taker_fee_rate is None:
+        return FilterDecision("reject", REJECT_NULL_FEE)
+    if market.taker_fee_rate > config.max_fee:
+        return FilterDecision("reject", REJECT_FEE_TOO_HIGH, f"{market.taker_fee_rate:g}")
 
     # 4. Near expiry.
     if market.end_date is None:

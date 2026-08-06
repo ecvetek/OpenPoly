@@ -148,11 +148,14 @@ export const MOCK_RUNTIME_CATALOG: RuntimeCatalogEntry[] = [
           type: 'object',
           title: 'MarketFilterConfig',
           properties: {
-            require_zero_fee: {
-              type: 'boolean',
-              title: 'Require Zero Fee',
-              description: 'Drop markets with a non-zero taker fee (v8 zero-fee rule).',
-              default: true,
+            max_fee: {
+              type: 'number',
+              title: 'Max Fee',
+              description:
+                'Drop markets whose taker fee rate exceeds this (fraction, e.g. 0.05 = 5%).',
+              default: 0.0,
+              minimum: 0,
+              maximum: 1,
             },
             min_hours_to_expiry: {
               type: 'number',

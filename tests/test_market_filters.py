@@ -78,12 +78,18 @@ def test_null_fee_rejected():
 
 def test_nonzero_fee_rejected():
     d = evaluate_market(_market(taker_fee_rate=0.1), CFG, now=NOW)
-    assert d.reason == "fee_not_zero"
+    assert d.reason == "fee_too_high"
 
 
-def test_nonzero_fee_kept_when_not_required():
-    cfg = MarketFilterConfig(require_zero_fee=False)
+def test_fee_within_max_kept():
+    cfg = MarketFilterConfig(max_fee=0.1)
     assert evaluate_market(_market(taker_fee_rate=0.1), cfg, now=NOW).kept
+
+
+def test_fee_above_max_rejected():
+    cfg = MarketFilterConfig(max_fee=0.05)
+    d = evaluate_market(_market(taker_fee_rate=0.1), cfg, now=NOW)
+    assert d.reason == "fee_too_high"
 
 
 def test_missing_end_date_rejected():
