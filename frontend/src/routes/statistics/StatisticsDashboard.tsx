@@ -15,8 +15,23 @@ import { DateRangeControl } from './DateRangeControl'
 import { DEFAULT_RANGE, resolveRange, type DateRange } from './dateRange'
 import { formatDuration, formatPercent, formatPnl, formatPnlPercent, pnlClass } from './format'
 import { PnlCurveChart } from './PnlCurveChart'
-import { fetchStatistics, type StatisticsResponse } from './statisticsClient'
+import { fetchStatistics, type PnlCurvePoint, type StatisticsResponse } from './statisticsClient'
 import { WinLossBar } from './WinLossBar'
+
+// Largest peak-to-trough decline in cumulative realized P&L over the
+// range — the standard drawdown definition, read straight off the same
+// ascending curve the chart below plots. A magnitude (>= 0), negated only
+// at display time (same convention as gross_loss).
+function maxDrawdown(points: readonly PnlCurvePoint[]): number {
+  let peak = 0
+  let worst = 0
+  for (const p of points) {
+    if (p.cumulative_pnl > peak) peak = p.cumulative_pnl
+    const drawdown = peak - p.cumulative_pnl
+    if (drawdown > worst) worst = drawdown
+  }
+  return worst
+}
 
 export function StatisticsDashboard() {
   const [range, setRange] = useState<DateRange>(DEFAULT_RANGE)
@@ -43,6 +58,7 @@ export function StatisticsDashboard() {
   }
 
   const s = data.summary
+  const drawdown = maxDrawdown(data.pnl_curve)
 
   return (
     <div className="px-4 sm:px-6 pb-6 flex flex-col gap-4">
@@ -88,6 +104,10 @@ export function StatisticsDashboard() {
           value={s.profit_factor === null ? '—' : s.profit_factor.toFixed(2)}
           tone="text-neutral-100"
         />
+        {/* Largest peak-to-trough dip in cumulative realized P&L over the
+            range — stored as a magnitude, negated at display time like
+            gross_loss below. */}
+        <StatCard label="Max drawdown" value={formatPnl(-drawdown)} tone={pnlClass(-drawdown)} />
         <StatCard label="Gross profit" value={formatPnl(s.gross_profit)} tone={pnlClass(s.gross_profit)} />
         {/* gross_loss is stored as a positive magnitude (profit_factor needs
             both terms positive) — negate only here, at display time, so it
