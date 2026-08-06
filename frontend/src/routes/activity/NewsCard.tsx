@@ -29,6 +29,7 @@ import { formatRelativeAgo, formatUTC } from '../../sections/news_source/time'
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import type { AnalyzerDecision } from './portfolioTypes'
 import type { CardState, NewsPipelineCard, Verdict } from './newsTypes'
+import { formatSignalEntries } from './signals'
 
 const STATE_BORDER: Record<CardState, string> = {
   filled: 'border-emerald-700/50',
@@ -141,19 +142,8 @@ function PendingStageFallback() {
   )
 }
 
-function formatSignalValue(v: unknown): string {
-  if (typeof v === 'number') {
-    if (Number.isInteger(v)) return String(v)
-    return v.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')
-  }
-  return String(v)
-}
-
 // Generic key:value rendering of the entry section's raw `signals` payload
-// at decision time. Shape varies by skip reason — edge/min_edge/spread/
-// held_price for the edge-threshold checks, heat_cap_usd/open_cost for
-// heat_cap, daily_pnl_usd/limit_usd for kill_daily_loss, etc. — so this
-// stays a flat dump rather than a bespoke per-field layout.
+// at decision time — see `./signals` for the shared formatter.
 function formatSignals(json: string | null): string | null {
   if (!json) return null
   let parsed: unknown
@@ -163,9 +153,7 @@ function formatSignals(json: string | null): string | null {
     return null
   }
   if (typeof parsed !== 'object' || parsed === null) return null
-  const entries = Object.entries(parsed as Record<string, unknown>)
-  if (entries.length === 0) return null
-  return entries.map(([k, v]) => `${k} ${formatSignalValue(v)}`).join(' · ')
+  return formatSignalEntries(parsed as Record<string, unknown>)
 }
 
 function EntrySignalsLine({ json }: { json: string | null }) {

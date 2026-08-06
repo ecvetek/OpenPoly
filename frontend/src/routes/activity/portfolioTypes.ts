@@ -32,6 +32,15 @@ export type PositionExitDecision = {
   ts: number
 }
 
+// The entry-section decision that opened a position — its raw `signals`
+// dict at decision time (edge/spread/min_edge/max_spread/recent_move/...),
+// shape varies by which gate produced it. Mirrors `_lookup_entry_decision`.
+export type PositionEntryDecision = {
+  signals: Record<string, unknown> | null
+  reason: string | null
+  ts: number
+}
+
 export type PositionRecord = {
   id: number
   market_id: string
@@ -65,6 +74,18 @@ export type PositionRecord = {
   // Only /api/positions/{id} populates this; null while open or if the
   // position closed before the exit_decision persistence rollout.
   exit_decision?: PositionExitDecision | null
+  // Only /api/positions/{id} populates this; null if the position predates
+  // entry_decision persistence (e.g. manual/paper open).
+  entry_decision?: PositionEntryDecision | null
+  // Polymarket event category tags (e.g. "crypto", "politics") from the
+  // same catalog lookup as market_question; null when the market has been
+  // evicted from the catalog. Only /api/positions/{id} populates this.
+  market_tags?: string[] | null
+  // Market liquidity context, same catalog lookup / eviction fallback as
+  // market_tags. Only /api/positions/{id} populates these.
+  market_volume_24h?: number | null
+  market_liquidity?: number | null
+  market_taker_fee_rate?: number | null
   // Mark-to-market P&L for an OPEN position (marked at the live level-1
   // bid) — the "if I closed this right now" number. Always null while
   // closed (use realized_pnl instead), and null if there's no live order

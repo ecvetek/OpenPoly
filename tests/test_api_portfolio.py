@@ -8,7 +8,13 @@ from fastapi.testclient import TestClient
 from openpoly.api.main import app
 from openpoly.api.portfolio_routes import get_portfolio_store
 from openpoly.db.engine import get_session_factory, init_db, make_engine, make_session_factory
-from openpoly.db.tables import AnalyzerCallRow, ExitDecisionRow, NewsItemRow, OrderBookSnapshot
+from openpoly.db.tables import (
+    AnalyzerCallRow,
+    EntryDecisionRow,
+    ExitDecisionRow,
+    NewsItemRow,
+    OrderBookSnapshot,
+)
 from openpoly.portfolio import PortfolioStore
 
 
@@ -338,6 +344,64 @@ def test_get_position_market_end_date_null_when_not_catalogued(env) -> None:
     finally:
         msm.store = saved_store
     assert body["market_end_date"] is None
+
+
+def test_get_position_includes_market_tags_and_stats_when_catalogued(env) -> None:
+    """Event tags + volume/liquidity/fee ride the same catalog lookup as
+    market_question — populated together, from the same normalized Market."""
+    import json
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.models import normalize_gamma_market
+    from openpoly.markets.store import MarketStore, PollSummary
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    raw = {
+        "id": "m1",
+        "conditionId": "0xm1",
+        "question": "Will the U.S. invade Iran before 2027?",
+        "slug": "iran-2027",
+        "clobTokenIds": json.dumps(["yes-tok", "no-tok"]),
+        "volume24hr": 12345.0,
+        "liquidityNum": 6789.0,
+        "feeSchedule": {"rate": 0.04},
+    }
+    market = normalize_gamma_market(
+        raw,
+        event={"id": "e", "title": "E", "tags": [{"slug": "crypto"}, {"slug": "fed-rates"}]},
+    )
+    saved_store = msm.store
+    try:
+        fresh = MarketStore()
+        fresh.replace([market], PollSummary(ts=1.0, fetched=1, kept=1, reason_counts={}))
+        msm.store = fresh
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["market_tags"] == ["crypto", "fed-rates"]
+    assert body["market_volume_24h"] == 12345.0
+    assert body["market_liquidity"] == 6789.0
+    assert body["market_taker_fee_rate"] == 0.04
+
+
+def test_get_position_market_tags_null_when_not_catalogued(env) -> None:
+    """Market evicted / never catalogued → market_tags and stats are None,
+    same fallback semantics as market_question."""
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.store import MarketStore
+
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    saved_store = msm.store
+    try:
+        msm.store = MarketStore()  # empty catalog
+        body = client.get(f"/api/positions/{h.position_id}").json()
+    finally:
+        msm.store = saved_store
+    assert body["market_tags"] is None
+    assert body["market_volume_24h"] is None
+    assert body["market_liquidity"] is None
+    assert body["market_taker_fee_rate"] is None
 
 
 # ---------- PD3: analyzer_decisions lookup ----------
@@ -998,6 +1062,108 @@ def test_get_position_exit_decision_ignores_other_positions_and_skips(env) -> No
         session.commit()
     body = client.get(f"/api/positions/{h1.position_id}").json()
     assert body["exit_decision"] is None
+
+
+# ---------- entry_decision lookup ----------
+
+
+def test_get_position_entry_decision_null_when_not_persisted(env) -> None:
+    store, client, _factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    body = client.get(f"/api/positions/{h.position_id}").json()
+    assert body["entry_decision"] is None
+
+
+def test_get_position_includes_entry_decision_signals(env) -> None:
+    """A persisted verdict=ok EntryDecision linked by position_id surfaces
+    its raw `signals` dict (edge/spread/min_edge/max_spread/...) and any
+    reason — the same data NewsCard's '④ Entry' stage renders."""
+    import json
+
+    from openpoly.runtime.section_log import EntryDecision
+
+    store, client, factory = env
+    h = _open(store, "m1", "yes", "ty1")
+    signals = {
+        "side": "yes",
+        "edge": 0.06,
+        "spread": 0.01,
+        "p_model": 0.7,
+        "held_price": 0.64,
+        "min_edge": 0.05,
+        "max_spread": 0.05,
+        "recent_move": 0.03,
+    }
+    decision = EntryDecision(
+        ts=100.0,
+        news_id="n1",
+        ar_p_model=0.7,
+        ar_market_id="m1",
+        verdict="ok",
+        side="yes",
+        qty=3.0,
+        price=0.64,
+        reason=None,
+        latency_ms=12,
+        position_id=h.position_id,
+        signals_json=json.dumps(signals),
+    )
+    with factory() as session:
+        session.add(EntryDecisionRow(**decision.to_dict()))
+        session.commit()
+    body = client.get(f"/api/positions/{h.position_id}").json()
+    assert body["entry_decision"] == {"signals": signals, "reason": None, "ts": 100.0}
+
+
+def test_get_position_entry_decision_ignores_other_positions_and_skips(env) -> None:
+    """Filters by this exact position_id and verdict=ok — a skip row (no
+    position_id) or an ok row for a *different* position must not leak in."""
+    import json
+
+    from openpoly.runtime.section_log import EntryDecision
+
+    store, client, factory = env
+    h1 = _open(store, "m1", "yes", "ty1", ts=100.0)
+    h2 = _open(store, "m2", "no", "tn2", ts=101.0)
+    rows = [
+        EntryDecisionRow(
+            **EntryDecision(
+                ts=90.0,
+                news_id="n0",
+                ar_p_model=0.6,
+                ar_market_id="m1",
+                verdict="skip",
+                side="yes",
+                qty=None,
+                price=None,
+                reason="edge below min_edge",
+                latency_ms=5,
+                position_id=None,
+                signals_json=json.dumps({"side": "yes", "edge": 0.01}),
+            ).to_dict()
+        ),
+        EntryDecisionRow(
+            **EntryDecision(
+                ts=101.0,
+                news_id="n2",
+                ar_p_model=0.3,
+                ar_market_id="m2",
+                verdict="ok",
+                side="no",
+                qty=10.0,
+                price=0.5,
+                reason=None,
+                latency_ms=8,
+                position_id=h2.position_id,
+                signals_json=json.dumps({"side": "no", "edge": 0.1}),
+            ).to_dict()
+        ),
+    ]
+    with factory() as session:
+        session.add_all(rows)
+        session.commit()
+    body = client.get(f"/api/positions/{h1.position_id}").json()
+    assert body["entry_decision"] is None
 
 
 # ---------- /api/positions/{id}/price-history ----------

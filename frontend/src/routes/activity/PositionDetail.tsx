@@ -28,7 +28,16 @@ import { formatPnl, formatPnlPercent, pnlClass, pnlPercent } from './format'
 import { StatusBadge } from './PositionCard'
 import { PositionPostmortem } from './PositionPostmortem'
 import type { CloseResult, PositionRecord } from './portfolioTypes'
+import { formatSignalEntries } from './signals'
 import { usePoll } from './usePoll'
+
+// No existing generic currency formatter to reuse — format.ts only has
+// P&L-specific ones (signed, always 2 decimals).
+function formatUsdCompact(n: number): string {
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}k`
+  return `$${n.toFixed(0)}`
+}
 
 async function fetchPosition(id: string): Promise<PositionRecord | null> {
   const r = await fetch(`/api/positions/${encodeURIComponent(id)}`)
@@ -112,6 +121,11 @@ export function PositionDetail() {
       : null
   const cost = p.qty * p.avg_entry_price
   const sideTone = p.side === 'yes' ? 'text-emerald-300' : 'text-sky-300'
+  // Omits side/p_model/held_price — already visible above (BUY_{SIDE}
+  // badge, analyzer's p=, and the @ price entry line respectively).
+  const entrySignalsText = p.entry_decision?.signals
+    ? formatSignalEntries(p.entry_decision.signals, ['side', 'p_model', 'held_price'])
+    : null
 
   async function onClosePosition() {
     if (closing) return
@@ -178,6 +192,45 @@ export function PositionDetail() {
           </span>
         )}
       </div>
+
+      {/* Market identity extras: Polymarket event tags (category chips) +
+         a compact liquidity/volume/fee readout, from the same catalog
+         lookup as the header's market_question — absent under the same
+         eviction fallback. Purely informational context for judging the
+         entry signals below (e.g. a thin market makes a given edge less
+         trustworthy), never shown elsewhere on this page. */}
+      {(p.market_tags?.length ||
+        p.market_volume_24h != null ||
+        p.market_liquidity != null ||
+        p.market_taker_fee_rate != null) && (
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex flex-wrap gap-1">
+            {p.market_tags?.map((tag) => (
+              <span
+                key={tag}
+                className="px-1.5 py-0.5 text-[10px] font-mono rounded border border-neutral-700/50 bg-neutral-900 text-neutral-500"
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
+          <span className="text-[10px] text-neutral-600 font-mono">
+            {[
+              p.market_volume_24h != null
+                ? `vol24h ${formatUsdCompact(p.market_volume_24h)}`
+                : null,
+              p.market_liquidity != null
+                ? `liquidity ${formatUsdCompact(p.market_liquidity)}`
+                : null,
+              p.market_taker_fee_rate != null
+                ? `fee ${(p.market_taker_fee_rate * 100).toFixed(0)}%`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </span>
+        </div>
+      )}
 
       {/* Position card: side/size/price/cost/status/P&L/opened(+closed)/
          expiry — same fields and layout as a PositionCard row in the list.
@@ -304,6 +357,25 @@ export function PositionDetail() {
          this position's news_id — rendered as "unavailable" rather than an
          error. */}
       <AnalyzerRationaleBlock decisions={p.analyzer_decisions ?? []} />
+
+      {/* Entry-section decision signals (edge/spread/min_edge/max_spread/
+         recent_move/...) at the moment this position was opened — the same
+         generic key:value dump NewsCard's "④ Entry" stage shows. Absent
+         entirely for a manual/paper position or one that predates
+         entry_decision persistence. */}
+      {entrySignalsText && (
+        <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-1">
+          <div className="text-[11px] text-neutral-400">Entry signals</div>
+          <div className="text-[11px] text-neutral-500 font-mono break-words">
+            {entrySignalsText}
+          </div>
+          {p.entry_decision?.reason && (
+            <div className="text-[11px] text-neutral-600">
+              {p.entry_decision.reason}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Exit-monitor decision that actually closed this position — richer
          than the coarse close_reason badge above (trigger detail,

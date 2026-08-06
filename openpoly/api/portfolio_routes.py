@@ -21,7 +21,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.db.engine import get_session_factory
-from openpoly.db.tables import AnalyzerCallRow, ExitDecisionRow, NewsItemRow, OrderBookSnapshot
+from openpoly.db.tables import (
+    AnalyzerCallRow,
+    EntryDecisionRow,
+    ExitDecisionRow,
+    NewsItemRow,
+    OrderBookSnapshot,
+)
 from openpoly.execution import executor
 from openpoly.markets.manager import manager as market_source_manager
 from openpoly.markets.models import Market, normalize_gamma_market, polymarket_url, resolved_side
@@ -216,6 +222,14 @@ def get_position_by_id(
     - ``exit_decision``: the exit-monitor decision that actually closed
       this position (trigger/return_pct/peak_price/reason), or ``None``
       for an open position or one closed before persistence went live.
+    - ``entry_decision``: the entry-section decision that opened this
+      position — its raw ``signals`` dict at decision time (edge, spread,
+      min_edge, max_spread, recent_move, ...) plus any ``reason`` — or
+      ``None`` for a position that predates entry_decision persistence.
+    - ``market_tags`` / ``market_volume_24h`` / ``market_liquidity`` /
+      ``market_taker_fee_rate``: from the same catalog lookup as
+      ``market_question``. All ``None``/``[]``-free (just ``None``) when the
+      market is no longer catalogued.
     - ``unrealized_pnl``: "if I closed this right now" P&L for an **open**
       position, marked at the live level-1 bid (same convention the exit
       monitor uses to evaluate stop-loss/take-profit) — ``None`` while
@@ -232,6 +246,10 @@ def get_position_by_id(
     body["market_end_date"] = (
         market.end_date.timestamp() if market is not None and market.end_date else None
     )
+    body["market_tags"] = list(market.event_tags) if market is not None else None
+    body["market_volume_24h"] = market.volume_24h if market is not None else None
+    body["market_liquidity"] = market.liquidity if market is not None else None
+    body["market_taker_fee_rate"] = market.taker_fee_rate if market is not None else None
     # PositionRecord doesn't carry news_id (it lives on the BUY fill row).
     # Look it up via the store + then query the persisted analyzer_call table.
     news_id = store.news_id_for_position(position_id)
@@ -239,6 +257,7 @@ def get_position_by_id(
     body["news"] = _lookup_news_summary(news_id, factory)
     body["analyzer_decisions"] = _lookup_analyzer_decisions(news_id, factory)
     body["exit_decision"] = _lookup_exit_decision(position_id, factory)
+    body["entry_decision"] = _lookup_entry_decision(position_id, factory)
     body["unrealized_pnl"] = _unrealized_pnl(record)
     return body
 
@@ -510,6 +529,40 @@ def _lookup_exit_decision(
         "peak_price": row.peak_price,
         "ts": row.ts,
     }
+
+
+def _lookup_entry_decision(
+    position_id: int, factory: sessionmaker[Session]
+) -> dict[str, Any] | None:
+    """The entry-section decision that opened this position — its raw
+    ``signals`` dict (edge/spread/min_edge/max_spread/recent_move/...) at
+    decision time, plus any ``reason`` the section attached. ``None`` for a
+    position that predates entry_decision persistence."""
+    with factory() as session:
+        row = (
+            session.execute(
+                select(EntryDecisionRow)
+                .where(
+                    EntryDecisionRow.position_id == position_id,
+                    EntryDecisionRow.verdict == "ok",
+                )
+                .order_by(EntryDecisionRow.ts.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+    if row is None:
+        return None
+    signals: dict[str, Any] | None = None
+    if row.signals_json:
+        try:
+            parsed = json.loads(row.signals_json)
+            if isinstance(parsed, dict):
+                signals = parsed
+        except json.JSONDecodeError:
+            signals = None
+    return {"signals": signals, "reason": row.reason, "ts": row.ts}
 
 
 def _mark_unrealized(token_id: str, avg_entry_price: float, qty: float) -> float | None:
