@@ -49,6 +49,8 @@ def inspect_markets() -> dict[str, Any]:
                 "no_token_id": m.no_token_id,
                 "volume_24h": m.volume_24h,
                 "liquidity": m.liquidity,
+                "tags": list(m.event_tags),
+                "fee": m.taker_fee_rate,
                 "end_date": m.end_date.isoformat() if m.end_date else None,
                 "best_bid": yes_ob.best_bid if yes_ob else None,
                 "best_ask": yes_ob.best_ask if yes_ob else None,

@@ -123,6 +123,19 @@ def test_inspect_markets_without_order_book_has_null_price():
     assert mk["price_ts"] is None
 
 
+def test_inspect_markets_includes_tags_and_fee():
+    store = market_source_manager.store
+    raw, event = _raw("m1")
+    event["tags"] = [{"slug": "politics"}, {"slug": "elections"}]
+    market = normalize_gamma_market(raw, event=event)
+    assert market is not None
+    store.replace([market], PollSummary(ts=1.0, fetched=1, kept=1, reason_counts={}))
+
+    mk = TestClient(app).get("/api/inspect/markets").json()["markets"][0]
+    assert mk["tags"] == ["politics", "elections"]
+    assert mk["fee"] == 0.0
+
+
 # ---------- /api/inspect/news ----------
 
 

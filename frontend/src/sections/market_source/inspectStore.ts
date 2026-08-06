@@ -13,6 +13,8 @@ export type InspectMarket = {
   yes_token_id: string
   volume_24h: number
   liquidity: number
+  tags: string[]
+  fee: number | null
   end_date: string | null
   best_bid: number | null
   best_ask: number | null

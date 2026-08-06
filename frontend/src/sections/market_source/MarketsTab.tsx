@@ -19,6 +19,10 @@ function fmtNum(v: number): string {
   return `${Math.round(v)}`
 }
 
+function fmtPercent(v: number | null): string {
+  return v === null ? '—' : `${(v * 100).toFixed(1)}%`
+}
+
 export function MarketSourceMarketsTab() {
   const data = useMarketInspectStore((s) => s.data)
   const status = useMarketInspectStore((s) => s.status)
@@ -93,7 +97,20 @@ function MarketRow({ market: m }: { market: InspectMarket }) {
         <span>spread {fmtPrice(m.spread)}</span>
         <span>vol {fmtNum(m.volume_24h)}</span>
         <span>liq {fmtNum(m.liquidity)}</span>
+        <span>fee {fmtPercent(m.fee)}</span>
       </div>
+      {m.tags.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-1">
+          {m.tags.map((tag) => (
+            <span
+              key={tag}
+              className="rounded border border-neutral-700/50 bg-neutral-800 px-1.5 py-0.5 font-mono text-[10px] text-neutral-400"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
     </li>
   )
 }
