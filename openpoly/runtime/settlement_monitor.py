@@ -29,7 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Awaitable, Literal, Protocol
 
-from openpoly.markets.models import normalize_gamma_market
+from openpoly.markets.models import normalize_gamma_market, resolved_side
 from openpoly.markets.polymarket_api import fetch_markets_by_condition_id
 from openpoly.portfolio import HeldPosition, PortfolioStore
 from openpoly.runtime.section_log import SettlementDecision, settlement_log
@@ -102,16 +102,14 @@ def _settlement_price_for_side(outcome_prices: tuple[float, float], side: str) -
     """Map Gamma's resolved ``outcomePrices`` to a 0/1 final price for the
     held side.
 
-    Polymarket exposes outcomes as YES=index 0 / NO=index 1, with prices
-    summing to 1 once resolved (``[1, 0]`` YES wins, ``[0, 1]`` NO wins).
-    Returns None when the resolution is ambiguous (e.g. ``[0.5, 0.5]``
-    after a disputed market goes to split) — caller skips and waits.
+    Delegates the "is this a clean, unambiguous resolution" check to
+    ``resolved_side`` (shared with the position-detail postmortem read
+    path) — a disputed market's split outcome (e.g. ``[0.5, 0.5]``) yields
+    None here too, so the caller skips and waits.
     """
-    yes_price, no_price = outcome_prices
-    # Only accept clean 0/1 outcomes; anything else (split / unresolved)
-    # means downstream PnL math would be unreliable.
-    if {round(yes_price, 4), round(no_price, 4)} != {0.0, 1.0}:
+    if resolved_side(outcome_prices) is None:
         return None
+    yes_price, no_price = outcome_prices
     if side == "yes":
         return float(yes_price)
     if side == "no":

@@ -20,12 +20,18 @@ import {
 } from 'lightweight-charts'
 import { BandSeries, type BandData } from './bandSeries'
 import { localCrosshairTimeFormatter, localTickMarkFormatter } from './chartTimeFormat'
-import type { OrderBookSnapshot } from './orderBookClient'
+import type { OrderBookSnapshot, PricePoint } from './orderBookClient'
 
 export type OrderBookChartProps = {
   snapshots: OrderBookSnapshot[]
+  // CLOB-backfilled points for the stretch after local order-book sampling
+  // stopped (market fell out of the discovery catalog) — price only, no
+  // bid/ask band, so they extend the mid line without extending the band.
+  pricePoints?: PricePoint[]
   entry: { ts: number; price: number } | null
   exit: { ts: number; price: number } | null
+  // When the market has resolved, marks that instant on the mid line.
+  resolved?: { ts: number; winningSide: 'yes' | 'no' | null } | null
 }
 
 type MidPoint = { time: UTCTimestamp; value: number }
@@ -36,20 +42,23 @@ type Derived = {
   bySecond: Map<number, OrderBookSnapshot>
 }
 
-function derive(snapshots: OrderBookSnapshot[], depth: number): Derived {
+function derive(
+  snapshots: OrderBookSnapshot[],
+  depth: number,
+  pricePoints: PricePoint[],
+): Derived {
   // Dedupe by whole second (lightweight-charts needs strictly-increasing
   // integer time); keep the last snapshot in each second.
   const bySecond = new Map<number, OrderBookSnapshot>()
   for (const s of snapshots) bySecond.set(Math.floor(s.recorded_at), s)
   const ordered = [...bySecond.entries()].sort((a, b) => a[0] - b[0])
-  const mid: MidPoint[] = []
+  const midBySecond = new Map<number, number>()
   const band: BandData[] = []
   for (const [sec, s] of ordered) {
     const bestBid = s.bids[0]?.[0]
     const bestAsk = s.asks[0]?.[0]
     if (bestBid === undefined || bestAsk === undefined) continue
-    const time = sec as UTCTimestamp
-    mid.push({ time, value: (bestBid + bestAsk) / 2 })
+    midBySecond.set(sec, (bestBid + bestAsk) / 2)
     const levels = []
     for (let i = 0; i < depth; i++) {
       const b = s.bids[i]?.[0]
@@ -57,8 +66,18 @@ function derive(snapshots: OrderBookSnapshot[], depth: number): Derived {
       if (b === undefined || a === undefined) break
       levels.push({ bid: b, ask: a })
     }
-    band.push({ time, levels })
+    band.push({ time: sec as UTCTimestamp, levels })
   }
+  // CLOB-backfilled points cover the stretch where local sampling has no
+  // rows (past catalog eviction) — they extend the mid line with no band.
+  // A snapshot always wins on a shared second (has a real bid/ask to mark).
+  for (const [ts, price] of pricePoints) {
+    const sec = Math.floor(ts)
+    if (!midBySecond.has(sec)) midBySecond.set(sec, price)
+  }
+  const mid: MidPoint[] = [...midBySecond.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([time, value]) => ({ time: time as UTCTimestamp, value }))
   return { mid, band, bySecond }
 }
 
@@ -70,7 +89,13 @@ function formatLadder(s: OrderBookSnapshot): string {
   return [...asks, ...bids].join('\n')
 }
 
-export function OrderBookChart({ snapshots, entry, exit }: OrderBookChartProps) {
+export function OrderBookChart({
+  snapshots,
+  pricePoints = [],
+  entry,
+  exit,
+  resolved = null,
+}: OrderBookChartProps) {
   const [depth, setDepth] = useState(1)
   const containerRef = useRef<HTMLDivElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
@@ -81,8 +106,8 @@ export function OrderBookChart({ snapshots, entry, exit }: OrderBookChartProps) 
   const bySecondRef = useRef<Map<number, OrderBookSnapshot>>(new Map())
 
   const { mid, band, bySecond } = useMemo(
-    () => derive(snapshots, depth),
-    [snapshots, depth],
+    () => derive(snapshots, depth, pricePoints),
+    [snapshots, depth, pricePoints],
   )
 
   // Create the chart once.
@@ -170,9 +195,18 @@ export function OrderBookChart({ snapshots, entry, exit }: OrderBookChartProps) 
         text: `exit ${exit.price.toFixed(3)}`,
       })
     }
-    markersRef.current?.setMarkers(markers)
+    if (resolved) {
+      markers.push({
+        time: Math.floor(resolved.ts) as UTCTimestamp,
+        position: 'aboveBar',
+        color: '#8b949e',
+        shape: 'circle',
+        text: resolved.winningSide ? `resolved: ${resolved.winningSide}` : 'resolved',
+      })
+    }
+    markersRef.current?.setMarkers(markers.sort((a, b) => (a.time as number) - (b.time as number)))
     chartRef.current?.timeScale().fitContent()
-  }, [mid, band, bySecond, entry, exit])
+  }, [mid, band, bySecond, entry, exit, resolved])
 
   return (
     <div className="flex flex-col gap-2">

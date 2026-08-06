@@ -9,6 +9,8 @@ routes one open position through ``executor.execute_sell`` (close_reason
 
 from __future__ import annotations
 
+import json
+import logging
 import time
 from dataclasses import asdict
 from typing import Any
@@ -19,13 +21,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.db.engine import get_session_factory
-from openpoly.db.tables import AnalyzerCallRow, ExitDecisionRow, NewsItemRow
+from openpoly.db.tables import AnalyzerCallRow, ExitDecisionRow, NewsItemRow, OrderBookSnapshot
 from openpoly.execution import executor
 from openpoly.markets.manager import manager as market_source_manager
-from openpoly.markets.models import Market, polymarket_url
+from openpoly.markets.models import Market, normalize_gamma_market, polymarket_url, resolved_side
+from openpoly.markets.polymarket_api import (
+    fetch_market_by_id,
+    fetch_markets_by_condition_id,
+    fetch_price_history_range,
+)
 from openpoly.portfolio import PortfolioStore
 from openpoly.portfolio.equity import build_equity_curve
 from openpoly.portfolio.models import PositionRecord
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -232,6 +241,138 @@ def get_position_by_id(
     body["exit_decision"] = _lookup_exit_decision(position_id, factory)
     body["unrealized_pnl"] = _unrealized_pnl(record)
     return body
+
+
+# Beyond this local-sampling gap, backfill from CLOB rather than trust the
+# last local snapshot is "close enough" — roughly 3x the default
+# ``book_sample_interval_seconds`` (60s), so ordinary sampling jitter never
+# triggers an extra network call.
+PRICE_HISTORY_GAP_THRESHOLD_SECONDS = 180
+POSITION_PRICE_HISTORY_SNAPSHOT_LIMIT = 2000
+# How long a durable market lookup is trusted before re-fetching — bounds
+# Gamma call volume under PositionDetail's ~3s poll without materially
+# staling the expiry/resolution state it reports.
+MARKET_LOOKUP_CACHE_TTL_SECONDS = 30
+
+_market_lookup_cache: dict[str, tuple[float, Market | None]] = {}
+
+
+async def _lookup_market_durable(market_id: str, condition_id: str) -> Market | None:
+    """Resolve a position's market even after it has fallen out of the live
+    discovery catalog (near-expiry filtered, or resolved).
+
+    ``_lookup_market`` (below) only sees markets currently in the in-memory
+    catalog, which evicts a market well before expiry once a position closes
+    on it. This instead calls Gamma directly:
+
+    1. ``fetch_market_by_id`` (bypasses the ``/events`` top-100 window, same
+       call the holding-sync hook uses to keep open positions catalogued) —
+       covers a market that's still trading but fell out of discovery.
+    2. If that comes back empty, or the market's ``end_date`` has already
+       passed (resolution likely imminent or done), also tries
+       ``fetch_markets_by_condition_id`` (``closed=true``) — the resolved-only
+       path ``SettlementMonitor`` uses, since Gamma's id lookup mirrors
+       ``/events``' open-only default and won't surface a resolved market.
+
+    Cached briefly (``MARKET_LOOKUP_CACHE_TTL_SECONDS``) so a ~3s poll
+    doesn't hammer Gamma on every tick.
+    """
+    now = time.time()
+    cached = _market_lookup_cache.get(condition_id)
+    if cached is not None and now - cached[0] < MARKET_LOOKUP_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    market = await fetch_market_by_id(market_id)
+    end_ts = market.end_date.timestamp() if market is not None and market.end_date else None
+    if market is None or (end_ts is not None and end_ts < now):
+        raw_markets = await fetch_markets_by_condition_id([condition_id])
+        if raw_markets:
+            resolved_market = normalize_gamma_market(raw_markets[0])
+            if resolved_market is not None:
+                market = resolved_market
+
+    _market_lookup_cache[condition_id] = (now, market)
+    return market
+
+
+@router.get("/positions/{position_id}/price-history")
+async def get_position_price_history(
+    position_id: int,
+    store: PortfolioStore = Depends(get_portfolio_store),
+    factory: sessionmaker[Session] = Depends(get_session_factory),
+) -> dict[str, Any]:
+    """Price history for one position, spanning open through close and on to
+    the market's expiry/resolution — not frozen at ``closed_at`` the way a
+    raw ``/api/inspect/order-books/{token_id}`` window would be.
+
+    Local order-book sampling (``snapshots``: bid/ask bands + mid, same shape
+    as the inspect route) stops once a market falls out of the live discovery
+    catalog — for a closed position that's typically within one poll of
+    close, well before expiry. Any gap between the last local snapshot and
+    the window's upper bound is backfilled from Polymarket's own hosted CLOB
+    price history (``price_points``: price only, no bands).
+
+    Response fields: ``snapshots``, ``price_points`` (``[ts, price]`` pairs),
+    ``market_end_date`` (epoch seconds, or None if the market can't be
+    resolved at all), ``market_resolved`` (bool), ``winning_side``
+    (``"yes"`` / ``"no"`` / None — None while unresolved or disputed).
+    """
+    record = store.get_position(position_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="position not found")
+
+    market = await _lookup_market_durable(record.market_id, record.condition_id)
+    market_end_ts = market.end_date.timestamp() if market is not None and market.end_date else None
+    market_resolved = market is not None and market.closed and market.outcome_prices is not None
+    winning_side = resolved_side(market.outcome_prices) if market is not None else None
+
+    now = time.time()
+    since = record.opened_at
+    until = min(now, market_end_ts) if market_end_ts is not None else now
+
+    with factory() as session:
+        stmt = (
+            select(OrderBookSnapshot)
+            .where(
+                OrderBookSnapshot.token_id == record.token_id,
+                OrderBookSnapshot.recorded_at >= since,
+                OrderBookSnapshot.recorded_at <= until,
+            )
+            .order_by(OrderBookSnapshot.recorded_at)
+            .limit(POSITION_PRICE_HISTORY_SNAPSHOT_LIMIT)
+        )
+        rows = session.execute(stmt).scalars().all()
+
+    snapshots = [
+        {
+            "recorded_at": r.recorded_at,
+            "bids": json.loads(r.bids_json),
+            "asks": json.loads(r.asks_json),
+        }
+        for r in rows
+    ]
+
+    last_local_ts = snapshots[-1]["recorded_at"] if snapshots else since
+    price_points: list[tuple[float, float]] = []
+    if until - last_local_ts > PRICE_HISTORY_GAP_THRESHOLD_SECONDS:
+        try:
+            price_points = fetch_price_history_range(
+                record.token_id, start_ts=last_local_ts, end_ts=until
+            )
+        except Exception:  # noqa: BLE001 — best-effort backfill; local data still renders
+            logger.warning(
+                "CLOB price-history backfill failed for token %s", record.token_id, exc_info=True
+            )
+
+    return {
+        "position_id": position_id,
+        "token_id": record.token_id,
+        "snapshots": snapshots,
+        "price_points": [[ts, price] for ts, price in price_points],
+        "market_end_date": market_end_ts,
+        "market_resolved": market_resolved,
+        "winning_side": winning_side,
+    }
 
 
 def _lookup_market(condition_id: str) -> Market | None:

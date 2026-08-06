@@ -6,7 +6,8 @@
  *   - Positions → GET /api/positions, /api/fills
  *               → GET /api/positions/{id}      (detail)
  *               → POST /api/positions/close-all (mutation → toast)
- *               → GET /api/inspect/order-books/{token_id} (detail chart)
+ *               → GET /api/inspect/order-books/{token_id} (Inspector debug page)
+ *               → GET /api/positions/{id}/price-history (detail chart)
  *   - News      → GET /api/inspect/news + the 4 section logs (pipeline join)
  *
  * D3: 4 positions (2 open / 2 closed; one closed win, one closed loss) with a
@@ -33,6 +34,8 @@ import type {
 import type {
   OrderBookHistory,
   OrderBookSnapshot,
+  PositionPriceHistory,
+  PricePoint,
 } from '../../routes/activity/orderBookClient'
 import type { CloseAllResult } from '../../setting/walletStore'
 // The canvas StatusIndicators read the FULL log envelope (counters / last_at /
@@ -271,6 +274,69 @@ function round3(n: number): number {
   return Math.round(n * 1000) / 1000
 }
 
+// ---- position price history (Position detail — chart-through-expiry) -----
+
+// Mirrors the real backend's shape: local sampling runs from open through
+// close (or 'now' for an open position), then a CLOB-style backfill
+// (`price_points`, no bid/ask band) covers the stretch after close through
+// 'now' — this is what makes the demo chart keep extending past the close
+// marker instead of freezing there.
+function buildPriceHistory(position: PositionRecord): PositionPriceHistory {
+  const localEnd = position.closed_at ?? NOW
+  const snapshots = buildSnapshotsBetween(position.opened_at, localEnd)
+  const pricePoints: PricePoint[] =
+    position.closed_at !== null ? buildPricePointsBetween(position.closed_at, NOW) : []
+  return {
+    position_id: position.id,
+    token_id: position.token_id,
+    snapshots,
+    price_points: pricePoints,
+    market_end_date: NOW + 6 * HOUR,
+    market_resolved: false,
+    winning_side: null,
+  }
+}
+
+function buildSnapshotsBetween(start: number, end: number): OrderBookSnapshot[] {
+  const span = Math.max(end - start, 1)
+  const n = Math.max(2, Math.round(span / OB_STEP) + 1)
+  const snapshots: OrderBookSnapshot[] = []
+  for (let i = 0; i < n; i++) {
+    const recorded_at = start + (span * i) / (n - 1)
+    const t = i / (n - 1)
+    const mid = 0.42 + 0.19 * t + Math.sin(i / 2.5) * 0.012
+    const bid = round3(mid - 0.01)
+    const ask = round3(mid + 0.01)
+    snapshots.push({
+      recorded_at,
+      bids: [
+        [bid, 120 + i * 4],
+        [round3(bid - 0.01), 240],
+      ],
+      asks: [
+        [ask, 110 + i * 3],
+        [round3(ask + 0.01), 220],
+      ],
+    })
+  }
+  return snapshots
+}
+
+function buildPricePointsBetween(start: number, end: number): PricePoint[] {
+  const span = Math.max(end - start, 1)
+  const n = Math.max(2, Math.round(span / OB_STEP) + 1)
+  const points: PricePoint[] = []
+  for (let i = 0; i < n; i++) {
+    const ts = start + (span * i) / (n - 1)
+    const t = i / (n - 1)
+    // Drifts gently against the position — illustrates the postmortem's
+    // "price kept moving after you closed" framing.
+    const price = round3(0.61 + Math.sin(i / 2) * 0.03 - t * 0.08)
+    points.push([ts, price])
+  }
+  return points
+}
+
 // ---- news pipeline (News tab) --------------------------------------------
 
 const newsItems: NewsItem[] = [
@@ -473,6 +539,22 @@ export const activityRoutes: MockRoute[] = [
   {
     pattern: /^\/api\/inspect\/order-books\/([^/]+)$/,
     handler: (ctx) => buildOrderBook(decodeURIComponent(ctx.params[1])),
+  },
+
+  // Position price history — spans open through close and on to expiry
+  // (PositionDetail's chart-through-expiry read path). 404 mirrors the
+  // /positions/{id} route above for an unknown id.
+  {
+    pattern: /^\/api\/positions\/([^/]+)\/price-history$/,
+    handler: (ctx) => {
+      const row = positionById.get(decodeURIComponent(ctx.params[1]))
+      return row
+        ? buildPriceHistory(row)
+        : new Response(JSON.stringify({ detail: 'not found' }), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          })
+    },
   },
 
   // News tab: persisted news + the section logs it joins against.

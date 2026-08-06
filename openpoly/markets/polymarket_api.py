@@ -333,6 +333,35 @@ def fetch_price_history(
     return parse_price_history(raw)
 
 
+def fetch_price_history_range(
+    token_id: str,
+    *,
+    start_ts: float,
+    end_ts: float,
+    fidelity: int = 10,
+    base_url: str = CLOB_BASE_URL,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> list[tuple[float, float]]:
+    """Fetch one token's price history over an absolute ``[start_ts, end_ts]``
+    window from CLOB ``/prices-history``.
+
+    Sibling to ``fetch_price_history``, which is anchored to "now minus a
+    trailing window" — this variant takes explicit bounds so a caller can
+    backfill an arbitrary historical range (e.g. from local order-book
+    sampling's last recorded point through a market's expiry), independent of
+    wall-clock "now". Returns ``(epoch_ts, price)`` points oldest-first. Reads
+    only — no auth. Retries once; raises on a second failure.
+    """
+    params = {
+        "market": token_id,
+        "startTs": str(int(start_ts)),
+        "endTs": str(int(end_ts)),
+        "fidelity": str(fidelity),
+    }
+    raw = _sync_get_json(f"{base_url}/prices-history", params, timeout)
+    return parse_price_history(raw)
+
+
 # Injectable seam: (token_id, *, window_min) -> price history points.
 PriceHistoryFetcher = Callable[..., list[tuple[float, float]]]
 

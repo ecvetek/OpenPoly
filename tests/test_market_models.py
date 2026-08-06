@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openpoly.markets.models import Market, normalize_gamma_market, polymarket_url
+from openpoly.markets.models import Market, normalize_gamma_market, polymarket_url, resolved_side
 
 
 def _raw(**overrides):
@@ -180,3 +180,22 @@ def test_normalize_parses_neg_risk_false_when_absent() -> None:
     m = normalize_gamma_market(raw, event={"id": "e", "title": "E", "tags": []})
     assert m is not None
     assert m.neg_risk is False
+
+
+# ---------- resolved_side ----------
+
+
+def test_resolved_side_yes_wins() -> None:
+    assert resolved_side((1.0, 0.0)) == "yes"
+
+
+def test_resolved_side_no_wins() -> None:
+    assert resolved_side((0.0, 1.0)) == "no"
+
+
+def test_resolved_side_none_when_unresolved() -> None:
+    assert resolved_side(None) is None
+
+
+def test_resolved_side_none_when_disputed_split() -> None:
+    assert resolved_side((0.5, 0.5)) is None

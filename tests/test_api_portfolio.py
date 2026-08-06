@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from openpoly.api.main import app
 from openpoly.api.portfolio_routes import get_portfolio_store
 from openpoly.db.engine import get_session_factory, init_db, make_engine, make_session_factory
-from openpoly.db.tables import AnalyzerCallRow, ExitDecisionRow, NewsItemRow
+from openpoly.db.tables import AnalyzerCallRow, ExitDecisionRow, NewsItemRow, OrderBookSnapshot
 from openpoly.portfolio import PortfolioStore
 
 
@@ -998,3 +998,225 @@ def test_get_position_exit_decision_ignores_other_positions_and_skips(env) -> No
         session.commit()
     body = client.get(f"/api/positions/{h1.position_id}").json()
     assert body["exit_decision"] is None
+
+
+# ---------- /api/positions/{id}/price-history ----------
+
+
+def _market(**overrides):
+    from openpoly.markets.models import Market
+
+    base = dict(
+        market_id="m1",
+        condition_id="0xm1",
+        question="Q?",
+        slug="q",
+        yes_token_id="ty1",
+        no_token_id="tn1",
+        end_date=None,
+        best_bid=None,
+        best_ask=None,
+        spread=None,
+        last_trade_price=None,
+        volume_24h=0.0,
+        liquidity=0.0,
+        taker_fee_rate=None,
+        closed=False,
+        accepting_orders=True,
+        enable_order_book=True,
+        event_id=None,
+        event_title=None,
+        event_tags=(),
+    )
+    base.update(overrides)
+    return Market(**base)
+
+
+def test_price_history_404_for_missing_position(env) -> None:
+    _store, client, _factory = env
+    assert client.get("/api/positions/99999/price-history").status_code == 404
+
+
+def test_price_history_uses_local_snapshots_when_coverage_reaches_now(env, monkeypatch) -> None:
+    """Local sampling already covers right up to 'now' -> no CLOB backfill
+    call needed; snapshots (with bid/ask bands) are returned as-is."""
+    import json as _json
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, factory = env
+    now = _time.time()
+    h = _open(store, "m1", "yes", "ty1", ts=now - 120)
+
+    with factory() as session:
+        session.add_all(
+            [
+                OrderBookSnapshot(
+                    token_id="ty1",
+                    recorded_at=now - 120,
+                    bids_json=_json.dumps([[0.40, 10.0]]),
+                    asks_json=_json.dumps([[0.42, 10.0]]),
+                ),
+                OrderBookSnapshot(
+                    token_id="ty1",
+                    recorded_at=now - 5,
+                    bids_json=_json.dumps([[0.45, 10.0]]),
+                    asks_json=_json.dumps([[0.47, 10.0]]),
+                ),
+            ]
+        )
+        session.commit()
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        assert market_id == "m1"
+        return _market(closed=False)
+
+    def fail_price_history_range(*args, **kwargs):
+        raise AssertionError("should not backfill when local coverage already reaches 'now'")
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", fail_price_history_range)
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history").json()
+    assert body["token_id"] == "ty1"
+    assert len(body["snapshots"]) == 2
+    assert body["price_points"] == []
+    assert body["market_end_date"] is None
+    assert body["market_resolved"] is False
+    assert body["winning_side"] is None
+
+
+def test_price_history_backfills_gap_from_clob(env, monkeypatch) -> None:
+    """Local sampling stopped long ago (market fell out of the discovery
+    catalog) -> the tail gap up to 'now' is backfilled via CLOB."""
+    import json as _json
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, factory = env
+    now = _time.time()
+    opened_at = now - 10_000
+    h = _open(store, "m1", "yes", "ty1", ts=opened_at)
+
+    with factory() as session:
+        session.add(
+            OrderBookSnapshot(
+                token_id="ty1",
+                recorded_at=opened_at + 30,
+                bids_json=_json.dumps([[0.40, 10.0]]),
+                asks_json=_json.dumps([[0.42, 10.0]]),
+            )
+        )
+        session.commit()
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    captured: dict = {}
+
+    def fake_price_history_range(token_id, *, start_ts, end_ts, **kwargs):
+        captured["token_id"] = token_id
+        captured["start_ts"] = start_ts
+        captured["end_ts"] = end_ts
+        return [(start_ts + 100, 0.55), (end_ts, 0.60)]
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", fake_price_history_range)
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history").json()
+    assert len(body["snapshots"]) == 1
+    assert captured["token_id"] == "ty1"
+    assert captured["start_ts"] == pytest.approx(opened_at + 30)
+    assert body["price_points"] == [
+        [captured["start_ts"] + 100, 0.55],
+        [captured["end_ts"], 0.60],
+    ]
+
+
+def test_price_history_reports_resolution_and_winning_side(env, monkeypatch) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    h = _open(store, "m1", "yes", "ty1", ts=now - 100)
+    store.close_position(h.position_id, sell_price=0.30, ts=now - 50, close_reason="stop_loss")
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=True, accepting_orders=False, outcome_prices=(1.0, 0.0))
+
+    async def fail_fetch_markets_by_condition_id(condition_ids, **kwargs):
+        raise AssertionError("id lookup already reported closed -> no resolved-only fallback")
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_markets_by_condition_id", fail_fetch_markets_by_condition_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", lambda *a, **k: [])
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history").json()
+    assert body["market_resolved"] is True
+    assert body["winning_side"] == "yes"
+
+
+def test_price_history_falls_back_to_resolved_only_lookup_past_end_date(env, monkeypatch) -> None:
+    """The id-based lookup mirrors Gamma's open-only default and may miss a
+    market that has actually resolved -> once end_date has passed, the
+    closed=true fallback is tried too."""
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    h = _open(store, "m1", "yes", "ty1", ts=now - 200)
+    store.close_position(h.position_id, sell_price=0.30, ts=now - 100, close_reason="stop_loss")
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return None  # id lookup no longer sees the resolved market
+
+    async def fake_fetch_markets_by_condition_id(condition_ids, **kwargs):
+        assert condition_ids == ["0xm1"]
+        return [{"__resolved__": True}]
+
+    def fake_normalize(raw, **kwargs):
+        assert raw == {"__resolved__": True}
+        return _market(closed=True, outcome_prices=(0.0, 1.0))
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_markets_by_condition_id", fake_fetch_markets_by_condition_id)
+    monkeypatch.setattr(routes, "normalize_gamma_market", fake_normalize)
+    monkeypatch.setattr(routes, "fetch_price_history_range", lambda *a, **k: [])
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history").json()
+    assert body["market_resolved"] is True
+    assert body["winning_side"] == "no"
+
+
+def test_price_history_market_lookup_is_cached(env, monkeypatch) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    h = _open(store, "m1", "yes", "ty1", ts=now - 10)
+
+    calls = {"n": 0}
+
+    async def counting_fetch_market_by_id(market_id, **kwargs):
+        calls["n"] += 1
+        return _market(closed=False)
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", counting_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", lambda *a, **k: [])
+
+    client.get(f"/api/positions/{h.position_id}/price-history")
+    client.get(f"/api/positions/{h.position_id}/price-history")
+    assert calls["n"] == 1

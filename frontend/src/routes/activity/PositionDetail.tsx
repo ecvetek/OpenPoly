@@ -1,14 +1,17 @@
 /**
- * Position detail — one position's order book chart + the LLM's
- * reason for opening it. Reached by clicking a row in the Positions page
+ * Position detail — one position's price chart + the LLM's reason for
+ * opening it. Reached by clicking a row in the Positions page
  * (/positions/:positionId).
  *
  * PD2/PD3 augment the backend response with `market_question` (catalog
  * lookup) and `analyzer_decisions` (analyzer_log lookup by news_id). PD5
- * renders both in the header / a dedicated rationale block. Per OD6, both
- * fields ride with the rest of `DetailData` through `frozenRef`, so a
- * closed position page never re-flickers when catalog / analyzer log
- * evicts the source data underneath.
+ * renders both in the header / a dedicated rationale block.
+ *
+ * The chart keeps polling (via `fetchPositionPriceHistory`) past a
+ * position's own close — through the market's actual resolution, not just
+ * `closed_at` — so a closed trade can be judged in hindsight (see
+ * `PositionPostmortem`). Only once the market has cleanly resolved does
+ * `frozenRef` take over and stop polling for good.
  */
 import { useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
@@ -20,9 +23,10 @@ import {
 } from '../../sections/news_source/time'
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import { OrderBookChart } from './OrderBookChart'
-import { fetchOrderBookHistory, type OrderBookHistory } from './orderBookClient'
+import { fetchPositionPriceHistory, type PositionPriceHistory } from './orderBookClient'
 import { formatPnl, formatPnlPercent, pnlClass, pnlPercent } from './format'
 import { StatusBadge } from './PositionCard'
+import { PositionPostmortem } from './PositionPostmortem'
 import type { CloseResult, PositionRecord } from './portfolioTypes'
 import { usePoll } from './usePoll'
 
@@ -44,7 +48,7 @@ async function closePosition(id: number): Promise<CloseResult> {
 
 type DetailData = {
   position: PositionRecord | null
-  history: OrderBookHistory | null
+  history: PositionPriceHistory | null
 }
 
 export function PositionDetail() {
@@ -62,13 +66,13 @@ export function PositionDetail() {
     }
     const position = await fetchPosition(pid)
     if (position === null) return { position: null, history: null }
-    const history = await fetchOrderBookHistory(
-      position.token_id,
-      position.opened_at,
-      position.closed_at,
-    )
+    const history = await fetchPositionPriceHistory(position.id)
     const result: DetailData = { position, history }
-    if (position.closed_at !== null) frozenRef.current = { positionId: pid, data: result }
+    // Freeze only once the market has actually resolved — a closed
+    // position keeps polling past `closed_at` (the backend keeps extending
+    // the window up to the market's expiry) so the chart/postmortem can
+    // show what the market did afterward.
+    if (history.market_resolved) frozenRef.current = { positionId: pid, data: result }
     return result
   })
   const [closing, setClosing] = useState(false)
@@ -97,6 +101,11 @@ export function PositionDetail() {
 
   const p = data.position
   const snapshots = data.history?.snapshots ?? []
+  const pricePoints = data.history?.price_points ?? []
+  const resolvedMarker =
+    data.history?.market_resolved && data.history.market_end_date != null
+      ? { ts: data.history.market_end_date, winningSide: data.history.winning_side }
+      : null
   const exitPrice =
     p.closed_at !== null && p.realized_pnl !== null
       ? p.avg_entry_price + p.realized_pnl / p.qty
@@ -199,13 +208,18 @@ export function PositionDetail() {
 
           {/* Market expiry — "<time remaining> / <exact resolution datetime>",
              flips to "expired / <datetime>" once the market's end_date has
-             passed (the position itself may still be open pending settlement). */}
-          {p.market_end_date != null && (
+             passed (the position itself may still be open pending settlement).
+             Prefers the price-history lookup (durable — resolves by
+             condition_id even once the market is evicted from the live
+             catalog) over the plain catalog lookup, which goes null in
+             exactly that case. */}
+          {(data.history?.market_end_date ?? p.market_end_date) != null && (
             <div
               className="text-[10px] text-neutral-600 font-mono"
-              title={formatUTC(p.market_end_date)}
+              title={formatUTC(data.history?.market_end_date ?? p.market_end_date ?? 0)}
             >
-              {formatTimeRemaining(p.market_end_date)} / {formatLocalDateTime(p.market_end_date)}
+              {formatTimeRemaining(data.history?.market_end_date ?? p.market_end_date ?? 0)} /{' '}
+              {formatLocalDateTime(data.history?.market_end_date ?? p.market_end_date ?? 0)}
             </div>
           )}
 
@@ -332,22 +346,29 @@ export function PositionDetail() {
             Backend unreachable; data may be stale.
           </div>
         )}
-        {snapshots.length === 0 ? (
+        {snapshots.length === 0 && pricePoints.length === 0 ? (
           <div className="h-72 grid place-items-center text-[11px] text-neutral-500">
-            No order book data for this position.
+            No price data for this position.
           </div>
         ) : (
           <OrderBookChart
             snapshots={snapshots}
+            pricePoints={pricePoints}
             entry={{ ts: p.opened_at, price: p.avg_entry_price }}
             exit={
               p.closed_at !== null && exitPrice !== null
                 ? { ts: p.closed_at, price: exitPrice }
                 : null
             }
+            resolved={resolvedMarker}
           />
         )}
       </div>
+
+      {/* Postmortem: only for a closed, losing position — compares what
+         actually happened against holding to settlement (once resolved) or
+         shows the price trend since close (while still pending). */}
+      {data.history && <PositionPostmortem position={p} priceHistory={data.history} />}
     </div>
   )
 }

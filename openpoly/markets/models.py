@@ -13,7 +13,7 @@ import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
@@ -198,6 +198,23 @@ def _parse_outcome_prices(value: Any) -> tuple[float, float] | None:
     if a is None or b is None:
         return None
     return (a, b)
+
+
+def resolved_side(outcome_prices: tuple[float, float] | None) -> Literal["yes", "no"] | None:
+    """Which side cleanly won, given a market's resolved ``outcome_prices``.
+
+    Outcomes are YES=index 0 / NO=index 1, summing to 1 once resolved
+    (``(1, 0)`` YES wins, ``(0, 1)`` NO wins). Returns None when unresolved
+    (``outcome_prices`` is None) or the outcome is ambiguous (e.g. a disputed
+    market's ``(0.5, 0.5)`` split) — only a clean 0/1 outcome has a definite
+    winner.
+    """
+    if outcome_prices is None:
+        return None
+    yes_price, no_price = outcome_prices
+    if {round(yes_price, 4), round(no_price, 4)} != {0.0, 1.0}:
+        return None
+    return "yes" if round(yes_price, 4) == 1.0 else "no"
 
 
 @dataclass(frozen=True)
