@@ -78,13 +78,20 @@ class MarketSourceConfig(BaseModel):
         le=3600,
         description="Seconds between order book depth samples.",
     )
+    position_book_interval_seconds: int = Field(
+        default=5,
+        ge=2,
+        le=300,
+        description="Seconds between order book refreshes for tokens with an open position.",
+    )
     filter: MarketFilterConfig = Field(default_factory=MarketFilterConfig)
 
 
 @dataclass(frozen=True)
 class LogEvent:
     ts: float
-    kind: str  # started|stopped|poll_ok|poll_error|book_sample_ok|book_sample_error
+    kind: str  # started|stopped|poll_ok|poll_error|book_sample_ok|book_sample_error|
+    # position_book_sample_ok|position_book_sample_error
     detail: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -162,6 +169,7 @@ class MarketSourceManager:
             self._tasks = [
                 asyncio.create_task(self._run_loop()),
                 asyncio.create_task(self._run_book_loop()),
+                asyncio.create_task(self._run_position_book_loop()),
             ]
             self._record_event("started")
             return self._snapshot()
@@ -356,6 +364,63 @@ class MarketSourceManager:
                 await asyncio.wait_for(
                     self._stop.wait(),
                     timeout=self._config.book_sample_interval_seconds,
+                )
+
+    async def _sample_position_books_once(self) -> int:
+        """Fast sample cycle: fetch /book only for tokens with an open
+        position, on a far shorter interval than the full-catalog sweep, so
+        the P&L display doesn't lag behind Polymarket's own live price by up
+        to a full ``book_sample_interval_seconds``. Merges into the store
+        rather than replacing it — the full-catalog sweep still owns the
+        rest of the catalog's order books."""
+        if self._portfolio_store is None:
+            return 0
+        try:
+            positions = self._portfolio_store.get_open_positions()
+        except Exception as exc:  # noqa: BLE001 — loop must survive DB hiccup
+            logger.warning("position book sample: get_open_positions failed: %s", exc)
+            return 0
+
+        token_ids = {p.token_id for p in positions}
+        if not token_ids:
+            return 0
+        sem = asyncio.Semaphore(BOOK_SAMPLE_CONCURRENCY)
+
+        async def _one(token_id: str) -> OrderBook | None:
+            async with sem:
+                try:
+                    return await self._book_fetcher(token_id)
+                except Exception as exc:  # noqa: BLE001 — keep cycle alive
+                    logger.warning("order book fetch failed for %s: %s", token_id, exc)
+                    return None
+
+        results = await asyncio.gather(*(_one(t) for t in token_ids))
+        books = [b for b in results if b is not None]
+        self.store.update_order_books(books)
+        if self._book_persist is not None:
+            for book in books:
+                self._book_persist(book)
+        return len(books)
+
+    async def _run_position_book_loop(self) -> None:
+        """Third loop: samples order books for held tokens only, faster than
+        the full-catalog book loop."""
+        assert self._config is not None
+        while not self._stop.is_set():
+            try:
+                count = await self._sample_position_books_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — loop must survive
+                self._record_event("position_book_sample_error", repr(exc)[:200])
+                logger.warning("position order book sample cycle failed: %s", exc)
+            else:
+                self._record_event("position_book_sample_ok", f"{count} books")
+            await asyncio.sleep(0)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=self._config.position_book_interval_seconds,
                 )
 
     def _snapshot(self) -> StatusSnapshot:

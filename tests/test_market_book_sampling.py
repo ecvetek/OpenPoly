@@ -9,10 +9,37 @@ import asyncio
 from openpoly.markets.manager import MarketSourceConfig, MarketSourceManager
 from openpoly.markets.models import OrderBook
 from openpoly.markets.store import MarketStore
+from openpoly.portfolio.models import HeldPosition
 
 
 def _book(token_id: str) -> OrderBook:
     return OrderBook(token_id=token_id, ts=1.0, bids=[(0.4, 1.0)], asks=[(0.5, 1.0)])
+
+
+def _held(position_id: int, token_id: str) -> HeldPosition:
+    return HeldPosition(
+        position_id=position_id,
+        market_id=f"m{position_id}",
+        side="yes",
+        token_id=token_id,
+        condition_id=f"0xm{position_id}",
+        qty=1.0,
+        avg_entry_price=0.5,
+        opened_at=1.0,
+    )
+
+
+class _FakePortfolioStore:
+    def __init__(self, positions: list[HeldPosition]) -> None:
+        self._positions = positions
+
+    def get_open_positions(self) -> list[HeldPosition]:
+        return list(self._positions)
+
+
+class _RaisingPortfolioStore:
+    def get_open_positions(self) -> list[HeldPosition]:
+        raise RuntimeError("db hiccup")
 
 
 def _raw_pair(market_id: str):
@@ -82,11 +109,25 @@ def test_store_get_order_book_missing():
     assert store.get_order_book("zzz") is None
 
 
+def test_store_update_order_books_merges():
+    store = MarketStore()
+    store.set_order_books([_book("a"), _book("b")])
+    store.update_order_books([_book("b"), _book("c")])
+    assert store.order_book_count == 3
+    assert store.get_order_book("a") is not None  # untouched by the merge
+    assert store.get_order_book("b") is not None
+    assert store.get_order_book("c") is not None
+
+
 # ---------- MarketSourceConfig ----------
 
 
 def test_config_book_interval_default():
     assert MarketSourceConfig().book_sample_interval_seconds == 60
+
+
+def test_config_position_book_interval_default():
+    assert MarketSourceConfig().position_book_interval_seconds == 5
 
 
 # ---------- _sample_books_once ----------
@@ -138,6 +179,53 @@ async def test_sample_books_tolerates_fetch_failure():
     assert mgr.store.get_order_book("yes-c") is not None
 
 
+# ---------- _sample_position_books_once ----------
+
+
+async def test_sample_position_books_no_portfolio_store():
+    mgr = MarketSourceManager(fetcher=_fetcher([]), book_fetcher=_book_fetcher)
+    mgr._config = MarketSourceConfig()
+    count = await mgr._sample_position_books_once()
+    assert count == 0
+    assert mgr.store.order_book_count == 0
+
+
+async def test_sample_position_books_no_open_positions():
+    mgr = MarketSourceManager(fetcher=_fetcher([]), book_fetcher=_book_fetcher)
+    mgr._config = MarketSourceConfig()
+    mgr.set_portfolio_store(_FakePortfolioStore([]))
+    count = await mgr._sample_position_books_once()
+    assert count == 0
+
+
+async def test_sample_position_books_tolerates_store_failure():
+    mgr = MarketSourceManager(fetcher=_fetcher([]), book_fetcher=_book_fetcher)
+    mgr._config = MarketSourceConfig()
+    mgr.set_portfolio_store(_RaisingPortfolioStore())
+    count = await mgr._sample_position_books_once()
+    assert count == 0
+
+
+async def test_sample_position_books_fetches_only_held_tokens_and_merges():
+    mgr = MarketSourceManager(
+        fetcher=_fetcher([_raw_pair("a"), _raw_pair("b")]),
+        book_fetcher=_book_fetcher,
+    )
+    mgr._config = MarketSourceConfig()
+    await mgr._poll_once()
+    await mgr._sample_books_once()  # full sweep populates all 4 tokens first
+    assert mgr.store.order_book_count == 4
+
+    mgr.set_portfolio_store(_FakePortfolioStore([_held(1, "yes-a")]))
+    count = await mgr._sample_position_books_once()
+    assert count == 1
+    # merge, not replace — the other 3 tokens from the full sweep survive
+    assert mgr.store.order_book_count == 4
+    assert mgr.store.get_order_book("yes-a") is not None
+    assert mgr.store.get_order_book("no-a") is not None
+    assert mgr.store.get_order_book("yes-b") is not None
+
+
 # ---------- book loop lifecycle ----------
 
 
@@ -158,7 +246,30 @@ async def test_book_loop_runs_on_start():
     assert mgr.status().state == "stopped"
 
 
-async def test_stop_cancels_both_loops():
+async def test_position_book_loop_runs_on_start():
+    mgr = MarketSourceManager(
+        fetcher=_fetcher([_raw_pair("a")]),
+        book_fetcher=_book_fetcher,
+    )
+    mgr._config = MarketSourceConfig()
+    await mgr._poll_once()
+    mgr.set_portfolio_store(_FakePortfolioStore([_held(1, "yes-a")]))
+
+    await mgr.start(
+        MarketSourceConfig(
+            poll_interval_seconds=3600,
+            book_sample_interval_seconds=3600,
+            position_book_interval_seconds=2,
+        )
+    )
+    await _wait_until(lambda: any(e.kind == "position_book_sample_ok" for e in mgr.events()))
+    assert mgr.store.get_order_book("yes-a") is not None
+
+    await mgr.stop()
+    assert mgr.status().state == "stopped"
+
+
+async def test_stop_cancels_all_three_loops():
     mgr = MarketSourceManager(fetcher=_fetcher([_raw_pair("a")]), book_fetcher=_book_fetcher)
     await mgr.start(
         MarketSourceConfig(poll_interval_seconds=3600, book_sample_interval_seconds=3600)

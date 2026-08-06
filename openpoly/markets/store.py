@@ -118,6 +118,14 @@ class MarketStore:
         """Atomically replace the order-book set with a fresh sample batch."""
         self._order_books = {b.token_id: b for b in books}
 
+    def update_order_books(self, books: list[OrderBook]) -> None:
+        """Upsert a partial batch into the order-book set, leaving other
+        tokens' entries untouched. Used by the fast position-only sample
+        loop (MS9), which only ever sees a subset of the catalog and must
+        not evict the full-catalog sweep's entries for everything else."""
+        for b in books:
+            self._order_books[b.token_id] = b
+
     def get_order_book(self, token_id: str) -> OrderBook | None:
         return self._order_books.get(token_id)
 
