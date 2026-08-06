@@ -355,10 +355,13 @@ class PipelineOrchestrator:
         # LLM-client exception (no `out` at all) has nothing to report.
         if ar is not None:
             rationale = ar.rationale
+            self_check = ar.checks
         elif out is not None:
             rationale = out.signals.get("rationale")
+            self_check = out.signals.get("self_check")
         else:
             rationale = None
+            self_check = None
 
         self._append_analyzer(
             AnalyzerCall(
@@ -373,6 +376,7 @@ class PipelineOrchestrator:
                 latency_ms=latency_ms,
                 error=error,
                 rationale=rationale,
+                self_check=self_check,
             )
         )
 

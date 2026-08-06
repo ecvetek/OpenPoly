@@ -368,6 +368,7 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
               decisions={[
                 {
                   rationale: analyzer.rationale,
+                  self_check: analyzer.self_check,
                   p_model: analyzer.p_model,
                   confidence: analyzer.confidence,
                   ts: analyzer.ts,

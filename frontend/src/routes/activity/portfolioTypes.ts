@@ -6,6 +6,7 @@
  */
 export type AnalyzerDecision = {
   rationale: string | null
+  self_check: string | null
   p_model: number | null
   confidence: string | null
   ts: number

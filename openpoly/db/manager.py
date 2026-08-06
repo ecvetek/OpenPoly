@@ -80,6 +80,19 @@ def _ensure_entry_decision_live_columns(engine: Engine) -> None:
             logger.info("migration: added entry_decision.signals_json")
 
 
+def _ensure_analyzer_call_live_columns(engine: Engine) -> None:
+    """Idempotent migration: add the self_check column to analyzer_call if
+    missing (older DBs predate the self-check surfacing). New DBs get the
+    column via init_db()'s create_all and skip this entirely."""
+    with engine.begin() as conn:
+        existing = {
+            r[1] for r in conn.execute(text("PRAGMA table_info(analyzer_call)")).fetchall()
+        }
+        if "self_check" not in existing:
+            conn.execute(text("ALTER TABLE analyzer_call ADD COLUMN self_check TEXT"))
+            logger.info("migration: added analyzer_call.self_check")
+
+
 class DatabaseConfig(BaseModel):
     """Config for the ``database`` section.
 
@@ -116,6 +129,7 @@ class DatabaseManager:
         init_db(self._engine)
         _ensure_fill_live_columns(self._engine)
         _ensure_entry_decision_live_columns(self._engine)
+        _ensure_analyzer_call_live_columns(self._engine)
         factory = make_session_factory(self._engine)
         self._book_writer = WriteBehindWriter(make_order_book_sink(factory))
         self._news_writer = WriteBehindWriter(make_news_sink(factory))

@@ -21,6 +21,8 @@ export type AnalyzerLogEntry = {
   market_id: string | null
   latency_ms: number
   error: string | null
+  rationale: string | null
+  self_check: string | null
 }
 
 export type AnalyzerLogResponse = {

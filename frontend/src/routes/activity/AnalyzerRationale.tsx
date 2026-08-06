@@ -183,6 +183,11 @@ function RationaleGroupRow({
           <span className="text-neutral-500 italic">(empty rationale)</span>
         )}
       </div>
+      {group.newest.self_check && (
+        <div className="text-[11px] text-neutral-500 leading-relaxed whitespace-pre-wrap break-words border-t border-neutral-800/70 pt-1">
+          {group.newest.self_check}
+        </div>
+      )}
       {dupeCount > 1 && expandedDupes && (
         <div className="pl-3 border-l border-neutral-700/50 flex flex-col gap-0.5 text-[10px] text-neutral-500 font-mono">
           {group.members.slice(1).map((d, j) => (

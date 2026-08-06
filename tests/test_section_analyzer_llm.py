@@ -139,6 +139,7 @@ def test_empty_candidates_skips() -> None:
 def test_ok_maps_selected_candidate() -> None:
     fake = FakeLLMClient(
         result={
+            "self_check": "Q1: new. Q2: unresolved. Q3: primary source.",
             "selected_index": 2,
             "p_yes": 0.73,
             "confidence": "high",
@@ -152,12 +153,14 @@ def test_ok_maps_selected_candidate() -> None:
     assert out.payload.p_model == 0.73
     assert out.payload.confidence == "high"
     assert out.payload.rationale == "clear primary source."
+    assert out.payload.checks == "Q1: new. Q2: unresolved. Q3: primary source."
     assert out.signals["selected_index"] == 2
 
 
 def test_prompt_numbers_candidates_and_withholds_price() -> None:
     fake = FakeLLMClient(
         result={
+            "self_check": "s",
             "selected_index": 1,
             "p_yes": 0.6,
             "confidence": "medium",
@@ -177,12 +180,31 @@ def test_prompt_numbers_candidates_and_withholds_price() -> None:
     assert fake.last_tool["name"] == "submit_analysis"
 
 
+def test_tool_schema_requires_self_check_and_bounds_p_yes() -> None:
+    fake = FakeLLMClient(
+        result={
+            "self_check": "s",
+            "selected_index": 1,
+            "p_yes": 0.6,
+            "confidence": "medium",
+            "rationale": "r",
+        }
+    )
+    _run(LLMAnalyzerConfig(), fake, _candidates("m-a"))
+    assert fake.last_tool is not None
+    props = fake.last_tool["input_schema"]["properties"]
+    assert "self_check" in fake.last_tool["input_schema"]["required"]
+    assert props["p_yes"]["minimum"] == 0
+    assert props["p_yes"]["maximum"] == 1
+
+
 # ---------- abstain / confidence gate ----------
 
 
 def test_abstain_index_zero_skips() -> None:
     fake = FakeLLMClient(
         result={
+            "self_check": "checked and nothing matches.",
             "selected_index": 0,
             "p_yes": 0.5,
             "confidence": "low",
@@ -195,11 +217,13 @@ def test_abstain_index_zero_skips() -> None:
     # The LLM was called and returned a rationale even though it abstained —
     # that explanation must not be discarded.
     assert out.signals["rationale"] == "none apply."
+    assert out.signals["self_check"] == "checked and nothing matches."
 
 
 def test_index_out_of_range_skips() -> None:
     fake = FakeLLMClient(
         result={
+            "self_check": "s",
             "selected_index": 9,
             "p_yes": 0.7,
             "confidence": "high",
@@ -210,11 +234,13 @@ def test_index_out_of_range_skips() -> None:
     assert out.verdict == "skip"
     assert out.reason == "no actionable market"
     assert out.signals["rationale"] == "r"
+    assert out.signals["self_check"] == "s"
 
 
 def test_below_min_confidence_skips() -> None:
     fake = FakeLLMClient(
         result={
+            "self_check": "s",
             "selected_index": 1,
             "p_yes": 0.7,
             "confidence": "low",
@@ -226,11 +252,13 @@ def test_below_min_confidence_skips() -> None:
     assert out.verdict == "skip"
     assert out.reason == "below min_confidence"
     assert out.signals["rationale"] == "r"
+    assert out.signals["self_check"] == "s"
 
 
 def test_low_confidence_ok_when_min_is_low() -> None:
     fake = FakeLLMClient(
         result={
+            "self_check": "s",
             "selected_index": 1,
             "p_yes": 0.7,
             "confidence": "low",
@@ -257,6 +285,7 @@ def test_llm_error_yields_error_verdict() -> None:
 def test_malformed_p_yes_yields_error() -> None:
     fake = FakeLLMClient(
         result={
+            "self_check": "s",
             "selected_index": 1,
             "p_yes": 1.8,
             "confidence": "high",
@@ -266,11 +295,13 @@ def test_malformed_p_yes_yields_error() -> None:
     out = _run(LLMAnalyzerConfig(), fake, _candidates("m-a"))
     assert out.verdict == "error"
     assert out.signals["rationale"] == "r"
+    assert out.signals["self_check"] == "s"
 
 
 def test_malformed_confidence_yields_error() -> None:
     fake = FakeLLMClient(
         result={
+            "self_check": "s",
             "selected_index": 1,
             "p_yes": 0.7,
             "confidence": "maybe",
@@ -280,6 +311,7 @@ def test_malformed_confidence_yields_error() -> None:
     out = _run(LLMAnalyzerConfig(), fake, _candidates("m-a"))
     assert out.verdict == "error"
     assert out.signals["rationale"] == "r"
+    assert out.signals["self_check"] == "s"
 
 
 # ---------- base_url / third-party gateway config ----------

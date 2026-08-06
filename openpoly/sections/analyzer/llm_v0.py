@@ -44,6 +44,7 @@ class AnalysisResult:
     p_model: float
     confidence: Confidence
     rationale: str = ""
+    checks: str = ""
 
 
 class LLMAnalyzerConfig(BaseModel):
@@ -109,6 +110,9 @@ Before answering, work the self-check for the market you think matches:
       evidence? If not, downgrade confidence.
 
 Then call submit_analysis:
+  self_check     — one short line per question above (Q1/Q2/Q3): what you
+                   actually concluded for each, not just that you checked.
+                   This should be what drove selected_index/p_yes/confidence.
   selected_index — the 1-based index of the ONE market the news materially
                    moves, or 0 if none. Abstaining is expected; do not force
                    a pick.
@@ -130,12 +134,22 @@ SUBMIT_ANALYSIS_TOOL: dict[str, Any] = {
     "input_schema": {
         "type": "object",
         "properties": {
+            "self_check": {
+                "type": "string",
+                "description": (
+                    "One short line per self-check question (Q1 new-info, "
+                    "Q2 staleness/resolution, Q3 evidence) — what you "
+                    "concluded, not just that you checked."
+                ),
+            },
             "selected_index": {
                 "type": "integer",
                 "description": "1-based index of the moved market, or 0 if none.",
             },
             "p_yes": {
                 "type": "number",
+                "minimum": 0,
+                "maximum": 1,
                 "description": "Probability (0-1) the selected market resolves YES.",
             },
             "confidence": {
@@ -147,7 +161,7 @@ SUBMIT_ANALYSIS_TOOL: dict[str, Any] = {
                 "description": "One or two sentences.",
             },
         },
-        "required": ["selected_index", "p_yes", "confidence", "rationale"],
+        "required": ["self_check", "selected_index", "p_yes", "confidence", "rationale"],
     },
 }
 
@@ -221,11 +235,12 @@ class LLMAnalyzerV0:
         except LLMError as exc:
             return SectionOutput(payload=None, verdict="error", reason=repr(exc)[:200])
 
-        # The tool schema marks rationale as required, so the model always
-        # returns one — including on abstain / filtered-out decisions. Carry
-        # it via signals on every branch below so it isn't lost just because
-        # the decision wasn't an actionable pick.
+        # The tool schema marks rationale/self_check as required, so the model
+        # always returns them — including on abstain / filtered-out decisions.
+        # Carry both via signals on every branch below so they aren't lost
+        # just because the decision wasn't an actionable pick.
         rationale_text = str(result.get("rationale", "") or "")
+        self_check_text = str(result.get("self_check", "") or "")
 
         idx = result.get("selected_index")
         if not isinstance(idx, int) or isinstance(idx, bool) or not (1 <= idx <= len(cands)):
@@ -234,7 +249,11 @@ class LLMAnalyzerV0:
                 payload=None,
                 verdict="skip",
                 reason="no actionable market",
-                signals={"selected_index": idx, "rationale": rationale_text},
+                signals={
+                    "selected_index": idx,
+                    "rationale": rationale_text,
+                    "self_check": self_check_text,
+                },
             )
 
         confidence = result.get("confidence")
@@ -243,14 +262,18 @@ class LLMAnalyzerV0:
                 payload=None,
                 verdict="error",
                 reason=f"malformed confidence: {confidence!r}",
-                signals={"rationale": rationale_text},
+                signals={"rationale": rationale_text, "self_check": self_check_text},
             )
         if _CONFIDENCE_RANK[confidence] < _CONFIDENCE_RANK[self.config.min_confidence]:
             return SectionOutput(
                 payload=None,
                 verdict="skip",
                 reason="below min_confidence",
-                signals={"confidence": confidence, "rationale": rationale_text},
+                signals={
+                    "confidence": confidence,
+                    "rationale": rationale_text,
+                    "self_check": self_check_text,
+                },
             )
 
         p_yes = result.get("p_yes")
@@ -263,7 +286,7 @@ class LLMAnalyzerV0:
                 payload=None,
                 verdict="error",
                 reason=f"malformed p_yes: {p_yes!r}",
-                signals={"rationale": rationale_text},
+                signals={"rationale": rationale_text, "self_check": self_check_text},
             )
 
         market = cands[idx - 1].market
@@ -272,6 +295,7 @@ class LLMAnalyzerV0:
             p_model=float(p_yes),
             confidence=confidence,  # type: ignore[arg-type]
             rationale=rationale_text,
+            checks=self_check_text,
         )
         return SectionOutput(
             payload=ar,

@@ -141,6 +141,7 @@ class AnalyzerCallRow(Base):
     latency_ms: Mapped[int]
     error: Mapped[str | None]
     rationale: Mapped[str | None]
+    self_check: Mapped[str | None]
 
 
 class EntryDecisionRow(Base):

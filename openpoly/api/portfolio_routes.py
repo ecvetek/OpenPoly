@@ -216,8 +216,8 @@ def get_position_by_id(
       persisted.
     - ``analyzer_decisions``: list (newest-first) of every ``verdict=ok``
       analyzer call whose ``news_id`` matches this position's news_id.
-      Each element carries rationale / p_model / confidence / ts. Empty
-      list when ``news_id`` is None, or the analyzer never hit
+      Each element carries rationale / self_check / p_model / confidence /
+      ts. Empty list when ``news_id`` is None, or the analyzer never hit
       ``verdict=ok`` on it.
     - ``exit_decision``: the exit-monitor decision that actually closed
       this position (trigger/return_pct/peak_price/reason), or ``None``
@@ -414,8 +414,8 @@ def _lookup_analyzer_decisions(
     - ``news_id`` is None (paper / manual position with no news linkage)
     - The analyzer hit only errored or skipped on this news_id
 
-    Returned dicts are flattened to UI-friendly shape: rationale, p_model,
-    confidence, ts (no internal AnalyzerCall fields like
+    Returned dicts are flattened to UI-friendly shape: rationale, self_check,
+    p_model, confidence, ts (no internal AnalyzerCall fields like
     news_content_preview / latency_ms / urgency — those are noise on the
     PositionDetail panel)."""
     if news_id is None:
@@ -433,6 +433,7 @@ def _lookup_analyzer_decisions(
     return [
         {
             "rationale": r.rationale,
+            "self_check": r.self_check,
             "p_model": r.p_model,
             "confidence": r.confidence,
             "ts": r.ts,
@@ -465,6 +466,7 @@ def _lookup_analyzer_decisions_bulk(
         grouped.setdefault(r.news_id, []).append(
             {
                 "rationale": r.rationale,
+                "self_check": r.self_check,
                 "p_model": r.p_model,
                 "confidence": r.confidence,
                 "ts": r.ts,

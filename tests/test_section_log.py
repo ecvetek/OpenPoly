@@ -252,6 +252,7 @@ def test_analyzer_call_to_dict_shape() -> None:
         "latency_ms",
         "error",
         "rationale",
+        "self_check",
     }
     assert d == asdict(e)
 

@@ -100,6 +100,10 @@ class AnalyzerCall:
     only None when no LLM call happened (e.g. no market candidates) or the
     LLM client itself raised. Surfaced in the PositionDetail UI by
     name-matching ``news_id``.
+
+    ``self_check`` is the model's stated answers to the system prompt's Q1-Q3
+    self-check (new-info / staleness / evidence), from the tool call's
+    ``self_check`` field. Set/unset under the same conditions as ``rationale``.
     """
 
     ts: float
@@ -113,6 +117,7 @@ class AnalyzerCall:
     latency_ms: int
     error: str | None = None
     rationale: str | None = None
+    self_check: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

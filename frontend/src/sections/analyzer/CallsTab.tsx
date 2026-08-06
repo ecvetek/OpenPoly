@@ -145,6 +145,14 @@ function CallsTimeline({ entries }: { entries: AnalyzerLogEntry[] }) {
               {e.news_content_preview}
             </div>
           )}
+          {e.rationale && (
+            <div className="text-neutral-300 break-words">{e.rationale}</div>
+          )}
+          {e.self_check && (
+            <div className="text-neutral-500 break-words border-t border-neutral-800/70 pt-1">
+              {e.self_check}
+            </div>
+          )}
           {e.error && (
             <div className="text-red-300 break-words">Error: {e.error}</div>
           )}

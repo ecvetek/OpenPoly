@@ -60,8 +60,9 @@ const analyzerDecisionsFor = (
   conf: string,
   reason: string,
   ts: number,
+  selfCheck: string | null = null,
 ): AnalyzerDecision[] => [
-  { rationale: reason, p_model: p, confidence: conf, ts },
+  { rationale: reason, self_check: selfCheck, p_model: p, confidence: conf, ts },
 ]
 
 // Exported so other fixture modules (e.g. ./statistics) can derive
@@ -449,6 +450,9 @@ const analyzerLog: AnalyzerCallEntry[] = [
     latency_ms: 1840,
     error: null,
     rationale: 'Dovish tone lifts the implied hold probability above price.',
+    self_check:
+      'Q1: genuinely new — first on-record dovish signal this cycle. ' +
+      'Q2: unresolved, no vote yet. Q3: direct quote from FOMC member.',
     market_polymarket_url: 'https://polymarket.com/event/fed-pause',
     market_question: 'Will the Fed pause rate hikes in 2026?',
   },
@@ -464,6 +468,7 @@ const analyzerLog: AnalyzerCallEntry[] = [
     latency_ms: 920,
     error: null,
     rationale: null,
+    self_check: null,
     market_polymarket_url: null,
     market_question: null,
   },

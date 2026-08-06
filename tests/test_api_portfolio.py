@@ -482,7 +482,7 @@ def test_get_position_includes_analyzer_decisions_when_log_has_match(env) -> Non
     assert decisions[0]["confidence"] == "high"
     assert decisions[0]["ts"] == 101.0
     # No noise fields
-    assert set(decisions[0].keys()) == {"rationale", "p_model", "confidence", "ts"}
+    assert set(decisions[0].keys()) == {"rationale", "self_check", "p_model", "confidence", "ts"}
 
 
 def test_get_position_analyzer_decisions_empty_when_no_match(env) -> None:
@@ -629,7 +629,7 @@ def test_list_positions_includes_market_question_and_analyzer_decisions(env) -> 
     decisions = by_market["m1"]["analyzer_decisions"]
     assert len(decisions) == 1
     assert decisions[0]["rationale"] == "opened m1 because reasons"
-    assert set(decisions[0].keys()) == {"rationale", "p_model", "confidence", "ts"}
+    assert set(decisions[0].keys()) == {"rationale", "self_check", "p_model", "confidence", "ts"}
 
     # m2: not in catalog + no analyzer match for its news_id (n1 is m1's; m2 also
     # uses news_id="n1" per _open helper, but the rationale text says "m1" — the
