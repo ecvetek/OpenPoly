@@ -9,6 +9,7 @@ routes one open position through ``executor.execute_sell`` (close_reason
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -26,7 +27,6 @@ from openpoly.db.tables import (
     EntryDecisionRow,
     ExitDecisionRow,
     NewsItemRow,
-    OrderBookSnapshot,
 )
 from openpoly.execution import executor
 from openpoly.markets.manager import manager as market_source_manager
@@ -282,12 +282,6 @@ def get_position_by_id(
     return body
 
 
-# Beyond this local-sampling gap, backfill from CLOB rather than trust the
-# last local snapshot is "close enough" — roughly 3x the default
-# ``book_sample_interval_seconds`` (60s), so ordinary sampling jitter never
-# triggers an extra network call.
-PRICE_HISTORY_GAP_THRESHOLD_SECONDS = 180
-POSITION_PRICE_HISTORY_SNAPSHOT_LIMIT = 2000
 # How long a durable market lookup is trusted before re-fetching — bounds
 # Gamma call volume under PositionDetail's ~3s poll without materially
 # staling the expiry/resolution state it reports.
@@ -334,27 +328,174 @@ async def _lookup_market_durable(market_id: str, condition_id: str) -> Market | 
     return market
 
 
+# Named window -> (window_seconds | None, fidelity_minutes). A None span
+# means "all" — its fidelity is computed per-request from the position's
+# actual elapsed lifetime (see _resolve_window) since there's no fixed span
+# to size a constant fidelity against. Each entry is picked to land roughly
+# 150-350 CLOB candles for that span — dense enough to look continuous,
+# sparse enough to stay cheap.
+PRICE_HISTORY_WINDOW_OPTIONS: dict[str, tuple[int | None, int]] = {
+    "1h": (3_600, 1),  # ~60 pts @ 1-min candles
+    "6h": (6 * 3_600, 2),  # ~180 pts @ 2-min candles
+    "1d": (86_400, 5),  # ~288 pts @ 5-min candles
+    "1w": (7 * 86_400, 30),  # ~336 pts @ 30-min candles
+    "1m": (30 * 86_400, 120),  # ~360 pts @ 2-hour candles
+    "all": (None, 0),
+}
+PRICE_HISTORY_WINDOW_DEFAULT = "all"
+PRICE_HISTORY_TARGET_POINTS = 250
+PRICE_HISTORY_MIN_FIDELITY_MINUTES = 1
+PRICE_HISTORY_MAX_FIDELITY_MINUTES = 1_440  # 1-day candle ceiling
+
+# CLOB's /prices-history hard-rejects any single (startTs, endTs) interval
+# longer than this — undocumented anywhere, found by hitting the live
+# endpoint directly (fails identically at every fidelity, including the
+# coarsest 1440-min one, so it's a pure interval-length cap, not a
+# too-many-candles limit). "1m"/"all" spans routinely exceed it, so they're
+# served as multiple chunked requests, concatenated. CLOB_MAX_CHUNKS bounds
+# worst-case latency/call-volume for a pathologically long-held position
+# (20 chunks ~= 300 days) rather than making dozens of sequential requests.
+CLOB_MAX_INTERVAL_SECONDS = 15 * 86_400
+CLOB_MAX_CHUNKS = 20
+
+# TTL differs by window: a live "1h" view should feel responsive to a fresh
+# trade; an hours-wide "1m"/"all" candle can't visibly change within a few
+# seconds, so it tolerates a much longer TTL — cutting CLOB call volume
+# hardest exactly where responsiveness matters least. Load-bearing, not an
+# optimization: once this line is always CLOB-sourced, every ~3s poll of
+# PositionDetail would otherwise hit Polymarket's live API directly.
+PRICE_HISTORY_CACHE_TTL_SECONDS: dict[str, int] = {
+    "1h": 15,
+    "6h": 20,
+    "1d": 30,
+    "1w": 60,
+    "1m": 90,
+    "all": 60,
+}
+PRICE_HISTORY_CACHE_TTL_DEFAULT_SECONDS = 60
+
+# Keyed on (token_id, window, fidelity, until_bucket) — `until` advances every
+# poll (tracks wall-clock "now" for an unresolved market), so it's bucketed to
+# the window's own TTL; otherwise every poll would compute a distinct `until`
+# and always miss. `since` doesn't need its own bucketing: it's deterministic
+# from (window, until_bucket, opened_at).
+_price_history_cache: dict[tuple[str, str, int, int], tuple[float, list[list[float]]]] = {}
+
+
+def _resolve_window(window: str, opened_at: float, until: float) -> tuple[str, float, int]:
+    """Resolve a (possibly-unrecognized) window key to (resolved_window,
+    since, fidelity). Unrecognized values silently fall back to
+    PRICE_HISTORY_WINDOW_DEFAULT — safelist convention, matches
+    EQUITY_WINDOW_OPTIONS_HOURS. Named windows are the trailing
+    ``window_seconds`` ending at ``until``, clipped so ``since`` never
+    precedes ``opened_at``. ``"all"`` = ``opened_at`` through ``until``, with
+    fidelity computed from the actual elapsed span to hit the same
+    ~PRICE_HISTORY_TARGET_POINTS budget as the named windows.
+    """
+    resolved = window if window in PRICE_HISTORY_WINDOW_OPTIONS else PRICE_HISTORY_WINDOW_DEFAULT
+    window_seconds, fidelity = PRICE_HISTORY_WINDOW_OPTIONS[resolved]
+    if window_seconds is None:  # "all"
+        elapsed = max(until - opened_at, 1.0)
+        fidelity = max(
+            PRICE_HISTORY_MIN_FIDELITY_MINUTES,
+            min(PRICE_HISTORY_MAX_FIDELITY_MINUTES, round(elapsed / 60 / PRICE_HISTORY_TARGET_POINTS)),
+        )
+        return resolved, opened_at, fidelity
+    return resolved, max(until - window_seconds, opened_at), fidelity
+
+
+def _fetch_price_history_with_fallback(
+    token_id: str, since: float, until: float, fidelity: int
+) -> list[tuple[float, float]]:
+    """One CLOB call with a defensive retry: fidelity below CLOB's documented
+    default (10 min) is unverified as a hard floor, so a suspiciously-empty
+    result at fine fidelity retries once at the known-good default rather
+    than silently reporting no data. An empty result at fidelity>=10 is
+    trusted as-is."""
+    try:
+        points = fetch_price_history_range(token_id, start_ts=since, end_ts=until, fidelity=fidelity)
+    except Exception:  # noqa: BLE001 — best-effort; caller fails soft
+        logger.warning(
+            "CLOB price-history fetch failed for %s (fidelity=%d)", token_id, fidelity, exc_info=True
+        )
+        return []
+    if points or fidelity >= 10:
+        return points
+    logger.warning(
+        "CLOB returned 0 points at fidelity=%d for %s; retrying at fidelity=10", fidelity, token_id
+    )
+    try:
+        return fetch_price_history_range(token_id, start_ts=since, end_ts=until, fidelity=10)
+    except Exception:  # noqa: BLE001
+        logger.warning("CLOB fallback fetch also failed for %s", token_id, exc_info=True)
+        return []
+
+
+def _fetch_price_history_chunked(
+    token_id: str, since: float, until: float, fidelity: int
+) -> list[tuple[float, float]]:
+    """Split a (since, until) span exceeding CLOB_MAX_INTERVAL_SECONDS into
+    consecutive chunks CLOB will actually accept, and concatenate the
+    results — see CLOB_MAX_INTERVAL_SECONDS for why this is necessary."""
+    if until - since > CLOB_MAX_CHUNKS * CLOB_MAX_INTERVAL_SECONDS:
+        since = until - CLOB_MAX_CHUNKS * CLOB_MAX_INTERVAL_SECONDS
+    points: list[tuple[float, float]] = []
+    chunk_start = since
+    while chunk_start < until:
+        chunk_end = min(chunk_start + CLOB_MAX_INTERVAL_SECONDS, until)
+        points.extend(_fetch_price_history_with_fallback(token_id, chunk_start, chunk_end, fidelity))
+        chunk_start = chunk_end
+    return points
+
+
+async def _cached_price_history(
+    token_id: str, window: str, since: float, until: float, fidelity: int, ttl: int
+) -> list[list[float]]:
+    now = time.time()
+    until_bucket = int(until // ttl) * ttl
+    key = (token_id, window, fidelity, until_bucket)
+    cached = _price_history_cache.get(key)
+    if cached is not None and now - cached[0] < ttl:
+        return cached[1]
+    raw = await asyncio.to_thread(_fetch_price_history_chunked, token_id, since, until, fidelity)
+    points = [[ts, price] for ts, price in raw]
+    _price_history_cache[key] = (now, points)  # cache empty/failed results too
+    return points
+
+
 @router.get("/positions/{position_id}/price-history")
 async def get_position_price_history(
     position_id: int,
+    window: str = PRICE_HISTORY_WINDOW_DEFAULT,
     store: PortfolioStore = Depends(get_portfolio_store),
-    factory: sessionmaker[Session] = Depends(get_session_factory),
 ) -> dict[str, Any]:
     """Price history for one position, spanning open through close and on to
     the market's expiry/resolution — not frozen at ``closed_at`` the way a
     raw ``/api/inspect/order-books/{token_id}`` window would be.
 
-    Local order-book sampling (``snapshots``: bid/ask bands + mid, same shape
-    as the inspect route) stops once a market falls out of the live discovery
-    catalog — for a closed position that's typically within one poll of
-    close, well before expiry. Any gap between the last local snapshot and
-    the window's upper bound is backfilled from Polymarket's own hosted CLOB
-    price history (``price_points``: price only, no bands).
+    The line is always CLOB-sourced (``fetch_price_history_range``), for the
+    *entire* visible window, open portion included — this guarantees one
+    consistent data source/density across a position's whole lifetime, so
+    there's no visual seam at the close point the way splicing in local
+    order-book snapshots (dense, ~5s cadence) with a CLOB backfill (sparse)
+    used to produce. Local order-book snapshots are no longer read here; they
+    remain the source for the exit monitor's peak tracking, the equity curve,
+    backtest replay, and ``/api/inspect/order-books/{token_id}`` — this
+    change is scoped to this one display endpoint.
 
-    Response fields: ``snapshots``, ``price_points`` (``[ts, price]`` pairs),
-    ``market_end_date`` (epoch seconds, or None if the market can't be
-    resolved at all), ``market_resolved`` (bool), ``winning_side``
-    (``"yes"`` / ``"no"`` / None — None while unresolved or disputed).
+    ``window`` selects both the visible span and its resolution (fidelity) —
+    one of ``PRICE_HISTORY_WINDOW_OPTIONS``' keys (``1h``/``6h``/``1d``/
+    ``1w``/``1m``/``all``); an unrecognized value silently falls back to
+    ``PRICE_HISTORY_WINDOW_DEFAULT`` (``all``), matching this API's
+    ``EQUITY_WINDOW_OPTIONS_HOURS`` safelist convention. Cached per
+    (token_id, window, fidelity, time-bucket) — see
+    ``PRICE_HISTORY_CACHE_TTL_SECONDS``.
+
+    Response fields: ``window`` (the resolved key actually served — lets a
+    caller detect the safelist fallback), ``price_history`` (``[ts, price]``
+    pairs, oldest-first; empty on any CLOB failure — fails soft, never
+    500s), ``market_end_date`` (epoch seconds, or None), ``market_resolved``
+    (bool), ``winning_side`` (``"yes"`` / ``"no"`` / None).
     """
     record = store.get_position(position_id)
     if record is None:
@@ -366,48 +507,16 @@ async def get_position_price_history(
     winning_side = resolved_side(market.outcome_prices) if market is not None else None
 
     now = time.time()
-    since = record.opened_at
     until = min(now, market_end_ts) if market_end_ts is not None else now
-
-    with factory() as session:
-        stmt = (
-            select(OrderBookSnapshot)
-            .where(
-                OrderBookSnapshot.token_id == record.token_id,
-                OrderBookSnapshot.recorded_at >= since,
-                OrderBookSnapshot.recorded_at <= until,
-            )
-            .order_by(OrderBookSnapshot.recorded_at)
-            .limit(POSITION_PRICE_HISTORY_SNAPSHOT_LIMIT)
-        )
-        rows = session.execute(stmt).scalars().all()
-
-    snapshots = [
-        {
-            "recorded_at": r.recorded_at,
-            "bids": json.loads(r.bids_json),
-            "asks": json.loads(r.asks_json),
-        }
-        for r in rows
-    ]
-
-    last_local_ts = snapshots[-1]["recorded_at"] if snapshots else since
-    price_points: list[tuple[float, float]] = []
-    if until - last_local_ts > PRICE_HISTORY_GAP_THRESHOLD_SECONDS:
-        try:
-            price_points = fetch_price_history_range(
-                record.token_id, start_ts=last_local_ts, end_ts=until
-            )
-        except Exception:  # noqa: BLE001 — best-effort backfill; local data still renders
-            logger.warning(
-                "CLOB price-history backfill failed for token %s", record.token_id, exc_info=True
-            )
+    resolved_window, since, fidelity = _resolve_window(window, record.opened_at, until)
+    ttl = PRICE_HISTORY_CACHE_TTL_SECONDS.get(resolved_window, PRICE_HISTORY_CACHE_TTL_DEFAULT_SECONDS)
+    price_history = await _cached_price_history(record.token_id, resolved_window, since, until, fidelity, ttl)
 
     return {
         "position_id": position_id,
         "token_id": record.token_id,
-        "snapshots": snapshots,
-        "price_points": [[ts, price] for ts, price in price_points],
+        "window": resolved_window,
+        "price_history": price_history,
         "market_end_date": market_end_ts,
         "market_resolved": market_resolved,
         "winning_side": winning_side,

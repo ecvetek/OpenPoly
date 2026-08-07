@@ -15,7 +15,6 @@ from openpoly.db.tables import (
     EntryDecisionRow,
     ExitDecisionRow,
     NewsItemRow,
-    OrderBookSnapshot,
 )
 from openpoly.portfolio import PortfolioStore
 
@@ -1205,104 +1204,340 @@ def test_price_history_404_for_missing_position(env) -> None:
     assert client.get("/api/positions/99999/price-history").status_code == 404
 
 
-def test_price_history_uses_local_snapshots_when_coverage_reaches_now(env, monkeypatch) -> None:
-    """Local sampling already covers right up to 'now' -> no CLOB backfill
-    call needed; snapshots (with bid/ask bands) are returned as-is."""
-    import json as _json
+def test_price_history_fetches_full_window_from_clob(env, monkeypatch) -> None:
+    """The line is always CLOB-sourced end-to-end (opened_at through
+    'now'/resolution) -- no local order-book snapshots involved anymore."""
     import time as _time
 
     import openpoly.api.portfolio_routes as routes
 
-    store, client, factory = env
-    now = _time.time()
-    h = _open(store, "m1", "yes", "ty1", ts=now - 120)
-
-    with factory() as session:
-        session.add_all(
-            [
-                OrderBookSnapshot(
-                    token_id="ty1",
-                    recorded_at=now - 120,
-                    bids_json=_json.dumps([[0.40, 10.0]]),
-                    asks_json=_json.dumps([[0.42, 10.0]]),
-                ),
-                OrderBookSnapshot(
-                    token_id="ty1",
-                    recorded_at=now - 5,
-                    bids_json=_json.dumps([[0.45, 10.0]]),
-                    asks_json=_json.dumps([[0.47, 10.0]]),
-                ),
-            ]
-        )
-        session.commit()
-
-    async def fake_fetch_market_by_id(market_id, **kwargs):
-        assert market_id == "m1"
-        return _market(closed=False)
-
-    def fail_price_history_range(*args, **kwargs):
-        raise AssertionError("should not backfill when local coverage already reaches 'now'")
-
-    monkeypatch.setattr(routes, "_market_lookup_cache", {})
-    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
-    monkeypatch.setattr(routes, "fetch_price_history_range", fail_price_history_range)
-
-    body = client.get(f"/api/positions/{h.position_id}/price-history").json()
-    assert body["token_id"] == "ty1"
-    assert len(body["snapshots"]) == 2
-    assert body["price_points"] == []
-    assert body["market_end_date"] is None
-    assert body["market_resolved"] is False
-    assert body["winning_side"] is None
-
-
-def test_price_history_backfills_gap_from_clob(env, monkeypatch) -> None:
-    """Local sampling stopped long ago (market fell out of the discovery
-    catalog) -> the tail gap up to 'now' is backfilled via CLOB."""
-    import json as _json
-    import time as _time
-
-    import openpoly.api.portfolio_routes as routes
-
-    store, client, factory = env
+    store, client, _factory = env
     now = _time.time()
     opened_at = now - 10_000
     h = _open(store, "m1", "yes", "ty1", ts=opened_at)
-
-    with factory() as session:
-        session.add(
-            OrderBookSnapshot(
-                token_id="ty1",
-                recorded_at=opened_at + 30,
-                bids_json=_json.dumps([[0.40, 10.0]]),
-                asks_json=_json.dumps([[0.42, 10.0]]),
-            )
-        )
-        session.commit()
 
     async def fake_fetch_market_by_id(market_id, **kwargs):
         return _market(closed=False)
 
     captured: dict = {}
 
-    def fake_price_history_range(token_id, *, start_ts, end_ts, **kwargs):
+    def fake_price_history_range(token_id, *, start_ts, end_ts, fidelity=10, **kwargs):
         captured["token_id"] = token_id
         captured["start_ts"] = start_ts
         captured["end_ts"] = end_ts
+        captured["fidelity"] = fidelity
         return [(start_ts + 100, 0.55), (end_ts, 0.60)]
 
     monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
     monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
     monkeypatch.setattr(routes, "fetch_price_history_range", fake_price_history_range)
 
     body = client.get(f"/api/positions/{h.position_id}/price-history").json()
-    assert len(body["snapshots"]) == 1
+    assert "snapshots" not in body
+    assert "price_points" not in body
     assert captured["token_id"] == "ty1"
-    assert captured["start_ts"] == pytest.approx(opened_at + 30)
-    assert body["price_points"] == [
+    assert captured["start_ts"] == pytest.approx(opened_at)
+    assert captured["end_ts"] == pytest.approx(now, abs=1.0)
+    # 10_000s span / 250 target points -> ~0.67min, clamped up to the 1-min floor.
+    assert captured["fidelity"] == 1
+    assert body["price_history"] == [
         [captured["start_ts"] + 100, 0.55],
         [captured["end_ts"], 0.60],
     ]
+
+
+@pytest.mark.parametrize(
+    "window,expected_span,expected_fidelity",
+    [
+        ("1h", 3_600, 1),
+        ("6h", 6 * 3_600, 2),
+        ("1d", 86_400, 5),
+        ("1w", 7 * 86_400, 30),
+        ("1m", 30 * 86_400, 120),
+    ],
+)
+def test_price_history_window_maps_to_expected_fidelity_and_span(
+    env, monkeypatch, window, expected_span, expected_fidelity
+) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    # Opened long enough ago that every named window's trailing span is fully
+    # covered, not clipped by opened_at.
+    opened_at = now - 40 * 86_400
+    h = _open(store, "m1", "yes", "ty1", ts=opened_at)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    # A list, not a single dict: "1m"'s 30-day span exceeds CLOB's 15-day
+    # per-request cap and gets served as two chunked calls -- capturing every
+    # call lets the assertions below cover both the single-call and chunked
+    # windows uniformly.
+    calls: list[tuple[float, float, int]] = []
+
+    def fake_price_history_range(token_id, *, start_ts, end_ts, fidelity=10, **kwargs):
+        calls.append((start_ts, end_ts, fidelity))
+        # Non-empty so the fidelity<10 fallback retry never fires here --
+        # this test is about the window->fidelity/span mapping, not the
+        # fallback path (covered separately).
+        return [(start_ts, 0.5)]
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", fake_price_history_range)
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history?window={window}").json()
+    assert body["window"] == window
+    assert all(fidelity == expected_fidelity for _, _, fidelity in calls)
+    total_span = calls[-1][1] - calls[0][0]
+    assert total_span == pytest.approx(expected_span, abs=2.0)
+
+
+def test_price_history_all_window_spans_full_lifetime_with_dynamic_fidelity(env, monkeypatch) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    opened_at = now - 5 * 86_400
+    h = _open(store, "m1", "yes", "ty1", ts=opened_at)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    captured: dict = {}
+
+    def fake_price_history_range(token_id, *, start_ts, end_ts, fidelity=10, **kwargs):
+        captured["start_ts"] = start_ts
+        captured["fidelity"] = fidelity
+        return []
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", fake_price_history_range)
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history?window=all").json()
+    assert body["window"] == "all"
+    assert captured["start_ts"] == pytest.approx(opened_at)
+    assert captured["fidelity"] == round(5 * 86_400 / 60 / 250)
+
+
+def test_price_history_unknown_window_falls_back_to_default(env, monkeypatch) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    h = _open(store, "m1", "yes", "ty1", ts=now - 100)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", lambda *a, **k: [])
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history?window=garbage").json()
+    assert body["window"] == "all"
+
+
+def test_price_history_response_shape_is_unified(env, monkeypatch) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    h = _open(store, "m1", "yes", "ty1", ts=now - 100)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", lambda *a, **k: [(now - 50, 0.5)])
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history").json()
+    assert set(body.keys()) == {
+        "position_id",
+        "token_id",
+        "window",
+        "price_history",
+        "market_end_date",
+        "market_resolved",
+        "winning_side",
+    }
+    assert body["price_history"] == [[now - 50, 0.5]]
+
+
+def test_price_history_caches_clob_call_within_ttl(env, monkeypatch) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    h = _open(store, "m1", "yes", "ty1", ts=now - 100)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    calls = {"n": 0}
+
+    def counting_price_history_range(*args, **kwargs):
+        calls["n"] += 1
+        # Non-empty so the fidelity<10 fallback retry never fires here --
+        # this test is about the outer TTL cache, not the fallback path.
+        return [(now - 50, 0.5)]
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", counting_price_history_range)
+
+    client.get(f"/api/positions/{h.position_id}/price-history?window=all")
+    client.get(f"/api/positions/{h.position_id}/price-history?window=all")
+    assert calls["n"] == 1
+
+
+def test_price_history_cache_expires_after_ttl(env, monkeypatch) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    h = _open(store, "m1", "yes", "ty1", ts=now - 100)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    calls = {"n": 0}
+
+    def counting_price_history_range(*args, **kwargs):
+        calls["n"] += 1
+        return [(now - 50, 0.5)]
+
+    class _FakeTime:
+        def __init__(self, t: float) -> None:
+            self.t = t
+
+        def time(self) -> float:
+            return self.t
+
+    fake_time = _FakeTime(now)
+    # Rebinds only the `time` name inside `routes`' own namespace -- not the
+    # real global `time` module, which other code may rely on concurrently.
+    monkeypatch.setattr(routes, "time", fake_time)
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", counting_price_history_range)
+
+    client.get(f"/api/positions/{h.position_id}/price-history?window=all")
+    fake_time.t = now + routes.PRICE_HISTORY_CACHE_TTL_SECONDS["all"] + 1
+    client.get(f"/api/positions/{h.position_id}/price-history?window=all")
+    assert calls["n"] == 2
+
+
+def test_price_history_clob_failure_returns_empty_without_500(env, monkeypatch) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    h = _open(store, "m1", "yes", "ty1", ts=now - 100)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    def failing_price_history_range(*args, **kwargs):
+        raise RuntimeError("CLOB unreachable")
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", failing_price_history_range)
+
+    r = client.get(f"/api/positions/{h.position_id}/price-history")
+    assert r.status_code == 200
+    assert r.json()["price_history"] == []
+
+
+def test_price_history_low_fidelity_empty_result_retries_at_fidelity_10(env, monkeypatch) -> None:
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    # "all" window over a short span -> fidelity clamps to the 1-min floor.
+    h = _open(store, "m1", "yes", "ty1", ts=now - 100)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    def fake_price_history_range(token_id, *, start_ts, end_ts, fidelity=10, **kwargs):
+        if fidelity < 10:
+            return []
+        return [(end_ts, 0.5)]
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", fake_price_history_range)
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history?window=all").json()
+    assert len(body["price_history"]) == 1
+
+
+def test_price_history_chunks_spans_exceeding_clob_max_interval(env, monkeypatch) -> None:
+    """A position held longer than CLOB_MAX_INTERVAL_SECONDS (~15 days) needs
+    multiple chunked CLOB requests, concatenated -- the live API hard-rejects
+    a single request spanning more than that, regardless of fidelity
+    (empirically verified against clob.polymarket.com)."""
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    opened_at = now - 20 * 86_400  # 20 days -> exceeds the 15-day cap
+    h = _open(store, "m1", "yes", "ty1", ts=opened_at)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    calls: list[tuple[float, float]] = []
+
+    def fake_price_history_range(token_id, *, start_ts, end_ts, fidelity=10, **kwargs):
+        assert end_ts - start_ts <= routes.CLOB_MAX_INTERVAL_SECONDS
+        calls.append((start_ts, end_ts))
+        return [(start_ts, 0.5)]
+
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", fake_price_history_range)
+
+    body = client.get(f"/api/positions/{h.position_id}/price-history?window=all").json()
+    assert len(calls) == 2  # 20 days split into two <=15-day chunks
+    assert len(body["price_history"]) == 2
+    assert calls[0][0] == pytest.approx(opened_at)
+    assert calls[1][1] == pytest.approx(now, abs=2.0)
+    assert calls[0][1] == calls[1][0]
 
 
 def test_price_history_reports_resolution_and_winning_side(env, monkeypatch) -> None:
@@ -1322,6 +1557,7 @@ def test_price_history_reports_resolution_and_winning_side(env, monkeypatch) -> 
         raise AssertionError("id lookup already reported closed -> no resolved-only fallback")
 
     monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
     monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
     monkeypatch.setattr(routes, "fetch_markets_by_condition_id", fail_fetch_markets_by_condition_id)
     monkeypatch.setattr(routes, "fetch_price_history_range", lambda *a, **k: [])
@@ -1356,6 +1592,7 @@ def test_price_history_falls_back_to_resolved_only_lookup_past_end_date(env, mon
         return _market(closed=True, outcome_prices=(0.0, 1.0))
 
     monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
     monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
     monkeypatch.setattr(routes, "fetch_markets_by_condition_id", fake_fetch_markets_by_condition_id)
     monkeypatch.setattr(routes, "normalize_gamma_market", fake_normalize)
@@ -1382,6 +1619,7 @@ def test_price_history_market_lookup_is_cached(env, monkeypatch) -> None:
         return _market(closed=False)
 
     monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
     monkeypatch.setattr(routes, "fetch_market_by_id", counting_fetch_market_by_id)
     monkeypatch.setattr(routes, "fetch_price_history_range", lambda *a, **k: [])
 

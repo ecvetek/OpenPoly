@@ -1,11 +1,14 @@
 /**
- * Order book chart — mid line + n nested bid/ask spread bands over a token's
- * holding window. Native lightweight-charts Line series for mid; the custom
- * BandSeries (./bandSeries) for the depth bands. Entry/exit markers sit on the
- * mid series. A depth selector (1-3) controls how many bands render. Hovering
- * shows that frame's full depth ladder (price + size).
+ * Position price chart — a single CLOB-sourced mid-price line spanning the
+ * position's whole lifetime (open through close and on to resolution),
+ * always at one consistent density regardless of open/closed status — see
+ * `get_position_price_history` in openpoly/api/portfolio_routes.py for why
+ * that matters (splicing local order-book snapshots with a CLOB backfill
+ * used to produce a visible "seam" at the close point). Entry/exit/resolved
+ * markers sit on the line. No depth/spread band — dropped in favor of a
+ * single clean line, matching Polymarket's own chart.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import {
   LineSeries,
   createChart,
@@ -18,109 +21,61 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import { BandSeries, type BandData } from './bandSeries'
 import { localCrosshairTimeFormatter, localTickMarkFormatter } from './chartTimeFormat'
-import type { OrderBookSnapshot, PricePoint } from './orderBookClient'
+import type { PricePoint } from './orderBookClient'
 
 export type OrderBookChartProps = {
-  snapshots: OrderBookSnapshot[]
-  // CLOB-backfilled points for the stretch after local order-book sampling
-  // stopped (market fell out of the discovery catalog) — price only, no
-  // bid/ask band, so they extend the mid line without extending the band.
-  pricePoints?: PricePoint[]
+  priceHistory: PricePoint[]
+  // Current timeframe selection — used only to detect a user-driven window
+  // change and force exactly one fresh fitContent() for it; not rendered
+  // (the selector buttons live in PositionDetail).
+  window: string
   entry: { ts: number; price: number } | null
   exit: { ts: number; price: number } | null
-  // When the market has resolved, marks that instant on the mid line.
+  // When the market has resolved, marks that instant on the line.
   resolved?: { ts: number; winningSide: 'yes' | 'no' | null } | null
 }
 
 type MidPoint = { time: UTCTimestamp; value: number }
 
 // Lifecycle stages the chart auto-fits to, in order. Ranked so the fit
-// effect only ever moves forward (open → closed → resolved), never re-fits
-// for a stage it's already reached.
+// effect only ever moves forward (open → closed → resolved) on its own,
+// never re-fitting for a stage it's already reached — a window change is a
+// separate, always-fires-once trigger (see FitTracker below).
 type FitStage = 'none' | 'open' | 'closed' | 'resolved'
 const FIT_RANK: Record<FitStage, number> = { none: 0, open: 1, closed: 2, resolved: 3 }
+type FitTracker = { rank: number; window: string }
 
-type Derived = {
-  mid: MidPoint[]
-  band: BandData[]
-  bySecond: Map<number, OrderBookSnapshot>
-}
-
-function derive(
-  snapshots: OrderBookSnapshot[],
-  depth: number,
-  pricePoints: PricePoint[],
-): Derived {
+function derive(priceHistory: PricePoint[]): { mid: MidPoint[]; bySecond: Map<number, number> } {
   // Dedupe by whole second (lightweight-charts needs strictly-increasing
-  // integer time); keep the last snapshot in each second.
-  const bySecond = new Map<number, OrderBookSnapshot>()
-  for (const s of snapshots) bySecond.set(Math.floor(s.recorded_at), s)
-  const ordered = [...bySecond.entries()].sort((a, b) => a[0] - b[0])
-  const midBySecond = new Map<number, number>()
-  const band: BandData[] = []
-  for (const [sec, s] of ordered) {
-    const bestBid = s.bids[0]?.[0]
-    const bestAsk = s.asks[0]?.[0]
-    if (bestBid === undefined || bestAsk === undefined) continue
-    midBySecond.set(sec, (bestBid + bestAsk) / 2)
-    const levels = []
-    for (let i = 0; i < depth; i++) {
-      const b = s.bids[i]?.[0]
-      const a = s.asks[i]?.[0]
-      if (b === undefined || a === undefined) break
-      levels.push({ bid: b, ask: a })
-    }
-    band.push({ time: sec as UTCTimestamp, levels })
-  }
-  // CLOB-backfilled points cover the stretch where local sampling has no
-  // rows (past catalog eviction) — they extend the mid line with no band.
-  // A snapshot always wins on a shared second (has a real bid/ask to mark).
-  for (const [ts, price] of pricePoints) {
-    const sec = Math.floor(ts)
-    if (!midBySecond.has(sec)) midBySecond.set(sec, price)
-  }
-  const mid: MidPoint[] = [...midBySecond.entries()]
+  // integer time); keep the last point in each second.
+  const bySecond = new Map<number, number>()
+  for (const [ts, value] of priceHistory) bySecond.set(Math.floor(ts), value)
+  const mid: MidPoint[] = [...bySecond.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([time, value]) => ({ time: time as UTCTimestamp, value }))
-  return { mid, band, bySecond }
-}
-
-function formatLadder(s: OrderBookSnapshot): string {
-  const row = (side: string, lv: [number, number] | undefined, i: number) =>
-    lv ? `${side}${i + 1} ${lv[0].toFixed(3)} × ${lv[1].toFixed(0)}` : ''
-  const asks = [2, 1, 0].map((i) => row('ask', s.asks[i], i)).filter(Boolean)
-  const bids = [0, 1, 2].map((i) => row('bid', s.bids[i], i)).filter(Boolean)
-  return [...asks, ...bids].join('\n')
+  return { mid, bySecond }
 }
 
 export function OrderBookChart({
-  snapshots,
-  pricePoints = [],
+  priceHistory,
+  window,
   entry,
   exit,
   resolved = null,
 }: OrderBookChartProps) {
-  const [depth, setDepth] = useState(1)
   const containerRef = useRef<HTMLDivElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const midRef = useRef<ISeriesApi<'Line'> | null>(null)
-  const bandRef = useRef<ISeriesApi<'Custom'> | null>(null)
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
-  const bySecondRef = useRef<Map<number, OrderBookSnapshot>>(new Map())
-  // Auto-fit only at the three lifecycle transitions below — not on every
-  // poll tick. Otherwise the mid-close backend backfill (sparse CLOB
-  // candles, growing time window) triggers a fitContent() on every 3s poll
-  // forever, repeatedly re-zooming and squeezing the dense trading window
-  // into a shrinking fraction of the chart.
-  const fittedRef = useRef<FitStage>('none')
+  const bySecondRef = useRef<Map<number, number>>(new Map())
+  // Auto-fit only at lifecycle transitions and explicit window changes — not
+  // on every poll tick, which would otherwise repeatedly re-zoom as the
+  // backend's cached CLOB window quietly grows in the background.
+  const fittedRef = useRef<FitTracker>({ rank: 0, window: '' })
 
-  const { mid, band, bySecond } = useMemo(
-    () => derive(snapshots, depth, pricePoints),
-    [snapshots, depth, pricePoints],
-  )
+  const { mid, bySecond } = useMemo(() => derive(priceHistory), [priceHistory])
 
   // Create the chart once.
   useEffect(() => {
@@ -145,7 +100,6 @@ export function OrderBookChart({
       },
       rightPriceScale: { borderColor: '#30363d' },
     })
-    const bandSeries = chart.addCustomSeries(new BandSeries(), {})
     const midSeries = chart.addSeries(LineSeries, {
       color: '#58a6ff',
       lineWidth: 2,
@@ -159,25 +113,25 @@ export function OrderBookChart({
         tip.style.display = 'none'
         return
       }
-      const snap = bySecondRef.current.get(param.time as number)
-      if (!snap) {
+      const price = bySecondRef.current.get(param.time as number)
+      if (price === undefined) {
         tip.style.display = 'none'
         return
       }
       tip.style.display = 'block'
-      tip.style.left = `${param.point.x + 14}px`
-      tip.style.top = `${param.point.y + 14}px`
-      tip.textContent = formatLadder(snap)
+      tip.style.left = `${param.point.x + 12}px`
+      tip.style.top = `${param.point.y + 12}px`
+      tip.innerHTML =
+        `<div style="color:#8b949e">${localCrosshairTimeFormatter(param.time as UTCTimestamp)}</div>` +
+        `<div>${price.toFixed(3)}</div>`
     })
     chartRef.current = chart
     midRef.current = midSeries
-    bandRef.current = bandSeries as ISeriesApi<'Custom'>
     markersRef.current = markers
     return () => {
       chart.remove()
       chartRef.current = null
       midRef.current = null
-      bandRef.current = null
       markersRef.current = null
     }
   }, [])
@@ -185,8 +139,7 @@ export function OrderBookChart({
   // Push data whenever the derived series change.
   useEffect(() => {
     bySecondRef.current = bySecond
-    if (!midRef.current || !bandRef.current) return
-    bandRef.current.setData(band as BandData[])
+    if (!midRef.current) return
     midRef.current.setData(mid)
     const markers: SeriesMarker<Time>[] = []
     if (entry) {
@@ -218,43 +171,21 @@ export function OrderBookChart({
     }
     markersRef.current?.setMarkers(markers.sort((a, b) => (a.time as number) - (b.time as number)))
     const stage: FitStage = resolved ? 'resolved' : exit ? 'closed' : mid.length > 0 ? 'open' : 'none'
-    if (FIT_RANK[stage] > FIT_RANK[fittedRef.current]) {
+    const rank = FIT_RANK[stage]
+    const windowChanged = fittedRef.current.window !== window
+    if (rank > fittedRef.current.rank || windowChanged) {
       chartRef.current?.timeScale().fitContent()
-      fittedRef.current = stage
+      fittedRef.current = { rank: Math.max(rank, fittedRef.current.rank), window }
     }
-  }, [mid, band, bySecond, entry, exit, resolved])
+  }, [mid, bySecond, entry, exit, resolved, window])
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] uppercase tracking-wide text-neutral-500">
-          Order book · mid + spread band
-        </span>
-        <div className="flex items-center gap-1 text-[10px] text-neutral-500">
-          <span>depth</span>
-          {[1, 2, 3].map((d) => (
-            <button
-              key={d}
-              type="button"
-              onClick={() => setDepth(d)}
-              className={`rounded px-1.5 py-0.5 ${
-                depth === d
-                  ? 'bg-blue-600 text-white'
-                  : 'border border-neutral-700 text-neutral-400'
-              }`}
-            >
-              {d}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="relative h-72 w-full">
-        <div ref={containerRef} className="h-full w-full" />
-        <div
-          ref={tooltipRef}
-          className="pointer-events-none absolute z-10 hidden whitespace-pre rounded border border-neutral-700 bg-neutral-900/95 px-2 py-1 font-mono text-[10px] text-neutral-200"
-        />
-      </div>
+    <div className="relative h-72 w-full">
+      <div ref={containerRef} className="h-full w-full" />
+      <div
+        ref={tooltipRef}
+        className="pointer-events-none absolute z-10 hidden rounded border border-neutral-700 bg-neutral-900/95 px-2 py-1 font-mono text-[10px] text-neutral-200"
+      />
     </div>
   )
 }

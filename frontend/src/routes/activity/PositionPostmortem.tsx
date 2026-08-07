@@ -29,17 +29,7 @@ export type PositionPostmortemProps = {
 function postClosePrices(position: PositionRecord, history: PositionPriceHistory): number[] {
   if (position.closed_at === null) return []
   const closedAt = position.closed_at
-  const prices: number[] = []
-  for (const s of history.snapshots) {
-    if (s.recorded_at < closedAt) continue
-    const bid = s.bids[0]?.[0]
-    const ask = s.asks[0]?.[0]
-    if (bid !== undefined && ask !== undefined) prices.push((bid + ask) / 2)
-  }
-  for (const [ts, price] of history.price_points) {
-    if (ts >= closedAt) prices.push(price)
-  }
-  return prices
+  return history.price_history.filter(([ts]) => ts >= closedAt).map(([, price]) => price)
 }
 
 function Card({

@@ -321,67 +321,56 @@ function round3(n: number): number {
   return Math.round(n * 1000) / 1000
 }
 
-// ---- position price history (Position detail — chart-through-expiry) -----
+// ---- position price history (Position detail — unified CLOB-style line) --
 
-// Mirrors the real backend's shape: local sampling runs from open through
-// close (or 'now' for an open position), then a CLOB-style backfill
-// (`price_points`, no bid/ask band) covers the stretch after close through
-// 'now' — this is what makes the demo chart keep extending past the close
-// marker instead of freezing there.
-function buildPriceHistory(position: PositionRecord): PositionPriceHistory {
-  const localEnd = position.closed_at ?? NOW
-  const snapshots = buildSnapshotsBetween(position.opened_at, localEnd)
-  const pricePoints: PricePoint[] =
-    position.closed_at !== null ? buildPricePointsBetween(position.closed_at, NOW) : []
+// Mirrors the real backend's post-fix shape: a single continuous price path
+// across the position's whole lifetime (open through close and on to
+// resolution/'now') at a density that scales with the selected window — same
+// formula throughout, no discontinuity at the close point, since the real
+// endpoint is now always CLOB-sourced end-to-end rather than splicing local
+// order-book snapshots with a CLOB backfill.
+const PRICE_HISTORY_WINDOW_SECONDS: Partial<Record<string, number>> = {
+  '1h': HOUR,
+  '6h': 6 * HOUR,
+  '1d': 24 * HOUR,
+  '1w': 7 * 24 * HOUR,
+  '1m': 30 * 24 * HOUR,
+}
+const PRICE_HISTORY_TARGET_POINTS: Record<string, number> = {
+  '1h': 60,
+  '6h': 180,
+  '1d': 240,
+  '1w': 300,
+  '1m': 300,
+  all: 250,
+}
+
+function priceAt(position: PositionRecord, until: number, ts: number): number {
+  const span = Math.max(until - position.opened_at, 1)
+  const t = (ts - position.opened_at) / span
+  return round3(0.42 + 0.19 * t + Math.sin((ts - position.opened_at) / (5 * 60)) * 0.012)
+}
+
+function buildPriceHistory(position: PositionRecord, windowParam: string | null): PositionPriceHistory {
+  const marketEndDate = NOW + 6 * HOUR
+  const until = Math.min(NOW, marketEndDate)
+  const window = windowParam !== null && windowParam in PRICE_HISTORY_TARGET_POINTS ? windowParam : 'all'
+  const span = PRICE_HISTORY_WINDOW_SECONDS[window]
+  const since = span !== undefined ? Math.max(until - span, position.opened_at) : position.opened_at
+  const n = PRICE_HISTORY_TARGET_POINTS[window]
+  const price_history: PricePoint[] = Array.from({ length: n }, (_, i) => {
+    const ts = since + ((until - since) * i) / Math.max(n - 1, 1)
+    return [ts, priceAt(position, until, ts)]
+  })
   return {
     position_id: position.id,
     token_id: position.token_id,
-    snapshots,
-    price_points: pricePoints,
-    market_end_date: NOW + 6 * HOUR,
+    window,
+    price_history,
+    market_end_date: marketEndDate,
     market_resolved: false,
     winning_side: null,
   }
-}
-
-function buildSnapshotsBetween(start: number, end: number): OrderBookSnapshot[] {
-  const span = Math.max(end - start, 1)
-  const n = Math.max(2, Math.round(span / OB_STEP) + 1)
-  const snapshots: OrderBookSnapshot[] = []
-  for (let i = 0; i < n; i++) {
-    const recorded_at = start + (span * i) / (n - 1)
-    const t = i / (n - 1)
-    const mid = 0.42 + 0.19 * t + Math.sin(i / 2.5) * 0.012
-    const bid = round3(mid - 0.01)
-    const ask = round3(mid + 0.01)
-    snapshots.push({
-      recorded_at,
-      bids: [
-        [bid, 120 + i * 4],
-        [round3(bid - 0.01), 240],
-      ],
-      asks: [
-        [ask, 110 + i * 3],
-        [round3(ask + 0.01), 220],
-      ],
-    })
-  }
-  return snapshots
-}
-
-function buildPricePointsBetween(start: number, end: number): PricePoint[] {
-  const span = Math.max(end - start, 1)
-  const n = Math.max(2, Math.round(span / OB_STEP) + 1)
-  const points: PricePoint[] = []
-  for (let i = 0; i < n; i++) {
-    const ts = start + (span * i) / (n - 1)
-    const t = i / (n - 1)
-    // Drifts gently against the position — illustrates the postmortem's
-    // "price kept moving after you closed" framing.
-    const price = round3(0.61 + Math.sin(i / 2) * 0.03 - t * 0.08)
-    points.push([ts, price])
-  }
-  return points
 }
 
 // ---- news pipeline (News tab) --------------------------------------------
@@ -616,7 +605,7 @@ export const activityRoutes: MockRoute[] = [
     handler: (ctx) => {
       const row = positionById.get(decodeURIComponent(ctx.params[1]))
       return row
-        ? buildPriceHistory(row)
+        ? buildPriceHistory(row, ctx.query.get('window'))
         : new Response(JSON.stringify({ detail: 'not found' }), {
             status: 404,
             headers: { 'Content-Type': 'application/json' },

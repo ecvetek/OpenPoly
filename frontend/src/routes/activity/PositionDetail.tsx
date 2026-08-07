@@ -24,13 +24,32 @@ import {
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import { NewsConfluenceBlock } from './NewsConfluence'
 import { OrderBookChart } from './OrderBookChart'
-import { fetchPositionPriceHistory, type PositionPriceHistory } from './orderBookClient'
+import {
+  fetchPositionPriceHistory,
+  type PositionPriceHistory,
+  type PriceHistoryWindow,
+} from './orderBookClient'
 import { formatPnl, formatPnlPercent, pnlClass, pnlPercent } from './format'
 import { StatusBadge } from './PositionCard'
 import { PositionPostmortem } from './PositionPostmortem'
 import type { CloseResult, PositionRecord } from './portfolioTypes'
 import { formatSignalEntries } from './signals'
 import { usePoll } from './usePoll'
+
+// Chart timeframe selector — mirrors OverviewTab.tsx's WINDOW_OPTIONS button
+// row and the backend's PRICE_HISTORY_WINDOW_OPTIONS safelist
+// (openpoly/api/portfolio_routes.py). Uppercase labels per the Polymarket
+// reference this redesign followed; wire values stay lowercase (REST/param
+// convention, zero backend case-folding needed) — the two are decoupled on
+// purpose, this is a different widget than Overview's equity selector.
+const WINDOW_OPTIONS: ReadonlyArray<{ readonly label: string; readonly value: PriceHistoryWindow }> = [
+  { label: '1H', value: '1h' },
+  { label: '6H', value: '6h' },
+  { label: '1D', value: '1d' },
+  { label: '1W', value: '1w' },
+  { label: '1M', value: '1m' },
+  { label: 'ALL', value: 'all' },
+]
 
 // No existing generic currency formatter to reuse — format.ts only has
 // P&L-specific ones (signed, always 2 decimals).
@@ -59,37 +78,58 @@ async function closePosition(id: number): Promise<CloseResult> {
 type DetailData = {
   position: PositionRecord | null
   history: PositionPriceHistory | null
+  // Always window='all' — feeds Postmortem only, decoupled from the chart's
+  // own `history` fetch. Postmortem's "since close" stats must reflect the
+  // *entire* post-close period regardless of whatever zoom the user picked
+  // for the chart, or e.g. picking "1H" on a days-old closed position would
+  // silently truncate the postmortem's numbers. `null` while the position is
+  // open (Postmortem doesn't render) or not yet loaded.
+  allHistory: PositionPriceHistory | null
 }
 
 export function PositionDetail() {
   const { positionId } = useParams<{ positionId: string }>()
-  // Keyed on positionId, not just presence — a bare cached DetailData would
-  // survive a future position-to-position navigation that doesn't remount
-  // this component and show the previous position's frozen data under the
-  // new id (unreachable today since every nav entry point remounts, but a
-  // real latent bug for any future in-place link between positions).
-  const frozenRef = useRef<{ positionId: string; data: DetailData } | null>(null)
+  const [chartWindow, setChartWindow] = useState<PriceHistoryWindow>('all')
+  // Keyed on `${positionId}:${chartWindow}`, not just positionId — a
+  // resolved market's CLOB history for any given window is permanently
+  // fixed (settlement doesn't change historical candles), so caching
+  // indefinitely per-window is correct, not a workaround. Without the
+  // window in the key, switching timeframes on an already-"Concluded"
+  // position would return whatever window happened to be active when it
+  // first froze.
+  const frozenRef = useRef<Map<string, DetailData>>(new Map())
   // Set right before a manual/forced refetch so the fetcher below skips the
   // frozen short-circuit for exactly that one call — otherwise, once frozen,
   // the postmortem's refresh button would be a permanent no-op.
   const bypassFreezeRef = useRef(false)
-  const { data, status, error, refetch } = usePoll<DetailData>(async () => {
-    const pid = positionId ?? ''
-    if (frozenRef.current !== null && frozenRef.current.positionId === pid && !bypassFreezeRef.current) {
-      return frozenRef.current.data
-    }
-    bypassFreezeRef.current = false
-    const position = await fetchPosition(pid)
-    if (position === null) return { position: null, history: null }
-    const history = await fetchPositionPriceHistory(position.id)
-    const result: DetailData = { position, history }
-    // Freeze only once the market has actually resolved — a closed
-    // position keeps polling past `closed_at` (the backend keeps extending
-    // the window up to the market's expiry) so the chart/postmortem can
-    // show what the market did afterward.
-    if (history.market_resolved) frozenRef.current = { positionId: pid, data: result }
-    return result
-  })
+  const { data, status, error, refetch } = usePoll<DetailData>(
+    async () => {
+      const pid = positionId ?? ''
+      const key = `${pid}:${chartWindow}`
+      if (frozenRef.current.has(key) && !bypassFreezeRef.current) {
+        return frozenRef.current.get(key)!
+      }
+      bypassFreezeRef.current = false
+      const position = await fetchPosition(pid)
+      if (position === null) return { position: null, history: null, allHistory: null }
+      const history = await fetchPositionPriceHistory(position.id, chartWindow)
+      const allHistory =
+        position.status !== 'closed'
+          ? null
+          : chartWindow === 'all'
+            ? history
+            : await fetchPositionPriceHistory(position.id, 'all')
+      const result: DetailData = { position, history, allHistory }
+      // Freeze only once the market has actually resolved — a closed
+      // position keeps polling past `closed_at` (the backend keeps
+      // extending the window up to the market's expiry) so the
+      // chart/postmortem can show what the market did afterward.
+      if (history.market_resolved) frozenRef.current.set(key, result)
+      return result
+    },
+    3000,
+    chartWindow,
+  )
   const forceRefresh = useCallback(() => {
     bypassFreezeRef.current = true
     refetch()
@@ -135,8 +175,6 @@ export function PositionDetail() {
   }
 
   const p = data.position
-  const snapshots = data.history?.snapshots ?? []
-  const pricePoints = data.history?.price_points ?? []
   const resolvedMarker =
     data.history?.market_resolved && data.history.market_end_date != null
       ? { ts: data.history.market_end_date, winningSide: data.history.winning_side }
@@ -450,30 +488,51 @@ export function PositionDetail() {
       {/* Postmortem: for any closed position — compares what actually
          happened against holding to settlement (once resolved) or shows the
          price trend since close (while still pending). Sits above the chart
-         so the verdict is visible before scrolling to the price history. */}
-      {data.history && (
+         so the verdict is visible before scrolling to the price history.
+         Always fed the 'all'-windowed history, independent of the chart's
+         own timeframe selection below — see DetailData.allHistory. */}
+      {data.allHistory && (
         <PositionPostmortem
           position={p}
-          priceHistory={data.history}
+          priceHistory={data.allHistory}
           onRefresh={forceRefresh}
           concluded={concluded}
         />
       )}
 
-      <div className="rounded border border-neutral-800 p-3">
+      <div className="rounded border border-neutral-800 p-3 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] uppercase tracking-wide text-neutral-500">Price</span>
+          <div className="flex items-center gap-1 text-[10px] text-neutral-500">
+            {WINDOW_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setChartWindow(opt.value)}
+                className={`rounded px-1.5 py-0.5 ${
+                  chartWindow === opt.value
+                    ? 'bg-blue-600 text-white'
+                    : 'border border-neutral-700 text-neutral-400'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
         {status === 'error' && (
           <div className="mb-2 rounded border border-red-700/50 bg-red-900/20 px-3 py-2 text-[11px] text-red-200">
             Backend unreachable; data may be stale.
           </div>
         )}
-        {snapshots.length === 0 && pricePoints.length === 0 ? (
+        {(data.history?.price_history.length ?? 0) === 0 ? (
           <div className="h-72 grid place-items-center text-[11px] text-neutral-500">
             No price data for this position.
           </div>
         ) : (
           <OrderBookChart
-            snapshots={snapshots}
-            pricePoints={pricePoints}
+            priceHistory={data.history?.price_history ?? []}
+            window={chartWindow}
             entry={{ ts: p.opened_at, price: p.avg_entry_price }}
             exit={
               p.closed_at !== null && exitPrice !== null
