@@ -152,6 +152,7 @@ class MarketSourceManager:
         self._poll_count: int = 0
         self._last_error: str | None = None
         self._book_persist: Callable[[OrderBook], None] | None = None
+        self._market_persist: Callable[[Market], None] | None = None
 
     # ---------- lifecycle ----------
 
@@ -200,6 +201,14 @@ class MarketSourceManager:
         writer's ``enqueue``. Wired by the FastAPI lifespan; ``None`` in tests."""
         self._book_persist = persist
 
+    def set_market_persist(self, persist: Callable[[Market], None] | None) -> None:
+        """Install / clear the market-identity persist hook — durable
+        ``market_catalog`` rows independent of live discovery state, so a
+        backtest can resolve a market long after it's fallen out of the live
+        catalog (see ``MarketCatalogRow``'s docstring). Wired by the FastAPI
+        lifespan; ``None`` in tests."""
+        self._market_persist = persist
+
     def set_portfolio_store(self, store: Any | None) -> None:
         """Install / clear the portfolio_store reference — wired by the FastAPI
         lifespan after PortfolioStore is constructed. ``None`` in tests that
@@ -245,6 +254,13 @@ class MarketSourceManager:
             reason_counts=report.reason_counts,
         )
         self.store.replace(report.kept, summary)
+        if self._market_persist is not None:
+            # Durable identity for every market this poll actually kept — a
+            # market only ever reaches the analyzer pipeline (and so only
+            # ever needs to be backtest-resolvable) if it passed the filter
+            # at some poll, so persisting the filtered-out set is unneeded.
+            for market in report.kept:
+                self._market_persist(market)
 
         synced, failed = await self._sync_holdings_once()
         if synced or failed:
@@ -284,6 +300,8 @@ class MarketSourceManager:
                 failed += 1
                 continue
             self.store.union([market])
+            if self._market_persist is not None:
+                self._market_persist(market)
             synced += 1
 
         if synced or failed:

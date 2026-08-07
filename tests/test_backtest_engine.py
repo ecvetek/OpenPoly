@@ -12,6 +12,7 @@ import pytest
 from openpoly.backtest import engine as engine_module
 from openpoly.backtest.engine import BacktestRequest, run_backtest
 from openpoly.db.engine import init_db, make_engine, make_session_factory
+from openpoly.db.market_catalog_store import upsert_market_catalog_row
 from openpoly.db.tables import AnalyzerCallRow, OrderBookSnapshot
 from openpoly.markets.manager import manager as market_source_manager
 from openpoly.markets.models import normalize_gamma_market
@@ -133,6 +134,30 @@ def test_backtest_counts_skipped_market_not_in_catalog(sf) -> None:
     assert result.replayed_analyzer_calls == 0
     assert result.skipped_market_not_in_catalog == 1
     assert result.statistics.summary.positions_closed == 0
+
+
+def test_backtest_resolves_market_via_persisted_catalog_when_not_live(sf) -> None:
+    """The actual fix: a market that has since fallen out of live discovery
+    (resolved, expired, filtered out) is still backtest-resolvable as long
+    as a discovery poll or holding-sync fetch ever persisted its identity —
+    the live catalog snapshot is empty here, only market_catalog has it."""
+    # Deliberately do NOT register "m1" in market_source_manager.store — only
+    # in the persisted catalog, simulating a market that's left live
+    # discovery since the analyzer call that referenced it.
+    with sf() as session:
+        upsert_market_catalog_row(session, _market("m1"), now=50.0)
+        session.commit()
+
+    _seed_analyzer_call(sf, ts=100.0, market_id="m1", p_model=0.7, confidence="high")
+    _seed_book(sf, "yes-m1", ts=100.0, bid=0.40, ask=0.42)
+    _seed_book(sf, "yes-m1", ts=150.0, bid=0.55, ask=0.57)
+
+    result = run_backtest(_default_request(), sf)
+
+    assert result.replayed_analyzer_calls == 1
+    assert result.skipped_market_not_in_catalog == 0
+    assert result.statistics.summary.positions_closed == 1
+    assert result.statistics.closed_positions[0].close_reason == "take_profit"
 
 
 def test_backtest_ignores_non_ok_verdict_analyzer_calls(sf) -> None:

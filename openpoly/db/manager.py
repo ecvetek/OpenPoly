@@ -17,6 +17,7 @@ from sqlalchemy import Engine, func, select, text
 
 from openpoly.db.book_store import make_order_book_sink
 from openpoly.db.engine import get_engine, init_db, make_session_factory
+from openpoly.db.market_catalog_store import make_market_catalog_sink
 from openpoly.db.news_store import make_news_sink
 from openpoly.db.section_log_store import (
     make_analyzer_call_sink,
@@ -31,13 +32,14 @@ from openpoly.db.tables import (
     EntryDecisionRow,
     ExitDecisionRow,
     FillRow,
+    MarketCatalogRow,
     NewsItemRow,
     OrderBookSnapshot,
     PositionRow,
     SettlementDecisionRow,
 )
 from openpoly.db.writer import WriteBehindWriter
-from openpoly.markets.models import OrderBook
+from openpoly.markets.models import Market, OrderBook
 from openpoly.news.ring_buffer import NewsItem
 from openpoly.runtime.section_log import (
     AnalyzerCall,
@@ -85,9 +87,7 @@ def _ensure_analyzer_call_live_columns(engine: Engine) -> None:
     missing (older DBs predate the self-check surfacing). New DBs get the
     column via init_db()'s create_all and skip this entirely."""
     with engine.begin() as conn:
-        existing = {
-            r[1] for r in conn.execute(text("PRAGMA table_info(analyzer_call)")).fetchall()
-        }
+        existing = {r[1] for r in conn.execute(text("PRAGMA table_info(analyzer_call)")).fetchall()}
         if "self_check" not in existing:
             conn.execute(text("ALTER TABLE analyzer_call ADD COLUMN self_check TEXT"))
             logger.info("migration: added analyzer_call.self_check")
@@ -117,6 +117,7 @@ class DatabaseManager:
         self._entry_decision_writer: WriteBehindWriter | None = None
         self._exit_decision_writer: WriteBehindWriter | None = None
         self._settlement_decision_writer: WriteBehindWriter | None = None
+        self._market_catalog_writer: WriteBehindWriter | None = None
 
     # ---------- lifecycle ----------
 
@@ -138,6 +139,7 @@ class DatabaseManager:
         self._entry_decision_writer = WriteBehindWriter(make_entry_decision_sink(factory))
         self._exit_decision_writer = WriteBehindWriter(make_exit_decision_sink(factory))
         self._settlement_decision_writer = WriteBehindWriter(make_settlement_decision_sink(factory))
+        self._market_catalog_writer = WriteBehindWriter(make_market_catalog_sink(factory))
         await self._book_writer.start()
         await self._news_writer.start()
         await self._embedding_call_writer.start()
@@ -145,6 +147,7 @@ class DatabaseManager:
         await self._entry_decision_writer.start()
         await self._exit_decision_writer.start()
         await self._settlement_decision_writer.start()
+        await self._market_catalog_writer.start()
 
     async def stop(self) -> None:
         """Stop all writers, flushing whatever is still queued.
@@ -159,6 +162,7 @@ class DatabaseManager:
             ("entry_decision", self._entry_decision_writer),
             ("exit_decision", self._exit_decision_writer),
             ("settlement_decision", self._settlement_decision_writer),
+            ("market_catalog", self._market_catalog_writer),
         )
         for name, writer in writers:
             if writer is None:
@@ -217,6 +221,13 @@ class DatabaseManager:
             return False
         return self._settlement_decision_writer.enqueue(call)
 
+    def enqueue_market_catalog(self, market: Market) -> bool:
+        """Queue one market for write-behind identity persistence (upsert by
+        market_id) — see MarketCatalogRow's docstring for why this exists."""
+        if self._market_catalog_writer is None:
+            return False
+        return self._market_catalog_writer.enqueue(market)
+
     # ---------- status (powers the database section inspector) ----------
 
     def status(self) -> dict[str, Any]:
@@ -231,6 +242,7 @@ class DatabaseManager:
                 "entry_decision": self._writer_stats(self._entry_decision_writer),
                 "exit_decision": self._writer_stats(self._exit_decision_writer),
                 "settlement_decision": self._writer_stats(self._settlement_decision_writer),
+                "market_catalog": self._writer_stats(self._market_catalog_writer),
             },
         }
 
@@ -263,6 +275,9 @@ class DatabaseManager:
                 ).scalar_one(),
                 "settlement_decision": session.execute(
                     select(func.count()).select_from(SettlementDecisionRow)
+                ).scalar_one(),
+                "market_catalog": session.execute(
+                    select(func.count()).select_from(MarketCatalogRow)
                 ).scalar_one(),
             }
 

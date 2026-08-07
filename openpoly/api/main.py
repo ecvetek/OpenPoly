@@ -242,6 +242,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         warm_interval_seconds=embedding_cfg.warm_interval_seconds,
     )
     market_source_manager.set_book_persist(database_manager.enqueue_order_book)
+    market_source_manager.set_market_persist(database_manager.enqueue_market_catalog)
     market_source_manager.set_portfolio_store(PortfolioStore(get_session_factory()))
     news_source_manager.set_news_persist(database_manager.enqueue_news)
     # Pipeline call-log persistence — durable mirrors of the in-memory rings
@@ -294,6 +295,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if _recon_mod.reconciliation_monitor is not None:
         _recon_mod.reconciliation_monitor.set_settlement_persist(None)
     market_source_manager.set_book_persist(None)
+    market_source_manager.set_market_persist(None)
     market_source_manager.set_portfolio_store(None)
     news_source_manager.set_news_persist(None)
     await database_manager.stop()

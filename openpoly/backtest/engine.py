@@ -12,12 +12,14 @@ Three scoping notes, stated plainly rather than buried in inline comments:
   calls, how would a different entry/exit config have performed" — it does
   NOT re-run the LLM, and cannot recover analyzer calls a different
   historical ``min_confidence`` would have filtered out.
-- Market metadata isn't persisted anywhere (see ``historical_store.py``) —
-  this replays historical price data against the CURRENT market catalog's
-  identity (token ids, tradeable, condition_id), snapshotted once at
-  run-start. A historical ``market_id`` no longer in that snapshot is
-  unresolvable and is counted (``skipped_market_not_in_catalog``), not
-  silently dropped.
+- Market identity resolves in two tiers (see ``historical_store.py``): the
+  live catalog snapshotted once at run-start (fast path — most backtests
+  replay recent history where the market is still live), falling back to
+  the durable ``market_catalog`` table for a market that has since left
+  live discovery. Only a ``market_id`` that was never captured by *any*
+  discovery poll — never actually seen, not just no-longer-live — is still
+  genuinely unresolvable, and is counted (``skipped_market_not_in_catalog``),
+  not silently dropped.
 - The A4 kill-switch's *daily* time-window brake (``kill_daily_loss_usd``)
   reads wall-clock ``time.time()`` internally
   (``edge_threshold_v0._kill_switch_check``'s ``now=None`` default) rather

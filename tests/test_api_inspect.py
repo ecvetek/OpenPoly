@@ -252,6 +252,7 @@ def test_inspect_db_status_unstarted_manager():
         "entry_decision": None,
         "exit_decision": None,
         "settlement_decision": None,
+        "market_catalog": None,
     }
 
 

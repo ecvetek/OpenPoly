@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from openpoly.api.main import app
 from openpoly.backtest.guard import set_backtest_active
 from openpoly.db.engine import get_session_factory, init_db, make_engine, make_session_factory
+from openpoly.db.market_catalog_store import upsert_market_catalog_row
 from openpoly.db.tables import AnalyzerCallRow, OrderBookSnapshot
 from openpoly.markets.manager import manager as market_source_manager
 from openpoly.markets.models import normalize_gamma_market
@@ -121,6 +122,60 @@ def test_run_happy_path_shape(env) -> None:
     assert body["summary"]["wins"] == 1
     assert body["closed_positions"][0]["close_reason"] == "take_profit"
     assert isinstance(body["elapsed_ms"], int)
+
+
+def test_run_resolves_market_and_question_via_persisted_catalog_when_not_live(env) -> None:
+    """The reported symptom: a backtest whose analyzer call references a
+    market that has since left live discovery (resolved, expired, filtered
+    out). market_source_manager.store deliberately has NOTHING registered —
+    only the persisted market_catalog table knows this market — proving
+    both the replay itself and the results table's market_question resolve
+    via that fallback, not just the live catalog."""
+    with env() as session:
+        upsert_market_catalog_row(session, _market("m1"), now=50.0)
+        session.commit()
+    with env() as session:
+        session.add(
+            AnalyzerCallRow(
+                ts=100.0,
+                news_id="n1",
+                news_content_preview="something happened",
+                urgency="high",
+                verdict="ok",
+                p_model=0.7,
+                confidence="high",
+                market_id="m1",
+                latency_ms=50,
+                error=None,
+                rationale="looks bullish",
+            )
+        )
+        session.add(
+            OrderBookSnapshot(
+                token_id="yes-m1",
+                recorded_at=100.0,
+                bids_json=json.dumps([[0.40, 100.0]]),
+                asks_json=json.dumps([[0.42, 100.0]]),
+            )
+        )
+        session.add(
+            OrderBookSnapshot(
+                token_id="yes-m1",
+                recorded_at=150.0,
+                bids_json=json.dumps([[0.55, 100.0]]),
+                asks_json=json.dumps([[0.57, 100.0]]),
+            )
+        )
+        session.commit()
+
+    client = TestClient(app)
+    r = client.post("/api/backtest/run", json=_body())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["skipped_market_not_in_catalog"] == 0
+    assert body["replayed_analyzer_calls"] == 1
+    assert body["summary"]["positions_closed"] == 1
+    assert body["closed_positions"][0]["market_question"] == "Will X happen?"
 
 
 def test_run_returns_409_when_a_backtest_is_already_active(env) -> None:

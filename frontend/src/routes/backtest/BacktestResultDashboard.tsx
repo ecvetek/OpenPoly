@@ -49,10 +49,10 @@ export function BacktestResultDashboard({ data }: { data: BacktestResponse }) {
           tone="text-neutral-100"
         />
         <StatCard
-          label="Skipped · market not in catalog"
+          label="Skipped · market never discovered"
           value={String(data.skipped_market_not_in_catalog)}
           tone={data.skipped_market_not_in_catalog > 0 ? 'text-amber-300' : 'text-neutral-100'}
-          sub="market_id no longer in the live catalog"
+          sub="market_id was never seen by any discovery poll"
         />
         <StatCard label="Positions opened" value={String(s.positions_opened)} tone="text-neutral-100" />
         <StatCard label="Elapsed" value={`${data.elapsed_ms}ms`} tone="text-neutral-100" />

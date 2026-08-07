@@ -9,6 +9,7 @@ import pytest
 
 from openpoly.backtest.historical_store import HistoricalMarketStore
 from openpoly.db.engine import init_db, make_engine, make_session_factory
+from openpoly.db.market_catalog_store import upsert_market_catalog_row
 from openpoly.db.tables import OrderBookSnapshot
 from openpoly.markets.models import normalize_gamma_market
 from openpoly.markets.store import MarketStore, PollSummary
@@ -89,6 +90,70 @@ def test_get_order_book_none_before_any_snapshot(sf) -> None:
         store = HistoricalMarketStore(session, {})
         store.set_clock(50.0)  # before the only snapshot
         assert store.get_order_book("t1") is None
+
+
+# ---------- DB fallback for a market no longer in the live snapshot ----------
+
+
+def test_get_falls_back_to_persisted_catalog_when_not_in_live_snapshot(sf) -> None:
+    with sf() as session:
+        upsert_market_catalog_row(session, _market("m1"), now=100.0)
+        session.commit()
+
+    with sf() as session:
+        store = HistoricalMarketStore(session, {})  # empty live snapshot
+        market = store.get("m1")
+        assert market is not None
+        assert market.market_id == "m1"
+        assert market.condition_id == "0xm1"
+        assert market.yes_token_id == "yes-m1"
+        assert market.no_token_id == "no-m1"
+        # Always tradeable for backtest purposes, regardless of the market's
+        # current live status — see _market_from_catalog_row's docstring.
+        assert market.tradeable is True
+
+
+def test_get_prefers_live_snapshot_over_persisted_catalog(sf) -> None:
+    live = _market("m1")
+    with sf() as session:
+        upsert_market_catalog_row(session, _market("m1"), now=100.0)
+        session.commit()
+
+    with sf() as session:
+        store = HistoricalMarketStore(session, {"m1": live})
+        assert store.get("m1") is live  # the live object, not a DB-reconstructed one
+
+
+def test_get_returns_none_when_never_captured_by_any_poll(sf) -> None:
+    with sf() as session:
+        store = HistoricalMarketStore(session, {})
+        assert store.get("never-seen") is None
+
+
+def test_get_db_fallback_is_cached_across_calls(sf, monkeypatch) -> None:
+    """A market_id looked up many times in one replay (once per analyzer
+    call, once per exit tick) must hit the DB at most once."""
+    with sf() as session:
+        upsert_market_catalog_row(session, _market("m1"), now=100.0)
+        session.commit()
+
+    with sf() as session:
+        store = HistoricalMarketStore(session, {})
+        calls = {"n": 0}
+        import openpoly.backtest.historical_store as hs_module
+
+        original = hs_module.market_catalog_row
+
+        def counting(session_arg, market_id):
+            calls["n"] += 1
+            return original(session_arg, market_id)
+
+        monkeypatch.setattr(hs_module, "market_catalog_row", counting)
+
+        store.get("m1")
+        store.get("m1")
+        store.get("m1")
+        assert calls["n"] == 1
 
 
 def test_inherited_market_store_methods_are_safe_no_ops(sf) -> None:

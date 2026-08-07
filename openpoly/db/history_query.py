@@ -20,7 +20,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from openpoly.db.tables import AnalyzerCallRow, OrderBookSnapshot
+from openpoly.db.tables import AnalyzerCallRow, MarketCatalogRow, OrderBookSnapshot
 
 
 def order_book_at_or_before(session: Session, token_id: str, ts: float) -> OrderBookSnapshot | None:
@@ -54,6 +54,24 @@ def analyzer_calls_in_range(
         .order_by(AnalyzerCallRow.ts.asc())
     )
     return list(session.execute(stmt).scalars().all())
+
+
+def market_catalog_row(session: Session, market_id: str) -> MarketCatalogRow | None:
+    """The durable identity row for ``market_id``, or ``None`` if it was
+    never captured by a discovery poll or holding-sync fetch. Simple PK
+    lookup — ``market_catalog`` has at most one row per market_id."""
+    return session.get(MarketCatalogRow, market_id)
+
+
+def market_catalog_row_by_condition_id(
+    session: Session, condition_id: str
+) -> MarketCatalogRow | None:
+    """Same as ``market_catalog_row`` but keyed by on-chain ``condition_id``
+    — what ``PositionRecord`` stores, not ``market_id`` — for resolving a
+    backtest position's market_question when the market isn't in the live
+    catalog (see ``api/backtest_routes.py``'s ``_lookup_market``)."""
+    stmt = select(MarketCatalogRow).where(MarketCatalogRow.condition_id == condition_id).limit(1)
+    return session.execute(stmt).scalars().first()
 
 
 def order_book_snapshots_for_token(

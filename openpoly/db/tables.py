@@ -8,6 +8,43 @@ from sqlalchemy.orm import Mapped, mapped_column
 from openpoly.db.engine import Base
 
 
+class MarketCatalogRow(Base):
+    """Durable market identity — upserted (one row per ``market_id``) on
+    every discovery poll and every holding-sync fetch, independent of
+    whether the market is still in the live discovery catalog.
+
+    ``order_book_snapshot`` already persists price history forever with no
+    pruning, but a market's *identity* (question, token ids, condition_id)
+    used to live only in the in-memory ``MarketStore`` — gone the moment a
+    market fell out of live discovery (resolved, expired, thinned out by a
+    filter change). That made a backtest unable to resolve any historical
+    ``AnalyzerCallRow`` whose market had since left the catalog, even though
+    its price history was still sitting right there in
+    ``order_book_snapshot`` — surfaced as a growing
+    ``skipped_market_not_in_catalog`` count on longer backtest ranges. This
+    table is the fix: durable identity, independent of live discovery
+    state, so a backtest can resolve any market it has ever seen a poll for.
+
+    No pruning — a row is a couple hundred bytes; even tens of thousands of
+    markets ever discovered is negligible next to the already-unbounded
+    ``order_book_snapshot`` table, so there is no 30-day-window bookkeeping
+    to get wrong. ``first_seen_at``/``last_seen_at`` are kept for visibility,
+    not retention logic.
+    """
+
+    __tablename__ = "market_catalog"
+
+    market_id: Mapped[str] = mapped_column(primary_key=True)
+    condition_id: Mapped[str]
+    question: Mapped[str]
+    slug: Mapped[str]
+    yes_token_id: Mapped[str]
+    no_token_id: Mapped[str | None]
+    neg_risk: Mapped[bool]
+    first_seen_at: Mapped[float]
+    last_seen_at: Mapped[float]
+
+
 class OrderBookSnapshot(Base):
     """One sampled order book — top-N depth levels per side, stored as JSON.
 
