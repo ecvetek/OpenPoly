@@ -58,6 +58,10 @@ export type NewsSignal = {
   // write-behind and best-effort) — the decision still counts.
   content: string | null
   urgency: string | null
+  sentiment: string | null
+  // null when no verdict=ok analyzer call matches this news_id (+ market_id).
+  rationale: string | null
+  self_check: string | null
 }
 
 // The regime derived from a position's news signals. `contested` dominates

@@ -247,7 +247,9 @@ def get_position_by_id(
       every later analyzer decision on this market that was blocked by this
       position, plus the ``opening`` one. Each carries ``relation``
       (opening/reinforce/contradict), the side it wanted, p_model,
-      confidence, and the news content when still persisted.
+      confidence, the news content/urgency/sentiment when still persisted,
+      and rationale/self_check from the matching ``verdict=ok`` analyzer
+      call when one is found.
     - ``confluence``: ``{state, support, against}`` derived from those
       signals as of now, using the live exit section's TTL/count settings.
       ``state`` is what the confluence exit section keys its peak-drawdown
@@ -277,7 +279,7 @@ def get_position_by_id(
     body["entry_decision"] = _lookup_entry_decision(position_id, factory)
     body["unrealized_pnl"] = _unrealized_pnl(record)
     signals = store.signals_for_position(position_id)
-    body["news_signals"] = _news_signals_body(signals, factory)
+    body["news_signals"] = _news_signals_body(signals, record.market_id, factory)
     body["confluence"] = _confluence_for(record, signals, time.time())
     return body
 
@@ -746,28 +748,56 @@ def _confluence_for(
 
 
 def _news_signals_body(
-    signals: list[PositionSignal], factory: sessionmaker[Session]
+    signals: list[PositionSignal], market_id: str, factory: sessionmaker[Session]
 ) -> list[dict[str, Any]]:
     """The position's news-confluence ledger, oldest first, each row joined to
-    its news item's content preview.
+    its news item's content/urgency/sentiment and (when available) the
+    ``verdict=ok`` analyzer call that produced the decision.
 
-    One query for every referenced news item rather than one per signal. A
+    One query for every referenced news item, plus one bulk analyzer-call
+    query scoped to this position's ``market_id`` (same grouping pattern as
+    ``_lookup_analyzer_decisions_bulk``), rather than one query per signal. A
     signal whose news row was evicted (or never persisted — the news sink is
-    write-behind and best-effort) still appears, with ``content`` ``None``:
-    the decision itself is the fact that matters here, the text is context."""
+    write-behind and best-effort) still appears, with ``content``/``urgency``/
+    ``sentiment`` ``None``; likewise ``rationale``/``self_check`` are ``None``
+    when no matching analyzer call is found — the decision itself is the fact
+    that matters here, the text is context.
+
+    The analyzer-call join is scoped to ``(news_id, market_id)`` rather than
+    ``news_id`` alone: ``AnalyzerCallRow.market_id`` is already on the row,
+    and guarding against the same news_id having been analyzed against a
+    different market (schema allows it, even if rare in practice) is free."""
     if not signals:
         return []
     news_ids = sorted({s.news_id for s in signals})
     with factory() as session:
-        rows = (
+        news_rows = (
             session.execute(select(NewsItemRow).where(NewsItemRow.news_id.in_(news_ids)))
             .scalars()
             .all()
         )
-    by_id = {r.news_id: r for r in rows}
+        analyzer_rows = (
+            session.execute(
+                select(AnalyzerCallRow)
+                .where(
+                    AnalyzerCallRow.news_id.in_(news_ids),
+                    AnalyzerCallRow.verdict == "ok",
+                    AnalyzerCallRow.market_id == market_id,
+                )
+                .order_by(AnalyzerCallRow.ts.desc())
+            )
+            .scalars()
+            .all()
+        )
+    by_id = {r.news_id: r for r in news_rows}
+    # Rows are newest-first; the first one seen per news_id wins.
+    analyzer_by_news_id: dict[str, AnalyzerCallRow] = {}
+    for r in analyzer_rows:
+        analyzer_by_news_id.setdefault(r.news_id, r)
     out: list[dict[str, Any]] = []
     for sig in signals:
         row = by_id.get(sig.news_id)
+        call = analyzer_by_news_id.get(sig.news_id)
         out.append(
             {
                 "news_id": sig.news_id,
@@ -778,6 +808,9 @@ def _news_signals_body(
                 "confidence": sig.confidence,
                 "content": row.content if row is not None else None,
                 "urgency": row.urgency if row is not None else None,
+                "sentiment": row.sentiment if row is not None else None,
+                "rationale": call.rationale if call is not None else None,
+                "self_check": call.self_check if call is not None else None,
             }
         )
     return out

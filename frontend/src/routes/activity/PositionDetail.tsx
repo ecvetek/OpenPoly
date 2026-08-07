@@ -21,7 +21,6 @@ import {
   formatTimeRemaining,
   formatUTC,
 } from '../../sections/news_source/time'
-import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import { NewsConfluenceBlock } from './NewsConfluence'
 import { OrderBookChart } from './OrderBookChart'
 import {
@@ -32,7 +31,7 @@ import {
 import { formatPnl, formatPnlPercent, pnlClass, pnlPercent } from './format'
 import { StatusBadge } from './PositionCard'
 import { PositionPostmortem } from './PositionPostmortem'
-import type { CloseResult, PositionRecord } from './portfolioTypes'
+import type { CloseResult, NewsSignal, PositionRecord } from './portfolioTypes'
 import { formatSignalEntries } from './signals'
 import { usePoll } from './usePoll'
 
@@ -42,7 +41,10 @@ import { usePoll } from './usePoll'
 // reference this redesign followed; wire values stay lowercase (REST/param
 // convention, zero backend case-folding needed) — the two are decoupled on
 // purpose, this is a different widget than Overview's equity selector.
-const WINDOW_OPTIONS: ReadonlyArray<{ readonly label: string; readonly value: PriceHistoryWindow }> = [
+const WINDOW_OPTIONS: ReadonlyArray<{
+  readonly label: string
+  readonly value: PriceHistoryWindow
+}> = [
   { label: '1H', value: '1h' },
   { label: '6H', value: '6h' },
   { label: '1D', value: '1d' },
@@ -89,7 +91,7 @@ type DetailData = {
 
 export function PositionDetail() {
   const { positionId } = useParams<{ positionId: string }>()
-  const [chartWindow, setChartWindow] = useState<PriceHistoryWindow>('all')
+  const [chartWindow, setChartWindow] = useState<PriceHistoryWindow>('1d')
   // Keyed on `${positionId}:${chartWindow}`, not just positionId — a
   // resolved market's CLOB history for any given window is permanently
   // fixed (settlement doesn't change historical candles), so caching
@@ -190,6 +192,32 @@ export function PositionDetail() {
   const entrySignalsText = p.entry_decision?.signals
     ? formatSignalEntries(p.entry_decision.signals, ['side', 'p_model', 'held_price'])
     : null
+  // A position that predates the confluence/signals rollout has no
+  // news_signals but may still have the old single `news` field (plus
+  // whatever analyzer_decisions matched it) — synthesize a one-item ledger
+  // from those so News Confluence still shows the triggering news instead
+  // of silently dropping it now that the dedicated "Triggering news" card
+  // is gone.
+  const confluenceSignals: NewsSignal[] =
+    p.news_signals && p.news_signals.length > 0
+      ? p.news_signals
+      : p.news
+        ? [
+            {
+              news_id: p.news_id ?? '',
+              ts: p.news.published_at,
+              side: p.side,
+              relation: 'opening',
+              p_model: null,
+              confidence: null,
+              content: p.news.content,
+              urgency: p.news.urgency,
+              sentiment: p.news.sentiment,
+              rationale: p.analyzer_decisions?.[0]?.rationale ?? null,
+              self_check: p.analyzer_decisions?.[0]?.self_check ?? null,
+            },
+          ]
+        : []
 
   async function onClosePosition() {
     if (closing) return
@@ -296,213 +324,195 @@ export function PositionDetail() {
         </div>
       )}
 
-      {/* Position card: side/size/price/cost/status/P&L/opened(+closed)/
+      {/* Position + Entry, paired side by side on wide viewports — what was
+         opened and why, at a glance, without scrolling past one to reach
+         the other. */}
+      <div
+        className={`grid gap-4 ${entrySignalsText ? 'lg:grid-cols-2' : 'grid-cols-1'}`}
+      >
+        {/* Position card: side/size/price/cost/status/P&L/opened(+closed)/
          expiry — same fields and layout as a PositionCard row in the list.
          Two columns: trading detail on the left, timestamps + the manual
          close action stacked top-right so an open position (no SELL row)
          doesn't leave a tall empty gap under a bottom-pinned button. */}
-      <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-2 min-w-0">
-          <div className="flex items-baseline gap-2 flex-wrap text-[11px]">
-            <span className="text-neutral-400">Position</span>
-            <StatusBadge status={p.status} closeReason={p.close_reason} />
-          </div>
+        <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex items-start justify-between gap-4">
+          <div className="flex flex-col gap-2 min-w-0">
+            <div className="flex items-baseline gap-2 flex-wrap text-[11px]">
+              <span className="text-neutral-400">Position</span>
+              <StatusBadge status={p.status} closeReason={p.close_reason} />
+            </div>
 
-          <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
-            <span className={`font-semibold ${sideTone}`}>
-              BUY_{p.side.toUpperCase()}
-            </span>
-            <span className="text-neutral-300">
-              {p.qty.toFixed(2)} @ {p.avg_entry_price.toFixed(3)}
-            </span>
-            <span className="text-neutral-500">(${cost.toFixed(2)})</span>
-            {p.status === 'open' && p.unrealized_pnl != null && (
-              <span className={pnlClass(p.unrealized_pnl)}>
-                {formatPnl(p.unrealized_pnl)} ({formatPnlPercent(pnlPercent(p.unrealized_pnl, cost))})
+            <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
+              <span className={`font-semibold ${sideTone}`}>
+                BUY_{p.side.toUpperCase()}
               </span>
-            )}
-          </div>
+              <span className="text-neutral-300">
+                {p.qty.toFixed(2)} @ {p.avg_entry_price.toFixed(3)}
+              </span>
+              <span className="text-neutral-500">(${cost.toFixed(2)})</span>
+              {p.status === 'open' && p.unrealized_pnl != null && (
+                <span className={pnlClass(p.unrealized_pnl)}>
+                  {formatPnl(p.unrealized_pnl)} (
+                  {formatPnlPercent(pnlPercent(p.unrealized_pnl, cost))})
+                </span>
+              )}
+            </div>
 
-          {/* Market expiry — "<time remaining> / <exact resolution datetime>",
+            {/* Market expiry — "<time remaining> / <exact resolution datetime>",
              flips to "expired / <datetime>" once the market's end_date has
              passed (the position itself may still be open pending settlement).
              Prefers the price-history lookup (durable — resolves by
              condition_id even once the market is evicted from the live
              catalog) over the plain catalog lookup, which goes null in
              exactly that case. */}
-          {(data.history?.market_end_date ?? p.market_end_date) != null && (
-            <div
-              className="text-[10px] text-neutral-600 font-mono"
-              title={formatUTC(data.history?.market_end_date ?? p.market_end_date ?? 0)}
-            >
-              {formatTimeRemaining(data.history?.market_end_date ?? p.market_end_date ?? 0)} /{' '}
-              {formatLocalDateTime(data.history?.market_end_date ?? p.market_end_date ?? 0)}
-            </div>
-          )}
+            {(data.history?.market_end_date ?? p.market_end_date) != null && (
+              <div
+                className="text-[10px] text-neutral-600 font-mono"
+                title={formatUTC(data.history?.market_end_date ?? p.market_end_date ?? 0)}
+              >
+                {formatTimeRemaining(
+                  data.history?.market_end_date ?? p.market_end_date ?? 0,
+                )}{' '}
+                /{' '}
+                {formatLocalDateTime(
+                  data.history?.market_end_date ?? p.market_end_date ?? 0,
+                )}
+              </div>
+            )}
 
-          {p.closed_at !== null && exitPrice !== null && p.realized_pnl !== null && (
-            <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
-              <span className={`font-semibold ${sideTone}`}>
-                SELL_{p.side.toUpperCase()}
-              </span>
-              <span className="text-neutral-300">
-                {p.qty.toFixed(2)} @ {exitPrice.toFixed(3)}
-              </span>
-              <span className={pnlClass(p.realized_pnl)}>
-                {formatPnl(p.realized_pnl)} ({formatPnlPercent(pnlPercent(p.realized_pnl, cost))})
-              </span>
-            </div>
-          )}
+            {p.closed_at !== null && exitPrice !== null && p.realized_pnl !== null && (
+              <div className="flex items-baseline gap-4 flex-wrap font-mono text-[12px]">
+                <span className={`font-semibold ${sideTone}`}>
+                  SELL_{p.side.toUpperCase()}
+                </span>
+                <span className="text-neutral-300">
+                  {p.qty.toFixed(2)} @ {exitPrice.toFixed(3)}
+                </span>
+                <span className={pnlClass(p.realized_pnl)}>
+                  {formatPnl(p.realized_pnl)} (
+                  {formatPnlPercent(pnlPercent(p.realized_pnl, cost))})
+                </span>
+              </div>
+            )}
 
-          {closeStatus && (
-            <span className="text-[10px] text-neutral-500">{closeStatus}</span>
-          )}
-        </div>
+            {closeStatus && (
+              <span className="text-[10px] text-neutral-500">{closeStatus}</span>
+            )}
+          </div>
 
-        <div className="flex flex-col items-end gap-1.5 shrink-0">
-          <span
-            className="text-neutral-600 text-[10px]"
-            title={formatUTC(p.opened_at)}
-          >
-            opened {formatRelativeAgo(p.opened_at)}
-          </span>
-          {p.closed_at !== null && (
-            <span
-              className="text-neutral-600 text-[10px]"
-              title={formatUTC(p.closed_at)}
-            >
-              closed {formatRelativeAgo(p.closed_at)}
+          <div className="flex flex-col items-end gap-1.5 shrink-0">
+            <span className="text-neutral-600 text-[10px]" title={formatUTC(p.opened_at)}>
+              opened {formatRelativeAgo(p.opened_at)}
             </span>
-          )}
-          {p.status === 'open' && (
-            <button
-              type="button"
-              disabled={closing}
-              onClick={() => void onClosePosition()}
-              className="px-2 py-1 text-[11px] rounded border border-red-800 bg-red-900/30 hover:bg-red-900/50 text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {closing ? 'Closing…' : 'Close position'}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* The news item that triggered this position's entry. Inline rather
-         than a link — there's no per-item News route to link to. Omitted
-         entirely for a paper/manual position (no news_id) or one that
-         predates the news persistence rollout. */}
-      {p.news && (
-        <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-1.5">
-          <div className="flex items-baseline gap-2 flex-wrap text-[11px]">
-            <span className="text-neutral-400">Triggering news</span>
-            <span className="px-1.5 py-0.5 text-[10px] uppercase font-mono rounded border bg-neutral-800 text-neutral-400 border-neutral-700/50">
-              {p.news.urgency}
-            </span>
-            {p.news.sentiment !== null && (
-              <span className="text-neutral-500">
-                sentiment {p.news.sentiment}
+            {p.closed_at !== null && (
+              <span
+                className="text-neutral-600 text-[10px]"
+                title={formatUTC(p.closed_at)}
+              >
+                closed {formatRelativeAgo(p.closed_at)}
               </span>
             )}
-            <span
-              className="ml-auto text-neutral-600"
-              title={formatUTC(p.news.published_at)}
-            >
-              {formatRelativeAgo(p.news.published_at)}
-            </span>
-          </div>
-          <div className="text-[12px] text-neutral-200 leading-relaxed whitespace-pre-wrap break-words">
-            {p.news.content}
+            {p.status === 'open' && (
+              <button
+                type="button"
+                disabled={closing}
+                onClick={() => void onClosePosition()}
+                className="px-2 py-1 text-[11px] rounded border border-red-800 bg-red-900/30 hover:bg-red-900/50 text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {closing ? 'Closing…' : 'Close position'}
+              </button>
+            )}
           </div>
         </div>
-      )}
 
-      {/* Every later news decision on this market that attached to this
-         position instead of opening its own — plus the risk regime that
-         follows. Renders nothing for a position with an empty ledger (one
-         opened before news confluence shipped). */}
-      <NewsConfluenceBlock
-        signals={p.news_signals ?? []}
-        confluence={p.confluence}
-      />
-
-      {/* PD3+PD5: analyzer rationale block (LLM's stated reason for the
-         decision). Empty list when no persisted analyzer_call row matches
-         this position's news_id — rendered as "unavailable" rather than an
-         error. */}
-      <AnalyzerRationaleBlock decisions={p.analyzer_decisions ?? []} />
-
-      {/* Entry-section decision signals (edge/spread/min_edge/max_spread/
+        {/* Entry-section decision signals (edge/spread/min_edge/max_spread/
          recent_move/...) at the moment this position was opened — the same
          generic key:value dump NewsCard's "④ Entry" stage shows. Absent
          entirely for a manual/paper position or one that predates
          entry_decision persistence. */}
-      {entrySignalsText && (
-        <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-1">
-          <div className="text-[11px] text-neutral-400">Entry signals</div>
-          <div className="text-[11px] text-neutral-500 font-mono break-words">
-            {entrySignalsText}
-          </div>
-          {p.entry_decision?.reason && (
-            <div className="text-[11px] text-neutral-600">
-              {p.entry_decision.reason}
+        {entrySignalsText && (
+          <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-1">
+            <div className="text-[11px] text-neutral-400">Entry</div>
+            <div className="text-[11px] text-neutral-500 font-mono break-words">
+              {entrySignalsText}
             </div>
-          )}
-        </div>
-      )}
+            {p.entry_decision?.reason && (
+              <div className="text-[11px] text-neutral-600">
+                {p.entry_decision.reason}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Every news decision on this market that touched this position —
+         the opening one plus anything later that reinforced/contradicted it
+         — enriched with each item's urgency/sentiment and (collapsed by
+         default) the analyzer's rationale, folding in what used to be two
+         separate "Triggering news" and "Analyzer rationale" cards. Falls
+         back to a synthesized single-item ledger (confluenceSignals, above)
+         for a position that predates news-confluence persistence. */}
+      <NewsConfluenceBlock signals={confluenceSignals} confluence={p.confluence} />
 
       {/* Exit-monitor decision that actually closed this position — richer
          than the coarse close_reason badge above (trigger detail,
-         return_pct, peak_price). Omitted while open, or if closed before
-         the exit_decision persistence rollout. */}
-      {p.exit_decision && (
-        <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-1.5">
-          <div className="text-[11px] text-neutral-400">Exit</div>
-          <div className="flex items-baseline gap-3 flex-wrap font-mono text-[12px]">
-            {p.exit_decision.trigger !== null && (
-              <span className="text-neutral-300">
-                trigger{' '}
-                <span className="text-neutral-100">
-                  {p.exit_decision.trigger}
-                </span>
-              </span>
-            )}
-            {p.exit_decision.return_pct !== null && (
-              <span className={pnlClass(p.exit_decision.return_pct)}>
-                {(p.exit_decision.return_pct * 100).toFixed(2)}%
-              </span>
-            )}
-            {p.exit_decision.peak_price !== null && (
-              <span className="text-neutral-500">
-                peak {p.exit_decision.peak_price.toFixed(3)}
-              </span>
-            )}
-          </div>
-          {p.exit_decision.reason && (
-            <div className="text-[11px] text-neutral-400">
-              {p.exit_decision.reason}
+         return_pct, peak_price) — paired with Postmortem, its natural
+         counterpart, side by side on wide viewports. Omitted while open, or
+         if closed before the exit_decision persistence rollout. */}
+      {(p.exit_decision || data.allHistory) && (
+        <div
+          className={`grid gap-4 ${p.exit_decision && data.allHistory ? 'lg:grid-cols-2' : 'grid-cols-1'}`}
+        >
+          {p.exit_decision && (
+            <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-1.5">
+              <div className="text-[11px] text-neutral-400">Exit</div>
+              <div className="flex items-baseline gap-3 flex-wrap font-mono text-[12px]">
+                {p.exit_decision.trigger !== null && (
+                  <span className="text-neutral-300">
+                    trigger{' '}
+                    <span className="text-neutral-100">{p.exit_decision.trigger}</span>
+                  </span>
+                )}
+                {p.exit_decision.return_pct !== null && (
+                  <span className={pnlClass(p.exit_decision.return_pct)}>
+                    {(p.exit_decision.return_pct * 100).toFixed(2)}%
+                  </span>
+                )}
+                {p.exit_decision.peak_price !== null && (
+                  <span className="text-neutral-500">
+                    peak {p.exit_decision.peak_price.toFixed(3)}
+                  </span>
+                )}
+              </div>
+              {p.exit_decision.reason && (
+                <div className="text-[11px] text-neutral-400">
+                  {p.exit_decision.reason}
+                </div>
+              )}
             </div>
           )}
-        </div>
-      )}
 
-      {/* Postmortem: for any closed position — compares what actually
-         happened against holding to settlement (once resolved) or shows the
-         price trend since close (while still pending). Sits above the chart
-         so the verdict is visible before scrolling to the price history.
-         Always fed the 'all'-windowed history, independent of the chart's
-         own timeframe selection below — see DetailData.allHistory. */}
-      {data.allHistory && (
-        <PositionPostmortem
-          position={p}
-          priceHistory={data.allHistory}
-          onRefresh={forceRefresh}
-          concluded={concluded}
-        />
+          {/* Postmortem: for any closed position — compares what actually
+             happened against holding to settlement (once resolved) or shows
+             the price trend since close (while still pending). Always fed
+             the 'all'-windowed history, independent of the chart's own
+             timeframe selection below — see DetailData.allHistory. */}
+          {data.allHistory && (
+            <PositionPostmortem
+              position={p}
+              priceHistory={data.allHistory}
+              onRefresh={forceRefresh}
+              concluded={concluded}
+            />
+          )}
+        </div>
       )}
 
       <div className="rounded border border-neutral-800 p-3 flex flex-col gap-2">
         <div className="flex items-center justify-between">
-          <span className="text-[10px] uppercase tracking-wide text-neutral-500">Price</span>
+          <span className="text-[10px] uppercase tracking-wide text-neutral-500">
+            Price
+          </span>
           <div className="flex items-center gap-1 text-[10px] text-neutral-500">
             {WINDOW_OPTIONS.map((opt) => (
               <button
@@ -546,4 +556,3 @@ export function PositionDetail() {
     </div>
   )
 }
-

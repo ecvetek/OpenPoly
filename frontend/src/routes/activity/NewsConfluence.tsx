@@ -14,6 +14,7 @@
  * shipped has an empty ledger and the block is omitted entirely rather than
  * showing a misleading "solo" badge over nothing.
  */
+import { useState } from 'react'
 import { formatRelativeAgo, formatUTC } from '../../sections/news_source/time'
 import type { Confluence, NewsSignal } from './portfolioTypes'
 
@@ -72,6 +73,23 @@ function confidenceClass(confidence: string | null): string {
   return 'text-neutral-400'
 }
 
+// Case-insensitive: urgency is a loosely-typed free string upstream, not a
+// fixed union, so unrecognized values fall back to the same neutral style
+// the old "Triggering news" card used for every value regardless of level.
+function urgencyClass(urgency: string): string {
+  const u = urgency.toLowerCase()
+  if (u === 'high') return 'bg-red-900/40 text-red-300 border-red-800/50'
+  if (u === 'medium') return 'bg-amber-900/40 text-amber-300 border-amber-800/50'
+  return 'bg-neutral-800 text-neutral-400 border-neutral-700/50'
+}
+
+function sentimentClass(sentiment: string): string {
+  const s = sentiment.toLowerCase()
+  if (s === 'positive' || s === 'bullish') return 'text-emerald-300'
+  if (s === 'negative' || s === 'bearish') return 'text-red-300'
+  return 'text-neutral-400'
+}
+
 export function NewsConfluenceBlock({
   signals,
   confluence,
@@ -79,9 +97,20 @@ export function NewsConfluenceBlock({
   signals: NewsSignal[]
   confluence: Confluence | null | undefined
 }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
   if (signals.length === 0) return null
 
   const state = confluence?.state ?? 'solo'
+
+  function toggleExpanded(key: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   return (
     <div className="rounded border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-2">
@@ -107,44 +136,78 @@ export function NewsConfluenceBlock({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        {signals.map((s) => (
-          <div
-            key={`${s.news_id}-${s.ts}-${s.relation}`}
-            className="rounded bg-neutral-900/60 p-2.5 flex flex-col gap-1"
-          >
-            <div className="flex items-baseline gap-2 flex-wrap text-[10px] font-mono">
-              <span
-                className={`px-1.5 py-0.5 uppercase rounded border ${RELATION_STYLE[s.relation]}`}
-              >
-                {RELATION_LABEL[s.relation]}
-              </span>
-              <span className="text-neutral-400 uppercase">
-                wanted {s.side}
-              </span>
-              {s.p_model !== null && (
-                <span className="text-neutral-400">
-                  p={s.p_model.toFixed(2)}
+        {signals.map((s) => {
+          const key = `${s.news_id}-${s.ts}-${s.relation}`
+          const isExpanded = expanded.has(key)
+          const hasReasoning = s.rationale !== null || s.self_check !== null
+          return (
+            <div
+              key={key}
+              className="rounded bg-neutral-900/60 p-2.5 flex flex-col gap-1"
+            >
+              <div className="flex items-baseline gap-2 flex-wrap text-[10px] font-mono">
+                <span
+                  className={`px-1.5 py-0.5 uppercase rounded border ${RELATION_STYLE[s.relation]}`}
+                >
+                  {RELATION_LABEL[s.relation]}
                 </span>
-              )}
-              {s.confidence !== null && (
-                <span className={confidenceClass(s.confidence)}>
-                  {s.confidence}
+                {s.urgency !== null && (
+                  <span
+                    className={`px-1.5 py-0.5 uppercase rounded border ${urgencyClass(s.urgency)}`}
+                  >
+                    {s.urgency}
+                  </span>
+                )}
+                <span className="text-neutral-400 uppercase">wanted {s.side}</span>
+                {s.p_model !== null && (
+                  <span className="text-neutral-400">p={s.p_model.toFixed(2)}</span>
+                )}
+                {s.confidence !== null && (
+                  <span className={confidenceClass(s.confidence)}>{s.confidence}</span>
+                )}
+                {s.sentiment !== null && (
+                  <span className={sentimentClass(s.sentiment)}>{s.sentiment}</span>
+                )}
+                <span className="ml-auto text-neutral-600" title={formatUTC(s.ts)}>
+                  {formatRelativeAgo(s.ts)}
                 </span>
+              </div>
+              <div className="text-[12px] text-neutral-200 leading-relaxed whitespace-pre-wrap break-words">
+                {s.content ?? (
+                  <span className="text-neutral-500 italic">
+                    News text unavailable — the item was never persisted or has since been
+                    evicted. The decision itself still counts.
+                  </span>
+                )}
+              </div>
+              {hasReasoning && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => toggleExpanded(key)}
+                    className="self-start text-[10px] text-blue-400 hover:text-blue-300"
+                  >
+                    {isExpanded ? 'Hide reasoning ▾' : 'Show reasoning ▸'}
+                  </button>
+                  {isExpanded && (
+                    <div className="flex flex-col gap-1 border-t border-neutral-800/70 pt-1">
+                      {s.rationale && (
+                        <div className="text-[12px] text-neutral-200 leading-relaxed whitespace-pre-wrap break-words">
+                          {s.rationale}
+                        </div>
+                      )}
+                      {s.self_check && (
+                        <div className="text-[11px] text-neutral-500 leading-relaxed whitespace-pre-wrap break-words">
+                          {s.self_check}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
-              <span className="ml-auto text-neutral-600" title={formatUTC(s.ts)}>
-                {formatRelativeAgo(s.ts)}
-              </span>
             </div>
-            <div className="text-[12px] text-neutral-200 leading-relaxed whitespace-pre-wrap break-words">
-              {s.content ?? (
-                <span className="text-neutral-500 italic">
-                  News text unavailable — the item was never persisted or has
-                  since been evicted. The decision itself still counts.
-                </span>
-              )}
-            </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )

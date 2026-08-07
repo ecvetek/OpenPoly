@@ -1678,6 +1678,105 @@ def test_position_detail_surfaces_the_confluence_ledger(env) -> None:
     assert signals[1]["side"] == "no"  # the side the decision WANTED
 
 
+def test_news_signals_carry_sentiment_and_rationale(env) -> None:
+    """Each news-confluence signal is enriched with its news item's sentiment
+    and, when a matching verdict=ok analyzer call exists for the *same*
+    market_id, that call's rationale/self_check. A same-news_id call for a
+    different market must not leak in, and a signal with no matching
+    analyzer call degrades to None rather than erroring."""
+    from openpoly.runtime.section_log import AnalyzerCall
+
+    store, client, factory = env
+    held = _open(store, "m1", "yes", "ty1", ts=100.0)
+    now = time.time()
+    store.record_signal(
+        held.position_id,
+        news_id="n1",
+        ts=now - 600,
+        side="yes",
+        relation="opening",
+        p_model=0.71,
+        confidence="high",
+    )
+    store.record_signal(
+        held.position_id,
+        news_id="n2",
+        ts=now - 300,
+        side="no",
+        relation="contradict",
+        p_model=0.2,
+        confidence="medium",
+    )
+    with factory() as session:
+        session.add_all(
+            [
+                NewsItemRow(
+                    news_id="n1",
+                    content="the original headline",
+                    urgency="high",
+                    sentiment="positive",
+                    published_at=now - 610,
+                    received_at=now - 605,
+                ),
+                NewsItemRow(
+                    news_id="n2",
+                    content="a rebuttal",
+                    urgency="medium",
+                    sentiment="negative",
+                    published_at=now - 310,
+                    received_at=now - 305,
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                AnalyzerCallRow(
+                    **AnalyzerCall(
+                        ts=now - 600,
+                        news_id="n1",
+                        news_content_preview="x",
+                        urgency="high",
+                        verdict="ok",
+                        p_model=0.71,
+                        confidence="high",
+                        market_id="m1",
+                        latency_ms=20,
+                        rationale="opened on the original headline",
+                        self_check="checked against the order book",
+                    ).to_dict()
+                ),
+                # Same news_id, different market — must NOT be picked up.
+                AnalyzerCallRow(
+                    **AnalyzerCall(
+                        ts=now - 599,
+                        news_id="n1",
+                        news_content_preview="x",
+                        urgency="high",
+                        verdict="ok",
+                        p_model=0.71,
+                        confidence="high",
+                        market_id="m9",
+                        latency_ms=20,
+                        rationale="wrong market — must not appear",
+                    ).to_dict()
+                ),
+            ]
+        )
+        session.commit()
+
+    body = client.get(f"/api/positions/{held.position_id}").json()
+    signals = body["news_signals"]
+    assert signals[0]["news_id"] == "n1"
+    assert signals[0]["sentiment"] == "positive"
+    assert signals[0]["rationale"] == "opened on the original headline"
+    assert signals[0]["self_check"] == "checked against the order book"
+    # n2 has a news row (sentiment) but no matching analyzer call.
+    assert signals[1]["news_id"] == "n2"
+    assert signals[1]["sentiment"] == "negative"
+    assert signals[1]["rationale"] is None
+    assert signals[1]["self_check"] is None
+
+
 def test_position_with_no_signals_reads_as_solo(env) -> None:
     store, client, _factory = env
     held = _open(store, "m1", "yes", "ty1", ts=100.0)
