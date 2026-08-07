@@ -27,7 +27,19 @@ CloseReason = Literal[
     "scale_out",
     "post_scale_out_stop",
     "final_take_profit",
+    "contested_exit",
 ]
+
+# How one news/analyzer decision relates to the position it attached to.
+# ``opening`` is the decision that actually opened it; ``reinforce`` wanted the
+# same side and was blocked by the one-position-per-(market, side) rule;
+# ``contradict`` wanted the OTHER side of the same market.
+Relation = Literal["opening", "reinforce", "contradict"]
+
+# The confluence regime derived from a position's attached signals. See
+# ``openpoly.portfolio.confluence`` for the derivation; the exit section keys
+# its peak-drawdown threshold off this.
+ConfluenceState = Literal["solo", "reinforced", "contested"]
 
 
 @dataclass(frozen=True)
@@ -47,6 +59,27 @@ class Fill:
     trigger: str | None = None
     order_id: str | None = None  # NEW (slice C)
     tx_hash: str | None = None  # NEW (slice C)
+
+
+@dataclass(frozen=True)
+class PositionSignal:
+    """One news/analyzer decision attached to a position — the in-memory view
+    of a ``position_signal`` ledger row.
+
+    ``side`` is the side that decision *wanted*, not necessarily the side the
+    position holds: a ``contradict`` signal is precisely the case where they
+    differ. ``p_model`` / ``confidence`` are snapshotted from the analyzer so
+    the exit tick can weigh a signal without joining ``analyzer_call``.
+    """
+
+    id: int
+    position_id: int
+    news_id: str
+    ts: float
+    side: Side
+    relation: Relation
+    p_model: float | None = None
+    confidence: str | None = None
 
 
 @dataclass(frozen=True)

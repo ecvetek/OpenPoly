@@ -197,7 +197,17 @@ def _replay_entries(
         )
         out = entry_section.run(SectionInput(tick_type="event", payload=analysis))
         if out.verdict == "ok" and isinstance(out.payload, OrderIntent):
-            executor.execute_buy(out.payload, news_id=row.news_id, ts=row.ts)
+            # p_model / confidence are snapshotted onto the news-confluence
+            # signal the executor records — including on the two blocked
+            # branches (same-side and opposite-side), which is how a replay
+            # reconstructs the confluence ledger ConfluenceExitV0 reads.
+            executor.execute_buy(
+                out.payload,
+                news_id=row.news_id,
+                ts=row.ts,
+                p_model=row.p_model,
+                confidence=row.confidence,
+            )
     return replayed, skipped
 
 
@@ -216,7 +226,15 @@ def _replay_exits(
     miss a threshold crossing the live 30s loop would have caught. Mirrors
     ExitMonitor._evaluate's peak-tracking / scaled_out-injection exactly,
     but as local dicts scoped to this one replay rather than the live
-    monitor's process-lifetime state."""
+    monitor's process-lifetime state.
+
+    News-confluence signals are read straight off the backtest portfolio (no
+    local mirror needed — _replay_entries already wrote them all). That means
+    this loop hands the section signals stamped *later* than the snapshot it
+    is evaluating, since entries are fully replayed before any exit is. What
+    keeps that honest is ``confluence.evaluate`` discarding any signal with
+    ``ts > now``, which is why ``marked_at`` must be the snapshot's own
+    ``recorded_at`` and not wall-clock."""
     peaks: dict[int, float] = {}
     scaled_out: dict[int, bool] = {}
     for opened in list(backtest_portfolio.get_open_positions()):
@@ -246,6 +264,8 @@ def _replay_exits(
                 current_price=current_price,
                 peak_price=peak_price,
                 scaled_out=scaled_out.get(held.position_id, False),
+                news_signals=tuple(backtest_portfolio.signals_for_position(held.position_id)),
+                marked_at=row.recorded_at,
             )
             out = exit_section.run(SectionInput(tick_type="hard", payload=marked))
             if out.verdict != "ok" or not isinstance(out.payload, CloseIntent):

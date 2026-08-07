@@ -12,6 +12,7 @@ const REASON_COLOR: Record<string, string> = {
   settlement: 'bg-sky-500',
   manual: 'bg-neutral-500',
   reconciled: 'bg-neutral-500',
+  contested_exit: 'bg-amber-500',
 }
 const FALLBACK_COLOR = 'bg-neutral-700'
 

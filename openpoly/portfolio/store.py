@@ -15,12 +15,14 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from openpoly.db.tables import FillRow, PositionRow
+from openpoly.db.tables import FillRow, PositionRow, PositionSignalRow
 from openpoly.portfolio.models import (
     CloseReason,
     Fill,
     HeldPosition,
     PositionRecord,
+    PositionSignal,
+    Relation,
     Side,
 )
 
@@ -77,9 +79,22 @@ def _to_fill(row: FillRow) -> Fill:
     )
 
 
+def _to_signal(row: PositionSignalRow) -> PositionSignal:
+    return PositionSignal(
+        id=row.id,
+        position_id=row.position_id,
+        news_id=row.news_id,
+        ts=row.ts,
+        side=row.side,  # type: ignore[arg-type]
+        relation=row.relation,  # type: ignore[arg-type]
+        p_model=row.p_model,
+        confidence=row.confidence,
+    )
+
+
 class PortfolioStore:
-    """Repository over ``fill`` + ``position``. Construct with a session
-    factory; every method opens its own short transaction."""
+    """Repository over ``fill`` + ``position`` + ``position_signal``. Construct
+    with a session factory; every method opens its own short transaction."""
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
@@ -237,6 +252,78 @@ class PortfolioStore:
                 pos.qty = pos.qty - sold
             session.commit()
             return _to_record(pos)
+
+    def record_signal(
+        self,
+        position_id: int,
+        *,
+        news_id: str,
+        ts: float,
+        side: Side,
+        relation: Relation,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> PositionSignal:
+        """Attach one news/analyzer decision to a position.
+
+        Written synchronously like a fill, not through the write-behind
+        writer: this is decision-critical state (the exit section's drawdown
+        threshold is derived from it), not telemetry, so it must never be the
+        row that gets dropped when a queue overflows.
+
+        Append-only and duplicate-tolerant — the caller is the executor, which
+        already decided the relation; the store does not re-derive it.
+        """
+        with self._session_factory() as session:
+            row = PositionSignalRow(
+                position_id=position_id,
+                news_id=news_id,
+                ts=ts,
+                side=side,
+                relation=relation,
+                p_model=p_model,
+                confidence=confidence,
+            )
+            session.add(row)
+            session.commit()
+            return _to_signal(row)
+
+    def signals_for_position(self, position_id: int) -> list[PositionSignal]:
+        """Every signal attached to this position, oldest first."""
+        with self._session_factory() as session:
+            rows = (
+                session.execute(
+                    select(PositionSignalRow)
+                    .where(PositionSignalRow.position_id == position_id)
+                    .order_by(PositionSignalRow.ts.asc(), PositionSignalRow.id.asc())
+                )
+                .scalars()
+                .all()
+            )
+            return [_to_signal(r) for r in rows]
+
+    def signals_for_positions(self, position_ids: list[int]) -> dict[int, list[PositionSignal]]:
+        """Bulk sibling of ``signals_for_position`` — one query for many
+        positions, same shape as ``news_ids_for_positions``. Backs the exit
+        monitor's per-tick sweep (which must not fan out one query per open
+        position) and ``GET /api/positions``. A position with no signals is
+        absent from the dict, so callers should use ``.get(pid, [])``."""
+        if not position_ids:
+            return {}
+        with self._session_factory() as session:
+            rows = (
+                session.execute(
+                    select(PositionSignalRow)
+                    .where(PositionSignalRow.position_id.in_(position_ids))
+                    .order_by(PositionSignalRow.ts.asc(), PositionSignalRow.id.asc())
+                )
+                .scalars()
+                .all()
+            )
+        out: dict[int, list[PositionSignal]] = {}
+        for row in rows:
+            out.setdefault(row.position_id, []).append(_to_signal(row))
+        return out
 
     def get_open_position(self, market_id: str, side: Side) -> HeldPosition | None:
         """The open position for (market_id, side), or None."""

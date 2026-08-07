@@ -17,6 +17,7 @@ import { Link } from 'react-router-dom'
 import { formatRelativeAgo, formatTimeRemaining, formatUTC } from '../../sections/news_source/time'
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
 import { formatPnl, formatPnlPercent, pnlClass, pnlPercent } from './format'
+import { ConfluenceBadge } from './NewsConfluence'
 import type { PositionRecord } from './portfolioTypes'
 
 const CLOSE_REASON_TONE: Record<string, string> = {
@@ -25,6 +26,9 @@ const CLOSE_REASON_TONE: Record<string, string> = {
   kill_switch: 'bg-orange-900/40 text-orange-300 border-orange-700/50',
   manual: 'bg-neutral-800 text-neutral-300 border-neutral-700/50',
   settlement: 'bg-sky-900/40 text-sky-300 border-sky-700/50',
+  // Closed because enough news argued the other side of this market — a
+  // thesis-broken exit, not a price-threshold one.
+  contested_exit: 'bg-amber-900/40 text-amber-300 border-amber-700/50',
 }
 
 const OPEN_TONE = 'bg-amber-900/40 text-amber-300 border-amber-700/50'
@@ -88,6 +92,10 @@ export function PositionCard({ p }: { p: PositionRecord }) {
             </span>
           )}
           <StatusBadge status={p.status} closeReason={p.close_reason} />
+          <ConfluenceBadge
+            confluence={p.confluence}
+            signalCount={p.news_signal_count}
+          />
           {p.market_end_date != null && (
             <span
               className="text-[10px] text-neutral-500 font-mono"

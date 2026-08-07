@@ -3,10 +3,11 @@
 Implements exactly the surface ``PaperExecutor`` and the entry sections'
 portfolio-aware gates (cooldown / lockout / heat-cap / kill-switches) call:
 ``open_position``, ``record_sell``, ``get_open_position``,
-``get_open_positions``, ``list_positions``. Both run *completely unmodified*
-against this — the whole point being that a backtest reuses the real gating
-logic and the real ``PaperExecutor`` fill model, not a second hand-rolled
-approximation of either.
+``get_open_positions``, ``list_positions``, ``record_signal``,
+``signals_for_position``, ``signals_for_positions``. Both run *completely
+unmodified* against this — the whole point being that a backtest reuses the
+real gating logic and the real ``PaperExecutor`` fill model, not a second
+hand-rolled approximation of either.
 
 Mirrors ``PortfolioStore.record_sell``'s exact close-or-reduce semantics
 (same epsilon, same realized-PnL accrual) — duplicated rather than imported,
@@ -24,7 +25,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from openpoly.portfolio.models import CloseReason, HeldPosition, PositionRecord, Side
+from openpoly.portfolio.models import (
+    CloseReason,
+    HeldPosition,
+    PositionRecord,
+    PositionSignal,
+    Relation,
+    Side,
+)
 
 _QTY_EPS = 1e-6  # mirrors portfolio.store._QTY_EPS
 
@@ -48,7 +56,9 @@ class _MutablePosition:
 class BacktestPortfolio:
     def __init__(self) -> None:
         self._positions: dict[int, _MutablePosition] = {}
+        self._signals: dict[int, list[PositionSignal]] = {}
         self._next_id = -1
+        self._next_signal_id = 1
 
     def open_position(
         self,
@@ -104,6 +114,45 @@ class BacktestPortfolio:
         else:
             pos.qty -= sold
         return _to_record(pos)
+
+    def record_signal(
+        self,
+        position_id: int,
+        *,
+        news_id: str,
+        ts: float,
+        side: Side,
+        relation: Relation,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> PositionSignal:
+        """In-memory twin of ``PortfolioStore.record_signal``. The executor
+        writes these on every buy — filled, blocked-same-side, or
+        blocked-opposite-side — so a replay accumulates the same confluence
+        ledger a live run would, and ``ConfluenceExitV0`` can be backtested
+        against real historical news flow."""
+        sig = PositionSignal(
+            id=self._next_signal_id,
+            position_id=position_id,
+            news_id=news_id,
+            ts=ts,
+            side=side,
+            relation=relation,
+            p_model=p_model,
+            confidence=confidence,
+        )
+        self._next_signal_id += 1
+        self._signals.setdefault(position_id, []).append(sig)
+        return sig
+
+    def signals_for_position(self, position_id: int) -> list[PositionSignal]:
+        """Oldest-first, matching the store. Replay appends in chronological
+        order (it walks analyzer calls by ts), so insertion order already is
+        ts order."""
+        return list(self._signals.get(position_id, ()))
+
+    def signals_for_positions(self, position_ids: list[int]) -> dict[int, list[PositionSignal]]:
+        return {pid: list(self._signals[pid]) for pid in position_ids if pid in self._signals}
 
     def get_open_position(self, market_id: str, side: Side) -> HeldPosition | None:
         for pos in self._positions.values():

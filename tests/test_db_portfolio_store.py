@@ -371,3 +371,52 @@ def test_record_sell_accrues_realized_across_partials(store) -> None:
     assert rec.status == "closed"
     assert rec.realized_pnl == pytest.approx((0.55 - 0.40) * 15.0 + (0.60 - 0.40) * 3.0)
     assert len([f for f in store.list_fills() if f.action == "sell"]) == 2
+
+
+# ---------- news-confluence signals ----------
+
+
+def test_record_signal_round_trip(store) -> None:
+    held = _open(store)
+    store.record_signal(
+        held.position_id,
+        news_id="n1",
+        ts=100.0,
+        side="yes",
+        relation="opening",
+        p_model=0.71,
+        confidence="high",
+    )
+    store.record_signal(
+        held.position_id,
+        news_id="n2",
+        ts=150.0,
+        side="no",
+        relation="contradict",
+    )
+    signals = store.signals_for_position(held.position_id)
+    assert [s.relation for s in signals] == ["opening", "contradict"]  # oldest first
+    assert (signals[0].news_id, signals[0].p_model, signals[0].confidence) == ("n1", 0.71, "high")
+    assert (signals[1].side, signals[1].p_model, signals[1].confidence) == ("no", None, None)
+
+
+def test_signals_for_position_is_empty_for_an_unknown_position(store) -> None:
+    assert store.signals_for_position(9999) == []
+
+
+def test_signals_for_positions_bulk(store) -> None:
+    a = _open(store, market_id="m1")
+    b = _open(store, market_id="m2")
+    _open(store, market_id="m3")  # no signals at all
+    store.record_signal(a.position_id, news_id="n1", ts=10.0, side="yes", relation="opening")
+    store.record_signal(a.position_id, news_id="n2", ts=20.0, side="yes", relation="reinforce")
+    store.record_signal(b.position_id, news_id="n3", ts=30.0, side="yes", relation="opening")
+
+    out = store.signals_for_positions([a.position_id, b.position_id, 9999])
+    assert sorted(out) == sorted([a.position_id, b.position_id])
+    assert [s.news_id for s in out[a.position_id]] == ["n1", "n2"]
+    assert len(out[b.position_id]) == 1
+
+
+def test_signals_for_positions_empty_input_skips_the_query(store) -> None:
+    assert store.signals_for_positions([]) == {}

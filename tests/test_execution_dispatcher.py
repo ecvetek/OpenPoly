@@ -52,7 +52,7 @@ class _FakeExecutor:
         entry section's portfolio_provider has a public accessor."""
         return self._portfolio
 
-    def execute_buy(self, intent, *, news_id, ts):
+    def execute_buy(self, intent, *, news_id, ts, p_model=None, confidence=None):
         if self._kind == "paper":
             self._calls.paper_buys += 1
         else:

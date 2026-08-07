@@ -13,7 +13,7 @@
  * `PositionPostmortem`). Only once the market has cleanly resolved does
  * `frozenRef` take over and stop polling for good.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   formatLocalDateTime,
@@ -22,6 +22,7 @@ import {
   formatUTC,
 } from '../../sections/news_source/time'
 import { AnalyzerRationaleBlock } from './AnalyzerRationale'
+import { NewsConfluenceBlock } from './NewsConfluence'
 import { OrderBookChart } from './OrderBookChart'
 import { fetchPositionPriceHistory, type PositionPriceHistory } from './orderBookClient'
 import { formatPnl, formatPnlPercent, pnlClass, pnlPercent } from './format'
@@ -89,10 +90,10 @@ export function PositionDetail() {
     if (history.market_resolved) frozenRef.current = { positionId: pid, data: result }
     return result
   })
-  function forceRefresh() {
+  const forceRefresh = useCallback(() => {
     bypassFreezeRef.current = true
     refetch()
-  }
+  }, [refetch])
   // Once the market resolves, take one more forced refresh (bypassing the
   // frozen cache) before flipping the postmortem into its final "Concluded"
   // state — a visible "one more refresh, then conclude" beat rather than
@@ -108,7 +109,7 @@ export function PositionDetail() {
     }
     finalizingRef.current = false
     setConcluded(true)
-  }, [data, concluded])
+  }, [data, concluded, forceRefresh])
   const [closing, setClosing] = useState(false)
   const [closeStatus, setCloseStatus] = useState<string | null>(null)
 
@@ -376,6 +377,15 @@ export function PositionDetail() {
           </div>
         </div>
       )}
+
+      {/* Every later news decision on this market that attached to this
+         position instead of opening its own — plus the risk regime that
+         follows. Renders nothing for a position with an empty ledger (one
+         opened before news confluence shipped). */}
+      <NewsConfluenceBlock
+        signals={p.news_signals ?? []}
+        confluence={p.confluence}
+      />
 
       {/* PD3+PD5: analyzer rationale block (LLM's stated reason for the
          decision). Empty list when no persisted analyzer_call row matches

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -1386,3 +1388,84 @@ def test_price_history_market_lookup_is_cached(env, monkeypatch) -> None:
     client.get(f"/api/positions/{h.position_id}/price-history")
     client.get(f"/api/positions/{h.position_id}/price-history")
     assert calls["n"] == 1
+
+
+# ---------- news confluence ----------
+
+
+def test_position_detail_surfaces_the_confluence_ledger(env) -> None:
+    store, client, factory = env
+    held = _open(store, "m1", "yes", "ty1", ts=100.0)
+    now = time.time()
+    store.record_signal(
+        held.position_id,
+        news_id="n1",
+        ts=now - 600,
+        side="yes",
+        relation="opening",
+        p_model=0.71,
+        confidence="high",
+    )
+    store.record_signal(
+        held.position_id,
+        news_id="n2",
+        ts=now - 300,
+        side="no",
+        relation="contradict",
+        p_model=0.2,
+        confidence="medium",
+    )
+    with factory() as session:
+        session.add(
+            NewsItemRow(
+                news_id="n1",
+                content="the original headline",
+                urgency="high",
+                sentiment=None,
+                published_at=now - 610,
+                received_at=now - 605,
+            )
+        )
+        session.commit()
+
+    body = client.get(f"/api/positions/{held.position_id}").json()
+
+    assert body["confluence"] == {"state": "contested", "support": 1, "against": 1}
+    signals = body["news_signals"]
+    assert [s["relation"] for s in signals] == ["opening", "contradict"]
+    assert signals[0]["content"] == "the original headline"
+    assert (signals[0]["p_model"], signals[0]["confidence"]) == (0.71, "high")
+    # A signal whose news row was never persisted still appears, sans content.
+    assert signals[1]["news_id"] == "n2" and signals[1]["content"] is None
+    assert signals[1]["side"] == "no"  # the side the decision WANTED
+
+
+def test_position_with_no_signals_reads_as_solo(env) -> None:
+    store, client, _factory = env
+    held = _open(store, "m1", "yes", "ty1", ts=100.0)
+    body = client.get(f"/api/positions/{held.position_id}").json()
+    assert body["confluence"] == {"state": "solo", "support": 0, "against": 0}
+    assert body["news_signals"] == []
+
+
+def test_positions_list_carries_the_confluence_state(env) -> None:
+    store, client, _factory = env
+    held = _open(store, "m1", "yes", "ty1", ts=100.0)
+    _open(store, "m2", "yes", "ty2", ts=101.0)
+    now = time.time()
+    for i, news_id in enumerate(("n1", "n2")):
+        store.record_signal(
+            held.position_id,
+            news_id=news_id,
+            ts=now - 60 * (2 - i),
+            side="yes",
+            relation="opening" if i == 0 else "reinforce",
+            confidence="high",
+        )
+
+    rows = {r["id"]: r for r in client.get("/api/positions").json()["positions"]}
+    assert rows[held.position_id]["confluence"]["state"] == "reinforced"
+    assert rows[held.position_id]["news_signal_count"] == 2
+    other = next(r for pid, r in rows.items() if pid != held.position_id)
+    assert other["confluence"]["state"] == "solo"
+    assert other["news_signal_count"] == 0

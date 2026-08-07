@@ -19,11 +19,14 @@ from openpoly.execution import ExecResult
 from openpoly.markets.manager import manager as market_source_manager
 from openpoly.markets.models import OrderBook
 from openpoly.markets.store import MarketStore
-from openpoly.portfolio import HeldPosition, PortfolioStore
+from openpoly.portfolio import HeldPosition, PortfolioStore, PositionSignal
 from openpoly.runtime.exit_monitor import ExitMonitor
 from openpoly.runtime.section_log import ExitDecision, exit_log
+from openpoly.sections._base import SectionOutput
+from openpoly.sections.exit.confluence_v0 import ConfluenceExitConfig, ConfluenceExitV0
 from openpoly.sections.exit.scale_out_v0 import ScaleOutExitConfig, ScaleOutExitV0
 from openpoly.sections.exit.threshold_v0 import (
+    MarkedPosition,
     ThresholdExitConfig,
     ThresholdExitV0,
 )
@@ -70,11 +73,21 @@ def _book(token_id: str, bid: float) -> OrderBook:
 
 
 class _FakePortfolio:
-    def __init__(self, positions: list[HeldPosition]) -> None:
+    def __init__(
+        self,
+        positions: list[HeldPosition],
+        signals: dict[int, list[PositionSignal]] | None = None,
+    ) -> None:
         self._positions = positions
+        self._signals = signals or {}
+        self.signal_query_count = 0
 
     def get_open_positions(self) -> list[HeldPosition]:
         return list(self._positions)
+
+    def signals_for_positions(self, position_ids: list[int]) -> dict[int, list[PositionSignal]]:
+        self.signal_query_count += 1
+        return {pid: list(self._signals[pid]) for pid in position_ids if pid in self._signals}
 
 
 class _FakeExecutor:
@@ -812,3 +825,106 @@ def test_bootstrap_scaled_out_no_prior_fill_does_not_seed(tmp_path) -> None:
     monitor.bootstrap_scaled_out()
 
     assert held.position_id not in monitor._scaled_out
+
+
+# ---------- news-confluence signal injection ----------
+
+
+def _signal(sid: int, side: str, ts: float, relation: str = "reinforce") -> PositionSignal:
+    return PositionSignal(
+        id=sid,
+        position_id=1,
+        news_id=f"n{sid}",
+        ts=ts,
+        side=side,  # type: ignore[arg-type]
+        relation=relation,  # type: ignore[arg-type]
+        p_model=0.7,
+        confidence="high",
+    )
+
+
+class _CapturingExit:
+    """Records the MarkedPosition it was handed; never closes."""
+
+    def __init__(self) -> None:
+        self.marked: list[MarkedPosition] = []
+
+    def run(self, input):  # noqa: A002 — mirrors the section signature
+        self.marked.append(input.payload)
+        return SectionOutput(payload=None, verdict="skip", reason="within thresholds")
+
+
+def test_signals_and_mark_time_are_injected_into_marked_position() -> None:
+    section = _CapturingExit()
+    monitor = ExitMonitor(
+        exit_section=section, executor=_FakeExecutor(), tick_interval_seconds=3600
+    )
+    signals = [_signal(1, "yes", 10.0, "opening"), _signal(2, "no", 20.0, "contradict")]
+    portfolio = _FakePortfolio([_held(1, "t1", avg=0.40)], signals={1: signals})
+    monitor.configure(portfolio)  # type: ignore[arg-type]
+    market_source_manager.store.set_order_books([_book("t1", bid=0.46)])
+
+    monitor._tick_once()
+
+    marked = section.marked[-1]
+    assert [s.news_id for s in marked.news_signals] == ["n1", "n2"]
+    assert marked.marked_at > 0  # the tick's own timestamp, the section's clock
+
+
+def test_position_with_no_signals_gets_an_empty_ledger() -> None:
+    section = _CapturingExit()
+    monitor = ExitMonitor(
+        exit_section=section, executor=_FakeExecutor(), tick_interval_seconds=3600
+    )
+    monitor.configure(_FakePortfolio([_held(1, "t1", avg=0.40)]))  # type: ignore[arg-type]
+    market_source_manager.store.set_order_books([_book("t1", bid=0.46)])
+
+    monitor._tick_once()
+
+    assert section.marked[-1].news_signals == ()
+
+
+def test_signals_are_read_once_per_sweep_not_once_per_position() -> None:
+    """A per-position fan-out would be one DB session per open position per
+    tick — the same N+1 the bulk news_ids_for_positions lookup exists to avoid."""
+    section = _CapturingExit()
+    monitor = ExitMonitor(
+        exit_section=section, executor=_FakeExecutor(), tick_interval_seconds=3600
+    )
+    portfolio = _FakePortfolio(
+        [_held(1, "t1", avg=0.40), _held(2, "t2", avg=0.40), _held(3, "t3", avg=0.40)]
+    )
+    monitor.configure(portfolio)  # type: ignore[arg-type]
+    market_source_manager.store.set_order_books(
+        [_book("t1", bid=0.46), _book("t2", bid=0.46), _book("t3", bid=0.46)]
+    )
+
+    monitor._tick_once()
+
+    assert len(section.marked) == 3
+    assert portfolio.signal_query_count == 1
+
+
+def test_confluence_section_closes_via_the_monitor() -> None:
+    """End-to-end through the real ConfluenceExitV0: two opposing signals put
+    the position into contested with contested_close_after=2, and the monitor
+    routes the resulting CloseIntent to a real sell."""
+    executor = _FakeExecutor(result=ExecResult.ok(price=0.46, qty=10.0, position_id=1))
+    monitor = ExitMonitor(
+        exit_section=ConfluenceExitV0(ConfluenceExitConfig(contested_close_after=2)),
+        executor=executor,
+        tick_interval_seconds=3600,
+    )
+    signals = [
+        _signal(1, "yes", 10.0, "opening"),
+        _signal(2, "no", 20.0, "contradict"),
+        _signal(3, "no", 30.0, "contradict"),
+    ]
+    monitor.configure(_FakePortfolio([_held(1, "t1", avg=0.40)], signals={1: signals}))  # type: ignore[arg-type]
+    market_source_manager.store.set_order_books([_book("t1", bid=0.42)])
+
+    monitor._tick_once()
+
+    assert executor.calls and executor.calls[0]["trigger"] == "contested_exit"
+    assert monitor.last_tick["reason_counts"] == {"contested_exit": 1}
+    assert monitor.last_tick["closed"] == 1

@@ -37,8 +37,11 @@ from openpoly.markets.polymarket_api import (
     fetch_price_history_range,
 )
 from openpoly.portfolio import PortfolioStore
+from openpoly.portfolio.confluence import evaluate
 from openpoly.portfolio.equity import build_equity_curve
-from openpoly.portfolio.models import PositionRecord
+from openpoly.portfolio.models import PositionRecord, PositionSignal
+from openpoly.runtime import canvas_store
+from openpoly.sections.exit.confluence_v0 import ConfluenceExitConfig
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +87,8 @@ def list_positions(
     decisions_by_news = _lookup_analyzer_decisions_bulk(
         sorted(set(news_by_position.values())), factory
     )
+    signals_by_position = store.signals_for_positions([r.id for r in rows])
+    now = time.time()
     positions: list[dict[str, Any]] = []
     for record in rows:
         body = asdict(record)
@@ -97,6 +102,9 @@ def list_positions(
         body["news_id"] = news_id
         body["analyzer_decisions"] = decisions_by_news.get(news_id, []) if news_id else []
         body["unrealized_pnl"] = _unrealized_pnl(record)
+        signals = signals_by_position.get(record.id, [])
+        body["confluence"] = _confluence_for(record, signals, now)
+        body["news_signal_count"] = len(signals)
         positions.append(body)
     return {"positions": positions}
 
@@ -235,6 +243,15 @@ def get_position_by_id(
       monitor uses to evaluate stop-loss/take-profit) — ``None`` while
       closed (use ``realized_pnl`` instead), or if there's no live order
       book for the token yet.
+    - ``news_signals``: the position's news-confluence ledger, oldest first —
+      every later analyzer decision on this market that was blocked by this
+      position, plus the ``opening`` one. Each carries ``relation``
+      (opening/reinforce/contradict), the side it wanted, p_model,
+      confidence, and the news content when still persisted.
+    - ``confluence``: ``{state, support, against}`` derived from those
+      signals as of now, using the live exit section's TTL/count settings.
+      ``state`` is what the confluence exit section keys its peak-drawdown
+      threshold off; ``solo`` for any position opened before this shipped.
     """
     record = store.get_position(position_id)
     if record is None:
@@ -259,6 +276,9 @@ def get_position_by_id(
     body["exit_decision"] = _lookup_exit_decision(position_id, factory)
     body["entry_decision"] = _lookup_entry_decision(position_id, factory)
     body["unrealized_pnl"] = _unrealized_pnl(record)
+    signals = store.signals_for_position(position_id)
+    body["news_signals"] = _news_signals_body(signals, factory)
+    body["confluence"] = _confluence_for(record, signals, time.time())
     return body
 
 
@@ -565,6 +585,93 @@ def _lookup_entry_decision(
         except json.JSONDecodeError:
             signals = None
     return {"signals": signals, "reason": row.reason, "ts": row.ts}
+
+
+def _confluence_params() -> tuple[float, int, str]:
+    """``(support_ttl_seconds, reinforce_min_count, min_confidence)`` as the
+    live exit section is configured on the canvas.
+
+    Read best-effort and clamped to ``ConfluenceExitConfig``'s own defaults on
+    anything unexpected — a canvas running a non-confluence exit impl has none
+    of these keys, and a hand-edited one may have garbage. Mirrors
+    ``orchestrator._canvas_config``'s rule that a stale or broken canvas must
+    never break a read path.
+
+    The read API is the ONLY place that has to reach for these: the exit
+    section derives the state from its own config at tick time. Here they exist
+    purely so the UI badge agrees with what the running strategy is doing.
+    """
+    defaults = ConfluenceExitConfig()
+    ttl_min: Any = defaults.support_ttl_minutes
+    min_count: Any = defaults.reinforce_min_count
+    min_conf: Any = defaults.min_signal_confidence
+    try:
+        cfg = canvas_store.section_config("exit")
+        ttl_min = cfg.get("support_ttl_minutes", ttl_min)
+        min_count = cfg.get("reinforce_min_count", min_count)
+        min_conf = cfg.get("min_signal_confidence", min_conf)
+    except Exception:  # noqa: BLE001 — a broken canvas must not break this read
+        logger.warning("confluence params: canvas read failed; using defaults", exc_info=True)
+    if not isinstance(ttl_min, (int, float)) or ttl_min < 0:
+        ttl_min = defaults.support_ttl_minutes
+    if not isinstance(min_count, int) or min_count < 2:
+        min_count = defaults.reinforce_min_count
+    if min_conf not in ("low", "medium", "high"):
+        min_conf = defaults.min_signal_confidence
+    return float(ttl_min) * 60.0, min_count, min_conf
+
+
+def _confluence_for(
+    record: PositionRecord, signals: list[PositionSignal], now: float
+) -> dict[str, Any]:
+    ttl_seconds, min_count, min_conf = _confluence_params()
+    conf = evaluate(
+        signals,
+        position_side=record.side,
+        now=now,
+        support_ttl_seconds=ttl_seconds,
+        reinforce_min_count=min_count,
+        min_confidence=min_conf,
+    )
+    return {"state": conf.state, "support": conf.support, "against": conf.against}
+
+
+def _news_signals_body(
+    signals: list[PositionSignal], factory: sessionmaker[Session]
+) -> list[dict[str, Any]]:
+    """The position's news-confluence ledger, oldest first, each row joined to
+    its news item's content preview.
+
+    One query for every referenced news item rather than one per signal. A
+    signal whose news row was evicted (or never persisted — the news sink is
+    write-behind and best-effort) still appears, with ``content`` ``None``:
+    the decision itself is the fact that matters here, the text is context."""
+    if not signals:
+        return []
+    news_ids = sorted({s.news_id for s in signals})
+    with factory() as session:
+        rows = (
+            session.execute(select(NewsItemRow).where(NewsItemRow.news_id.in_(news_ids)))
+            .scalars()
+            .all()
+        )
+    by_id = {r.news_id: r for r in rows}
+    out: list[dict[str, Any]] = []
+    for sig in signals:
+        row = by_id.get(sig.news_id)
+        out.append(
+            {
+                "news_id": sig.news_id,
+                "ts": sig.ts,
+                "side": sig.side,
+                "relation": sig.relation,
+                "p_model": sig.p_model,
+                "confidence": sig.confidence,
+                "content": row.content if row is not None else None,
+                "urgency": row.urgency if row is not None else None,
+            }
+        )
+    return out
 
 
 def _mark_unrealized(token_id: str, avg_entry_price: float, qty: float) -> float | None:

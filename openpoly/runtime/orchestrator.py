@@ -55,7 +55,15 @@ class _SyncSection(Protocol):
 class _Executor(Protocol):
     """Minimal executor shape used by the orchestrator."""
 
-    def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult: ...
+    def execute_buy(
+        self,
+        intent: OrderIntent,
+        *,
+        news_id: str | None,
+        ts: float,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> ExecResult: ...
 
 
 State = Literal["stopped", "running"]
@@ -439,7 +447,15 @@ class PipelineOrchestrator:
         if intent is not None:
             try:
                 result = await asyncio.to_thread(
-                    self._executor.execute_buy, intent, news_id=item.id, ts=ts
+                    self._executor.execute_buy,
+                    intent,
+                    news_id=item.id,
+                    ts=ts,
+                    # Snapshotted onto the news-confluence signal the executor
+                    # records against the position — whether this buy fills or
+                    # is blocked by one that already exists.
+                    p_model=ar.p_model,
+                    confidence=ar.confidence,
                 )
                 position_id = result.position_id
                 if result.filled:

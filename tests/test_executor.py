@@ -110,6 +110,96 @@ def test_buy_position_exists_skip(store) -> None:
     assert r.position_id == first.position_id
 
 
+# ---------- news confluence ----------
+
+
+def test_buy_records_opening_signal(store) -> None:
+    _populate(_market(), _book("yes-m1", ask=0.42))
+    r = Executor(store).execute_buy(
+        _intent(), news_id="n1", ts=1.0, p_model=0.72, confidence="high"
+    )
+    signals = store.signals_for_position(r.position_id)
+    assert len(signals) == 1
+    sig = signals[0]
+    assert (sig.relation, sig.news_id, sig.side) == ("opening", "n1", "yes")
+    assert (sig.p_model, sig.confidence, sig.ts) == (0.72, "high", 1.0)
+
+
+def test_blocked_same_side_buy_attaches_a_reinforce_signal(store) -> None:
+    _populate(_market(), _book("yes-m1", ask=0.42))
+    ex = Executor(store)
+    first = ex.execute_buy(_intent(), news_id="n1", ts=1.0, p_model=0.7, confidence="high")
+    ex.execute_buy(_intent(), news_id="n2", ts=2.0, p_model=0.81, confidence="medium")
+
+    signals = store.signals_for_position(first.position_id)
+    assert [s.relation for s in signals] == ["opening", "reinforce"]
+    assert signals[1].news_id == "n2"
+    assert signals[1].side == "yes"
+    assert (signals[1].p_model, signals[1].confidence) == (0.81, "medium")
+
+
+def test_opposite_side_buy_is_blocked_and_attaches_a_contradiction(store) -> None:
+    """YES + NO on one market settle to exactly $1 — holding both is a locked
+    loss of the two spreads. The NO entry must not open a second position; it
+    attaches to the YES one as a contradiction instead."""
+    _populate(_market(), _book("yes-m1", ask=0.42), _book("no-m1", ask=0.55))
+    ex = Executor(store)
+    first = ex.execute_buy(_intent(side="yes"), news_id="n1", ts=1.0)
+    assert first.filled
+
+    r = ex.execute_buy(_intent(side="no"), news_id="n2", ts=2.0, p_model=0.3, confidence="high")
+    assert not r.filled
+    assert r.skip_reason == "opposite_position_exists"
+    assert r.position_id == first.position_id
+    assert store.get_open_position("m1", "no") is None
+
+    signals = store.signals_for_position(first.position_id)
+    assert [s.relation for s in signals] == ["opening", "contradict"]
+    # The stored side is the side the DECISION wanted, not the side held.
+    assert signals[1].side == "no"
+
+
+def test_position_checks_run_before_the_book_lookup(store) -> None:
+    """A repeat headline still attaches when the book has gone dark — the news
+    is information whether or not we could have traded on it. (Before this the
+    paper executor reported no_order_book and attached nothing, which also made
+    it inconsistent with the live executor's ordering.)"""
+    _populate(_market(), _book("yes-m1", ask=0.42))
+    ex = Executor(store)
+    first = ex.execute_buy(_intent(), news_id="n1", ts=1.0)
+    market_source_manager.store.set_order_books([])  # book gone
+
+    r = ex.execute_buy(_intent(), news_id="n2", ts=2.0)
+    assert r.skip_reason == "position_exists"
+    assert r.position_id == first.position_id
+    assert [s.relation for s in store.signals_for_position(first.position_id)] == [
+        "opening",
+        "reinforce",
+    ]
+
+
+def test_signal_is_skipped_when_there_is_no_news_id(store) -> None:
+    _populate(_market(), _book("yes-m1", ask=0.42))
+    r = Executor(store).execute_buy(_intent(), news_id=None, ts=1.0)
+    assert r.filled
+    assert store.signals_for_position(r.position_id) == []
+
+
+def test_signal_write_failure_does_not_break_the_fill(store, monkeypatch) -> None:
+    """The opening signal is written after an (on the live path, irreversible)
+    fill — a store failure there must degrade the confluence ledger, never the
+    trade."""
+    _populate(_market(), _book("yes-m1", ask=0.42))
+
+    def boom(*_a, **_k):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "record_signal", boom)
+    r = Executor(store).execute_buy(_intent(), news_id="n1", ts=1.0)
+    assert r.filled
+    assert store.get_open_position("m1", "yes") is not None
+
+
 def test_buy_market_not_found_skip(store) -> None:
     r = Executor(store).execute_buy(_intent(market_id="zzz"), news_id="n1", ts=1.0)
     assert not r.filled

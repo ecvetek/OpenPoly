@@ -10,8 +10,10 @@ from dataclasses import dataclass
 class ExecResult:
     """Outcome of an executor call. On ``filled`` the ``price`` / ``qty`` /
     ``position_id`` fields are set; on a skip ``skip_reason`` carries a stable
-    label, ``price``/``qty`` stay None, and ``position_id`` is set only for
-    ``"position_exists"`` — the id of the blocking position."""
+    label, ``price``/``qty`` stay None, and ``position_id`` is set only for the
+    two blocked-by-an-open-position reasons — ``"position_exists"`` (same side)
+    and ``"opposite_position_exists"`` (the other side of the same market) —
+    where it is the id of the blocking position."""
 
     filled: bool
     skip_reason: str | None = None

@@ -48,9 +48,14 @@ from openpoly.execution.clob_patch import (
     PartialCreateOrderOptions,
     Side,
 )
+from openpoly.execution.signal_log import attach_signal
 from openpoly.execution.types import ExecResult
 from openpoly.markets.manager import manager as market_source_manager
 from openpoly.portfolio import CloseReason, HeldPosition, PortfolioStore
+
+# ``Side`` above is the SDK's BUY/SELL order side; this is the market's
+# yes/no outcome side. Distinct concepts that collide by name.
+from openpoly.portfolio import Side as PositionSide
 from openpoly.sections.entry.edge_threshold_v0 import OrderIntent
 
 logger = logging.getLogger(__name__)
@@ -223,7 +228,51 @@ class LiveExecutor:
                 time.sleep(_CTF_POLL_SLEEP)
         return 0.0
 
-    def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult:
+    def execute_buy(
+        self,
+        intent: OrderIntent,
+        *,
+        news_id: str | None,
+        ts: float,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> ExecResult:
+        """``p_model`` / ``confidence`` are the analyzer's numbers for this
+        decision. They are snapshotted onto the news-confluence signal this
+        writes — see ``PaperExecutor.execute_buy`` for the full contract, which
+        this mirrors."""
+        existing = self._store.get_open_position(intent.market_id, intent.side)
+        if existing is not None:
+            attach_signal(
+                self._store,
+                existing.position_id,
+                news_id=news_id,
+                ts=ts,
+                side=intent.side,
+                relation="reinforce",
+                p_model=p_model,
+                confidence=confidence,
+            )
+            return ExecResult.skip("position_exists", position_id=existing.position_id)
+
+        # YES + NO on one market settle to exactly $1 — holding both is a
+        # locked loss of the two spreads, never a hedge. Block and record the
+        # decision as a contradiction against the position we already hold.
+        opposite: PositionSide = "no" if intent.side == "yes" else "yes"
+        blocking = self._store.get_open_position(intent.market_id, opposite)
+        if blocking is not None:
+            attach_signal(
+                self._store,
+                blocking.position_id,
+                news_id=news_id,
+                ts=ts,
+                side=intent.side,
+                relation="contradict",
+                p_model=p_model,
+                confidence=confidence,
+            )
+            return ExecResult.skip("opposite_position_exists", position_id=blocking.position_id)
+
         catalog = market_source_manager.store
         market = catalog.get(intent.market_id)
         if market is None:
@@ -231,10 +280,6 @@ class LiveExecutor:
         token_id = market.yes_token_id if intent.side == "yes" else market.no_token_id
         if token_id is None:
             return ExecResult.skip("no_token")
-
-        existing = self._store.get_open_position(intent.market_id, intent.side)
-        if existing is not None:
-            return ExecResult.skip("position_exists", position_id=existing.position_id)
 
         # Quantize qty + check min notional against server rules verified
         # 2026-05-24. Both are pre-flight: cheaper to skip locally than to
@@ -303,6 +348,8 @@ class LiveExecutor:
                     news_id=news_id,
                     order_id=None,
                     tx_hash=None,
+                    p_model=p_model,
+                    confidence=confidence,
                 )
             logger.error("live buy submit failed (%s): %s", type(exc).__name__, exc)
             return ExecResult.skip(f"live_error:{type(exc).__name__}")
@@ -336,6 +383,8 @@ class LiveExecutor:
             news_id=news_id,
             order_id=order_id,
             tx_hash=tx_hash,
+            p_model=p_model,
+            confidence=confidence,
         )
 
     def execute_sell(
@@ -464,6 +513,8 @@ class LiveExecutor:
         news_id: str | None,
         order_id: str | None,
         tx_hash: str | None,
+        p_model: float | None = None,
+        confidence: str | None = None,
     ) -> ExecResult:
         """Persist an already-executed on-chain buy. The fill is irreversible,
         so the DB write retries transient failures, mirroring ``_persist_sell``
@@ -511,6 +562,16 @@ class LiveExecutor:
                     exc,
                 )
                 return ExecResult.skip(f"open_persist_failed:{type(exc).__name__}")
+        attach_signal(
+            self._store,
+            held.position_id,
+            news_id=news_id,
+            ts=ts,
+            side=side,  # type: ignore[arg-type]
+            relation="opening",
+            p_model=p_model,
+            confidence=confidence,
+        )
         logger.info(
             "live buy filled: %s %s qty=%.4f @ %.4f order=%s tx=%s",
             market_id,

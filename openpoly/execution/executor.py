@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import logging
 
+from openpoly.execution.signal_log import attach_signal
 from openpoly.execution.types import ExecResult
 from openpoly.markets.manager import manager as market_source_manager
-from openpoly.portfolio import CloseReason, HeldPosition, PortfolioStore
+from openpoly.portfolio import CloseReason, HeldPosition, PortfolioStore, Side
 from openpoly.sections.entry.edge_threshold_v0 import OrderIntent
 
 logger = logging.getLogger(__name__)
@@ -55,13 +56,65 @@ class PaperExecutor:
         configured one."""
         return self._portfolio
 
-    def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult:
+    def execute_buy(
+        self,
+        intent: OrderIntent,
+        *,
+        news_id: str | None,
+        ts: float,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> ExecResult:
         """Open a position from an entry ``OrderIntent`` at the level-1 ask.
 
-        Skips (nothing opened) when the market / order book / ask liquidity is
-        missing, when a position for (market, side) is already open, or when the
-        fill notional rounds to dust.
+        Skips (nothing opened) when a position on this market is already open —
+        on either side — when the market / order book / ask liquidity is
+        missing, or when the fill notional rounds to dust.
+
+        A skip on an existing position is not a dead end: the decision is
+        attached to that position as a news-confluence signal (``reinforce``
+        for the same side, ``contradict`` for the opposite), which is what the
+        confluence exit section reads to pick its drawdown threshold.
+        ``p_model`` / ``confidence`` come from the analyzer and are snapshotted
+        onto that signal.
+
+        The two position checks run BEFORE the market / book lookups so a
+        repeat headline still attaches when the book happens to be dark — the
+        news is information regardless of whether we could have traded on it.
+        (This also matches ``LiveExecutor``'s ordering.)
         """
+        existing = self._store.get_open_position(intent.market_id, intent.side)
+        if existing is not None:
+            attach_signal(
+                self._store,
+                existing.position_id,
+                news_id=news_id,
+                ts=ts,
+                side=intent.side,
+                relation="reinforce",
+                p_model=p_model,
+                confidence=confidence,
+            )
+            return ExecResult.skip("position_exists", position_id=existing.position_id)
+
+        # YES + NO on one market settle to exactly $1, so holding both is a
+        # locked loss of the two spreads with no upside — never a hedge. Block
+        # it and record the decision as a contradiction instead.
+        opposite: Side = "no" if intent.side == "yes" else "yes"
+        blocking = self._store.get_open_position(intent.market_id, opposite)
+        if blocking is not None:
+            attach_signal(
+                self._store,
+                blocking.position_id,
+                news_id=news_id,
+                ts=ts,
+                side=intent.side,
+                relation="contradict",
+                p_model=p_model,
+                confidence=confidence,
+            )
+            return ExecResult.skip("opposite_position_exists", position_id=blocking.position_id)
+
         catalog = market_source_manager.store
         market = catalog.get(intent.market_id)
         if market is None:
@@ -77,10 +130,6 @@ class PaperExecutor:
         if not book.asks:
             return ExecResult.skip("no_ask_liquidity")
 
-        existing = self._store.get_open_position(intent.market_id, intent.side)
-        if existing is not None:
-            return ExecResult.skip("position_exists", position_id=existing.position_id)
-
         ask_price, ask_size = book.asks[0]
         qty = min(intent.qty, ask_size)
         if qty * ask_price < MIN_FILL_USD:
@@ -95,6 +144,16 @@ class PaperExecutor:
             qty=qty,
             ts=ts,
             news_id=news_id,
+        )
+        attach_signal(
+            self._store,
+            held.position_id,
+            news_id=news_id,
+            ts=ts,
+            side=intent.side,
+            relation="opening",
+            p_model=p_model,
+            confidence=confidence,
         )
         logger.info(
             "buy filled: %s %s qty=%.4f @ %.4f (position %d)",

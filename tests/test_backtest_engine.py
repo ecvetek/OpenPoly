@@ -16,6 +16,8 @@ from openpoly.db.tables import AnalyzerCallRow, OrderBookSnapshot
 from openpoly.markets.manager import manager as market_source_manager
 from openpoly.markets.models import normalize_gamma_market
 from openpoly.markets.store import MarketStore, PollSummary
+from openpoly.sections.exit.confluence_v0 import ConfluenceExitConfig, ConfluenceExitV0
+from openpoly.sections.exit.threshold_v0 import ThresholdExitConfig, ThresholdExitV0
 
 
 def _market(market_id: str = "m1"):
@@ -209,3 +211,117 @@ def test_backtest_leaves_position_open_when_no_exit_trigger_fires(sf) -> None:
 
     assert result.statistics.summary.positions_closed == 0
     assert result.statistics.summary.positions_opened == 1
+
+
+# ---------- news confluence in replay ----------
+
+
+def test_replay_accumulates_the_confluence_ledger(sf) -> None:
+    """A second same-side analyzer call and a later opposite-side one both
+    attach to the one open position instead of opening new ones — exactly what
+    happens live, so ConfluenceExitV0 can be evaluated against real history."""
+    market_source_manager.store.replace(
+        [_market("m1")], PollSummary(ts=1.0, fetched=1, kept=1, reason_counts={})
+    )
+    _seed_analyzer_call(sf, ts=100.0, news_id="n1", p_model=0.7, confidence="high")
+    _seed_analyzer_call(sf, ts=110.0, news_id="n2", p_model=0.8, confidence="high")
+    _seed_analyzer_call(sf, ts=120.0, news_id="n3", p_model=0.1, confidence="high")
+    _seed_book(sf, "yes-m1", ts=100.0, bid=0.40, ask=0.42)
+    _seed_book(sf, "no-m1", ts=120.0, bid=0.40, ask=0.42)
+
+    captured: list = []
+
+    class _Recorder:
+        """Wraps the real exit section so we can read the MarkedPosition it
+        was handed at each replayed snapshot."""
+
+        Config = ThresholdExitConfig
+
+        def __init__(self, config) -> None:
+            self._inner = ThresholdExitV0(config)
+
+        def run(self, section_input):
+            captured.append(section_input.payload)
+            return self._inner.run(section_input)
+
+    monkeypatched = {("exit", "m", "Recorder"): _Recorder}
+    orig_resolve = engine_module.resolve_impl
+
+    def _resolve(section_type, module, name):
+        cls = monkeypatched.get((section_type, module, name))
+        return cls if cls is not None else orig_resolve(section_type, module, name)
+
+    engine_module.resolve_impl = _resolve
+    try:
+        run_backtest(
+            _default_request(
+                until=200.0,
+                exit_module="m",
+                exit_name="Recorder",
+                exit_config={"take_profit_pct": 10.0, "stop_loss_pct": 1.0},
+            ),
+            sf,
+        )
+    finally:
+        engine_module.resolve_impl = orig_resolve
+
+    assert captured, "exit section was never evaluated"
+    ledger = captured[-1].news_signals
+    assert [s.relation for s in ledger] == ["opening", "reinforce", "contradict"]
+    assert [s.news_id for s in ledger] == ["n1", "n2", "n3"]
+    assert [s.side for s in ledger] == ["yes", "yes", "no"]
+    assert ledger[2].p_model == 0.1  # snapshotted from the analyzer row
+
+
+def test_replay_never_lets_a_later_signal_steer_an_earlier_mark(sf) -> None:
+    """Entries are ALL replayed before any exit tick, so the ledger handed to
+    the section contains signals from the position's future. ``marked_at`` is
+    the snapshot's own recorded_at and ``confluence.evaluate`` drops anything
+    stamped after it — without that the confluence rules would look good for
+    entirely fake reasons."""
+    market_source_manager.store.replace(
+        [_market("m1")], PollSummary(ts=1.0, fetched=1, kept=1, reason_counts={})
+    )
+    _seed_analyzer_call(sf, ts=100.0, news_id="n1", p_model=0.7, confidence="high")
+    _seed_analyzer_call(sf, ts=180.0, news_id="n2", p_model=0.8, confidence="high")
+    _seed_book(sf, "yes-m1", ts=100.0, bid=0.40, ask=0.42)
+    _seed_book(sf, "yes-m1", ts=120.0, bid=0.43, ask=0.45)  # before the 2nd call
+    _seed_book(sf, "yes-m1", ts=190.0, bid=0.44, ask=0.46)  # after it
+
+    states: list[tuple[float, str]] = []
+
+    class _StateRecorder:
+        Config = ConfluenceExitConfig
+
+        def __init__(self, config) -> None:
+            self._inner = ConfluenceExitV0(config)
+
+        def run(self, section_input):
+            out = self._inner.run(section_input)
+            states.append((section_input.payload.marked_at, out.signals["confluence_state"]))
+            return out
+
+    orig_resolve = engine_module.resolve_impl
+
+    def _resolve(section_type, module, name):
+        if name == "StateRecorder":
+            return _StateRecorder
+        return orig_resolve(section_type, module, name)
+
+    engine_module.resolve_impl = _resolve
+    try:
+        run_backtest(
+            _default_request(
+                until=300.0,
+                exit_module="m",
+                exit_name="StateRecorder",
+                exit_config={"take_profit_pct": 10.0, "stop_loss_pct": 1.0},
+            ),
+            sf,
+        )
+    finally:
+        engine_module.resolve_impl = orig_resolve
+
+    by_ts = dict(states)
+    assert by_ts[120.0] == "solo"  # the 2nd headline hasn't happened yet
+    assert by_ts[190.0] == "reinforced"  # by now it has

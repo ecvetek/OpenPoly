@@ -118,3 +118,50 @@ def test_all_closed_ascending_orders_by_closed_at() -> None:
     pf.record_sell(a.position_id, sold_qty=20.0, sell_price=0.5, ts=250.0, close_reason="manual")
     closed = pf.all_closed_ascending()
     assert [c.market_id for c in closed] == ["m2", "m1"]
+
+
+# ---------- news-confluence signals ----------
+
+
+def test_record_and_read_signals() -> None:
+    p = BacktestPortfolio()
+    held = p.open_position(
+        market_id="m1",
+        side="yes",
+        token_id="t1",
+        condition_id="c1",
+        price=0.40,
+        qty=10.0,
+        ts=100.0,
+    )
+    p.record_signal(
+        held.position_id,
+        news_id="n1",
+        ts=100.0,
+        side="yes",
+        relation="opening",
+        p_model=0.7,
+        confidence="high",
+    )
+    p.record_signal(held.position_id, news_id="n2", ts=110.0, side="no", relation="contradict")
+
+    signals = p.signals_for_position(held.position_id)
+    assert [s.relation for s in signals] == ["opening", "contradict"]
+    assert [s.news_id for s in signals] == ["n1", "n2"]
+    assert signals[0].p_model == 0.7
+    assert p.signals_for_position(-999) == []
+
+
+def test_signals_for_positions_bulk_matches_the_store_contract() -> None:
+    p = BacktestPortfolio()
+    a = p.open_position(
+        market_id="m1", side="yes", token_id="t1", condition_id="c1", price=0.4, qty=1.0, ts=1.0
+    )
+    b = p.open_position(
+        market_id="m2", side="yes", token_id="t2", condition_id="c2", price=0.4, qty=1.0, ts=1.0
+    )
+    p.record_signal(a.position_id, news_id="n1", ts=1.0, side="yes", relation="opening")
+
+    out = p.signals_for_positions([a.position_id, b.position_id])
+    assert list(out) == [a.position_id]  # a position with no signals is absent
+    assert len(out[a.position_id]) == 1

@@ -10,6 +10,35 @@ Dates are US-style (MM/DD/YYYY).
 
 ---
 
+## 08/07/2026 — News confluence: one position per market, many opinions
+
+Until now each news item was judged alone. A second headline on a market we
+already held was skipped (`fill:position_exists`) and forgotten, and a headline
+arguing the *other* side opened a second position — which on Polymarket, where
+YES + NO settle to exactly $1, is a locked loss of both spreads with no upside.
+That second case was a plain bug, not a hedge.
+
+Both now attach to the position that blocked them, as an append-only
+`position_signal` ledger. The belief this encodes: **a repeat headline in the
+same direction is evidence the move is real and the position deserves room to
+breathe; a headline in the opposite direction is evidence the move is about to
+revert and the position deserves a tighter leash.**
+
+A new `ConfluenceExitV0` exit impl picks its peak-drawdown threshold from that
+ledger — `solo` 0.30, `reinforced` off by default, `contested` 0.10 — with an
+optional `contested_close_after` that exits outright once the thesis has been
+contradicted N times. `stop_loss_pct` is deliberately *not* state-keyed:
+confluence widens how much banked gain a position may give back, never how much
+capital it may lose.
+
+Two asymmetries were chosen on purpose. Support **decays** on a TTL (default
+2h), so one duplicate headline in the first minute can't hold drawdown
+protection off for the rest of the position's life; contradiction **latches**,
+because a disputed thesis stays disputed no matter what agrees later. The
+baseline `ThresholdExitV0` is untouched — this is a canvas-selectable variant,
+and the backtest harness can A/B the two over real history before it goes near
+a live run.
+
 ## 06/01/2026 — The strategy canvas becomes the operating surface
 
 The canvas page was promoted from a configuration sketchpad to the actual

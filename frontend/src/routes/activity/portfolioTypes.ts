@@ -42,6 +42,33 @@ export type PositionEntryDecision = {
   ts: number
 }
 
+// One news/analyzer decision attached to a position. `relation` says how it
+// relates: `opening` opened it, `reinforce` argued the same side again and was
+// blocked by the one-position-per-(market, side) rule, `contradict` argued the
+// OTHER side of the same market and was blocked outright. `side` is the side
+// that decision WANTED — for `contradict` that is not the side held.
+export type NewsSignal = {
+  news_id: string
+  ts: number
+  side: 'yes' | 'no'
+  relation: 'opening' | 'reinforce' | 'contradict'
+  p_model: number | null
+  confidence: string | null
+  // null when the news row was evicted or never persisted (the news sink is
+  // write-behind and best-effort) — the decision still counts.
+  content: string | null
+  urgency: string | null
+}
+
+// The regime derived from a position's news signals. `contested` dominates
+// `reinforced`. The confluence exit section keys its peak-drawdown threshold
+// off `state`; anything opened before that feature shipped reads as `solo`.
+export type Confluence = {
+  state: 'solo' | 'reinforced' | 'contested'
+  support: number
+  against: number
+}
+
 export type PositionRecord = {
   id: number
   market_id: string
@@ -92,6 +119,11 @@ export type PositionRecord = {
   // closed (use realized_pnl instead), and null if there's no live order
   // book yet for the token.
   unrealized_pnl?: number | null
+  // Both routes populate `confluence`; only /api/positions/{id} populates the
+  // full `news_signals` ledger, and only the list route carries the count.
+  confluence?: Confluence | null
+  news_signals?: NewsSignal[]
+  news_signal_count?: number
 }
 
 // Response body of POST /api/positions/{id}/close — mirrors the backend's

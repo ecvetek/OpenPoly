@@ -409,7 +409,7 @@ export const MOCK_RUNTIME_CATALOG: RuntimeCatalogEntry[] = [
   {
     type: 'exit',
     name: 'ThresholdExitV0',
-    version: '0.1.0',
+    version: '0.2.0',
     module: 'openpoly.sections.exit.threshold_v0',
     requires: ['market_data', 'portfolio'],
     source: 'builtin',
@@ -434,6 +434,125 @@ export const MOCK_RUNTIME_CATALOG: RuntimeCatalogEntry[] = [
           default: 0.15,
           minimum: 0,
           maximum: 1,
+        },
+        peak_drawdown_pct: {
+          type: 'number',
+          title: 'Peak Drawdown Pct',
+          description:
+            'Close when the gain has retraced this fraction from peak (0.12 = 12%).',
+          default: 0.12,
+          minimum: 0,
+          maximum: 1,
+        },
+        peak_meaningful_floor_usd: {
+          type: 'number',
+          title: 'Peak Meaningful Floor Usd',
+          description:
+            'Skip peak_drawdown unless the peak gain in USD exceeds this floor.',
+          default: 1.0,
+          minimum: 0,
+        },
+        peak_meaningful_floor_pct: {
+          type: 'number',
+          title: 'Peak Meaningful Floor Pct',
+          description:
+            'Skip peak_drawdown unless the peak gain exceeds this fraction of cost basis.',
+          default: 0.01,
+          minimum: 0,
+          maximum: 1,
+        },
+      },
+    },
+  },
+  {
+    type: 'exit',
+    name: 'ConfluenceExitV0',
+    version: '0.1.0',
+    module: 'openpoly.sections.exit.confluence_v0',
+    requires: ['market_data', 'portfolio'],
+    source: 'builtin',
+    param_schema: {
+      type: 'object',
+      title: 'ConfluenceExitConfig',
+      properties: {
+        take_profit_pct: {
+          type: 'number',
+          title: 'Take Profit Pct',
+          description:
+            'Close the position when its return reaches this fraction (0.20 = +20%).',
+          default: 0.2,
+          minimum: 0,
+          maximum: 10,
+        },
+        stop_loss_pct: {
+          type: 'number',
+          title: 'Stop Loss Pct',
+          description:
+            'Close the position when its loss reaches this fraction (0.15 = -15%). Deliberately NOT affected by the confluence state — an absolute floor in every regime.',
+          default: 0.15,
+          minimum: 0,
+          maximum: 1,
+        },
+        solo_peak_drawdown_pct: {
+          type: 'number',
+          title: 'Solo Peak Drawdown Pct',
+          description:
+            'Peak-drawdown threshold while only the opening news supports the position (0.30 = close after giving back 30% of the peak gain).',
+          default: 0.3,
+          minimum: 0,
+          maximum: 1,
+        },
+        reinforced_peak_drawdown_pct: {
+          type: 'number',
+          title: 'Reinforced Peak Drawdown Pct',
+          description:
+            'Peak-drawdown threshold once reinforce_min_count same-side news items support the position. Empty = peak-drawdown DISABLED in this state.',
+          minimum: 0,
+          maximum: 1,
+        },
+        contested_peak_drawdown_pct: {
+          type: 'number',
+          title: 'Contested Peak Drawdown Pct',
+          description:
+            'Peak-drawdown threshold once a news item arguing the OPPOSITE side of this market has joined.',
+          default: 0.1,
+          minimum: 0,
+          maximum: 1,
+        },
+        reinforce_min_count: {
+          type: 'integer',
+          title: 'Reinforce Min Count',
+          description:
+            'How many live same-side news items (the opening one included) put the position into the reinforced state.',
+          default: 2,
+          minimum: 2,
+          maximum: 20,
+        },
+        support_ttl_minutes: {
+          type: 'integer',
+          title: 'Support Ttl Minutes',
+          description:
+            'How long a supporting news item keeps counting. 0 = never expires. Opposing news never expires either way.',
+          default: 120,
+          minimum: 0,
+          maximum: 10080,
+        },
+        min_signal_confidence: {
+          type: 'string',
+          title: 'Min Signal Confidence',
+          description:
+            "Ignore attached news whose analyzer confidence is below this. 'low' counts everything.",
+          default: 'low',
+          enum: ['low', 'medium', 'high'],
+        },
+        contested_close_after: {
+          type: 'integer',
+          title: 'Contested Close After',
+          description:
+            'Close the position outright once this many opposing news items have joined. 0 disables.',
+          default: 0,
+          minimum: 0,
+          maximum: 20,
         },
       },
     },

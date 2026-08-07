@@ -98,6 +98,38 @@ class FillRow(Base):
     tx_hash: Mapped[str | None] = mapped_column(default=None)  # NEW (slice C)
 
 
+class PositionSignalRow(Base):
+    """One news/analyzer decision attached to a position — append-only.
+
+    The buy fill's ``news_id`` records the ONE news item that opened a
+    position; this table records every *further* decision the pipeline made
+    about the same market while that position was open. ``relation`` says
+    which: ``reinforce`` (wanted the held side again — the entry was blocked
+    by the one-position-per-(market, side) rule) or ``contradict`` (wanted the
+    opposite side of the same market). The opening decision is recorded here
+    too, as ``opening``, so the ledger is self-contained.
+
+    ``side`` is the side the decision WANTED, which for ``contradict`` is not
+    the side the position holds. ``p_model`` / ``confidence`` are snapshotted
+    from the analyzer so the exit tick needn't join ``analyzer_call``.
+
+    Derived state (``solo`` / ``reinforced`` / ``contested``) is computed from
+    these rows by ``openpoly.portfolio.confluence.evaluate`` — nothing is
+    materialized onto ``position``, same discipline as ``fill`` → ``position``.
+    """
+
+    __tablename__ = "position_signal"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    position_id: Mapped[int] = mapped_column(index=True)
+    news_id: Mapped[str] = mapped_column(index=True)
+    ts: Mapped[float]  # epoch seconds, UTC
+    side: Mapped[str]  # yes | no — the side the decision wanted
+    relation: Mapped[str]  # opening | reinforce | contradict
+    p_model: Mapped[float | None]
+    confidence: Mapped[str | None]  # low | medium | high
+
+
 class EmbeddingCallRow(Base):
     """One persisted embedding-filter call — durable mirror of the in-memory
     ``embedding_log`` ring (``openpoly.runtime.section_log``).

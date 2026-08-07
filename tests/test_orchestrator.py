@@ -177,8 +177,18 @@ class FakeExecutor:
         self._raise = raise_exc
         self.call_count = 0
 
-    def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult:
+    def execute_buy(
+        self,
+        intent: OrderIntent,
+        *,
+        news_id: str | None,
+        ts: float,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> ExecResult:
         self.call_count += 1
+        self.last_p_model = p_model
+        self.last_confidence = confidence
         if self._raise is not None:
             raise self._raise
         if self._filled:
@@ -197,7 +207,15 @@ class _BlockingExecutor:
         self.release = threading.Event()
         self.call_count = 0
 
-    def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult:
+    def execute_buy(
+        self,
+        intent: OrderIntent,
+        *,
+        news_id: str | None,
+        ts: float,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> ExecResult:
         self.call_count += 1
         self.started.set()
         self.release.wait(timeout=5)
@@ -630,6 +648,44 @@ async def test_entry_fill_skipped_records_skip_reason() -> None:
     assert e_entry.fill_status == "position_exists"
     assert e_entry.fill_price is None
     assert e_entry.position_id == 49
+
+
+async def test_entry_blocked_by_opposite_side_records_its_own_status() -> None:
+    """An entry blocked because we already hold the OTHER side of this market
+    must be distinguishable from a plain duplicate — it means the pipeline just
+    argued against its own open position, which is what puts that position into
+    the contested confluence state. NewsCard badges the two differently."""
+    orch, _, _, e_log = make_orchestrator(
+        executor=FakeExecutor(
+            filled=False, skip_reason="opposite_position_exists", skip_position_id=16
+        )
+    )
+    await orch.start()
+    try:
+        orch.enqueue(_item("n1"))
+        await _drain(orch)
+    finally:
+        await orch.stop()
+    e_entry = e_log.entries()[0]
+    assert e_entry.verdict == "ok"
+    assert e_entry.fill_status == "opposite_position_exists"
+    assert e_entry.position_id == 16
+
+
+async def test_analyzer_numbers_are_passed_to_the_executor() -> None:
+    """p_model / confidence ride along to execute_buy so the executor can
+    snapshot them onto the news-confluence signal it records — including on
+    the blocked branches, where no fill happens at all."""
+    ex = FakeExecutor()
+    orch, _, _, _ = make_orchestrator(executor=ex)
+    await orch.start()
+    try:
+        orch.enqueue(_item("n1"))
+        await _drain(orch)
+    finally:
+        await orch.stop()
+    assert ex.last_p_model == 0.55  # FakeAnalyzer's AnalysisResult
+    assert ex.last_confidence == "medium"
 
 
 async def test_executor_raises_logs_error() -> None:

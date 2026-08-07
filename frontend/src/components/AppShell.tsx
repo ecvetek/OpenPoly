@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -32,7 +32,15 @@ export function AppShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const location = useLocation()
 
-  useEffect(() => setMobileNavOpen(false), [location.pathname])
+  // Close the mobile nav on navigation. Adjusted during render (React's
+  // documented pattern for "reset state when a prop changes") rather than in
+  // an effect, so a route change closes the nav in the same commit instead of
+  // painting it open for one frame before a follow-up effect fires.
+  const [prevPathname, setPrevPathname] = useState(location.pathname)
+  if (location.pathname !== prevPathname) {
+    setPrevPathname(location.pathname)
+    setMobileNavOpen(false)
+  }
 
   return (
     <div className="h-screen flex flex-col bg-neutral-950 text-neutral-100 overflow-hidden">

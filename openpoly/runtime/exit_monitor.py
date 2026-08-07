@@ -28,7 +28,7 @@ import json
 import logging
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -41,7 +41,7 @@ from openpoly.execution import ExecResult
 from openpoly.execution import executor as _executor_singleton
 from openpoly.markets.manager import manager as market_source_manager
 from openpoly.markets.store import MarketStore
-from openpoly.portfolio import HeldPosition, PortfolioStore
+from openpoly.portfolio import HeldPosition, PortfolioStore, PositionSignal
 from openpoly.runtime.section_log import ExitDecision, exit_log
 from openpoly.sections._base import SectionInput, SectionOutput
 from openpoly.sections.exit.threshold_v0 import (
@@ -108,6 +108,7 @@ _CLOSE_REASONS = (
     "scale_out",
     "post_scale_out_stop",
     "final_take_profit",
+    "contested_exit",
 )
 
 
@@ -377,10 +378,19 @@ class ExitMonitor:
                 del self._peak[stale_id]
             for stale_id in set(self._scaled_out) - open_ids:
                 del self._scaled_out[stale_id]
+            # News-confluence signals for every open position, in ONE query —
+            # never one per position. Deliberately not cached on the monitor
+            # (unlike _peak / _scaled_out): position_signal is a real table, so
+            # it survives restart without a bootstrap, and the orchestrator
+            # appends to it concurrently from a worker thread — a monitor-side
+            # cache could only ever be stale.
+            signals_by_position = self._portfolio.signals_for_positions(list(open_ids))
             reason_counts: dict[str, int] = {}
             for held in opens:
                 try:
-                    outcome = self._evaluate(held, catalog, ts)
+                    outcome = self._evaluate(
+                        held, catalog, ts, signals_by_position.get(held.position_id, [])
+                    )
                 except Exception as exc:  # noqa: BLE001 — one bad position must not abort the sweep
                     logger.exception("exit monitor: position %d failed", held.position_id)
                     self._log(held, ts, verdict="error", error=repr(exc)[:200])
@@ -403,14 +413,24 @@ class ExitMonitor:
             detail += f", {blocked} blocked"
         self._record_tick_event("tick_ok", detail=detail)
 
-    def _evaluate(self, held: HeldPosition, catalog: MarketStore, ts: float) -> str:
+    def _evaluate(
+        self,
+        held: HeldPosition,
+        catalog: MarketStore,
+        ts: float,
+        signals: Sequence[PositionSignal] = (),
+    ) -> str:
         """Evaluate one position. Returns the outcome reason key tallied into
         ``last_tick.reason_counts``: ``no_order_book`` (couldn't evaluate),
         ``within_thresholds`` (held, no trigger), a close trigger
         (``stop_loss``/``peak_drawdown``/``take_profit``), or ``error`` (close
         attempted but the sell didn't fill). Only ok / error closes are
         logged to ``exit_log`` — within-threshold and no-order-book holds are
-        not (see tick telemetry)."""
+        not (see tick telemetry).
+
+        ``signals`` is this position's news-confluence ledger, read once for
+        the whole sweep by ``_tick_once``. Passed through raw; only
+        ``exit.confluence_v0.ConfluenceExitV0`` reads it."""
         book = catalog.get_order_book(held.token_id)
         if book is None or not book.bids:
             return "no_order_book"
@@ -429,6 +449,8 @@ class ExitMonitor:
             current_price=current_price,
             peak_price=peak_price,
             scaled_out=self._scaled_out.get(held.position_id, False),
+            news_signals=tuple(signals),
+            marked_at=ts,
         )
         out = self._exit.run(SectionInput(tick_type="hard", payload=marked))
         return_pct = out.signals.get("return_pct")

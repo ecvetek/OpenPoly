@@ -412,7 +412,14 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
                       ? VERDICT_BADGE.ok
                       : entry.fill_status === 'error'
                         ? VERDICT_BADGE.error
-                        : VERDICT_BADGE.skip
+                        : // An opposite-side block means the pipeline just
+                          // argued against one of its own open positions —
+                          // materially different from a duplicate, and it
+                          // tightens that position's drawdown. Warn-toned so
+                          // it doesn't read as a routine skip.
+                          entry.fill_status === 'opposite_position_exists'
+                          ? VERDICT_BADGE.fail_open
+                          : VERDICT_BADGE.skip
                   }
                   label={`fill:${entry.fill_status}`}
                 />
@@ -424,8 +431,12 @@ export function NewsCard({ card }: { card: NewsPipelineCard }) {
                     @ {entry.fill_price.toFixed(3)} × {entry.fill_qty.toFixed(2)}
                   </span>
                 )}
+              {/* Both blocked statuses carry the blocking position's id, and
+                 the decision is now attached to it as a confluence signal —
+                 so the link goes somewhere that actually shows this news. */}
               {(entry.fill_status === 'filled' ||
-                entry.fill_status === 'position_exists') &&
+                entry.fill_status === 'position_exists' ||
+                entry.fill_status === 'opposite_position_exists') &&
                 entry.position_id !== null && (
                   <Link
                     to={`/positions/${entry.position_id}`}

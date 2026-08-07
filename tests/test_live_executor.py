@@ -146,10 +146,13 @@ def test_buy_success_records_actual_fill(store) -> None:
         }
     )
     le = LiveExecutor(portfolio=store, clob_client=clob)
-    r = le.execute_buy(_intent(), news_id="n1", ts=100.0)
+    r = le.execute_buy(_intent(), news_id="n1", ts=100.0, p_model=0.7, confidence="high")
     assert r.filled is True
     assert r.price == pytest.approx(0.4)
     assert r.qty == pytest.approx(10.0)
+    signals = store.signals_for_position(r.position_id)
+    assert [s.relation for s in signals] == ["opening"]
+    assert (signals[0].news_id, signals[0].side, signals[0].confidence) == ("n1", "yes", "high")
     # GTC (verified) order type was passed
     assert str(clob.posted[0]["order_type"]).endswith("GTC")
     # BUY quantized the qty (10.0 was already integer, kept as-is)
@@ -209,10 +212,41 @@ def test_buy_duplicate_position_skips(store) -> None:
     )
     clob = _FakeClob()
     le = LiveExecutor(portfolio=store, clob_client=clob)
-    r = le.execute_buy(_intent(), news_id="n", ts=100.0)
+    r = le.execute_buy(_intent(), news_id="n", ts=100.0, p_model=0.66, confidence="medium")
     assert r.filled is False and r.skip_reason == "position_exists"
     assert r.position_id == held.position_id
     assert clob.posted == []
+
+    signals = store.signals_for_position(held.position_id)
+    assert [s.relation for s in signals] == ["reinforce"]
+    assert (signals[0].news_id, signals[0].side) == ("n", "yes")
+    assert (signals[0].p_model, signals[0].confidence) == (0.66, "medium")
+
+
+def test_buy_opposite_side_position_blocks_and_contradicts(store) -> None:
+    """No order is ever posted: YES + NO on one market settle to $1, so the
+    pair is a locked spread loss. The decision attaches to the held position
+    as a contradiction instead."""
+    m = _market("m1")
+    _populate(m)
+    held = store.open_position(
+        market_id="m1",
+        side="yes",
+        token_id=m.yes_token_id,
+        condition_id=m.condition_id,
+        price=0.4,
+        qty=10.0,
+        ts=50.0,
+        news_id="prior",
+    )
+    clob = _FakeClob()
+    le = LiveExecutor(portfolio=store, clob_client=clob)
+    r = le.execute_buy(_intent(side="no"), news_id="n", ts=100.0)
+    assert r.filled is False and r.skip_reason == "opposite_position_exists"
+    assert r.position_id == held.position_id
+    assert clob.posted == []
+    assert store.get_open_position("m1", "no") is None
+    assert [s.relation for s in store.signals_for_position(held.position_id)] == ["contradict"]
 
 
 def test_buy_clob_network_error_skips(store, monkeypatch) -> None:

@@ -23,7 +23,7 @@
  * manual refresh button — without waiting for `intervalMs` or a
  * `refreshKey` change.
  */
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 export type PollStatus = 'loading' | 'ready' | 'error'
 
@@ -90,6 +90,10 @@ export function usePoll<T>(
     }
   }, [intervalMs, refreshKey, nonce])
 
-  const refetch = () => setNonce((n) => n + 1)
+  // Stable identity (setState setters never change) — lets callers that wrap
+  // refetch in their own useCallback/useEffect deps (e.g. PositionDetail's
+  // forceRefresh) get a dependency array eslint-exhaustive-deps can actually
+  // satisfy, instead of a new function every render.
+  const refetch = useCallback(() => setNonce((n) => n + 1), [])
   return { data, status, error, refetch }
 }

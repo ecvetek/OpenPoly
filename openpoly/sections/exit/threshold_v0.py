@@ -23,16 +23,18 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from openpoly.portfolio.models import PositionSignal
 from openpoly.sections._base import SectionInput, SectionOutput
 
 
 Side = Literal["yes", "no"]
 # scale_out / post_scale_out_stop / final_take_profit are produced only by
-# exit.scale_out_v0.ScaleOutExitV0, not by this module — added here because
-# CloseIntent.trigger is a shared, imported type (see MarkedPosition's
-# ``scaled_out`` field below for the same reasoning). Literal is a
-# static-typing device only, so widening it is a no-op for ThresholdExitV0,
-# which only ever produces the original three values.
+# exit.scale_out_v0.ScaleOutExitV0, and contested_exit only by
+# exit.confluence_v0.ConfluenceExitV0 — none by this module. They are added
+# here because CloseIntent.trigger is a shared, imported type (see
+# MarkedPosition's ``scaled_out`` field below for the same reasoning). Literal
+# is a static-typing device only, so widening it is a no-op for
+# ThresholdExitV0, which only ever produces the original three values.
 Trigger = Literal[
     "take_profit",
     "stop_loss",
@@ -40,6 +42,7 @@ Trigger = Literal[
     "scale_out",
     "post_scale_out_stop",
     "final_take_profit",
+    "contested_exit",
 ]
 
 
@@ -64,6 +67,21 @@ class MarkedPosition:
     # by ExitMonitor from its own per-position tracking (mirrors peak_price),
     # not read from the DB directly — see ExitMonitor.bootstrap_scaled_out.
     scaled_out: bool = False
+    # Every news/analyzer decision attached to this position, oldest first —
+    # the raw ``position_signal`` ledger, NOT a precomputed regime. Only
+    # exit.confluence_v0.ConfluenceExitV0 reads these; ThresholdExitV0 and
+    # ScaleOutExitV0 ignore them, same as ThresholdExitV0 ignores scaled_out.
+    #
+    # Raw rows rather than a derived state because the TTL and count
+    # thresholds are exit-section *config* — deriving the state in the runtime
+    # would mean the monitor had to read the section's config, and would make
+    # run() no longer a pure function of its input.
+    news_signals: tuple[PositionSignal, ...] = ()
+    # When this mark was taken (epoch seconds, UTC). The section's only clock:
+    # confluence TTL decay is measured against it, so a section never calls
+    # time.time() and a replay stays deterministic. ExitMonitor passes its tick
+    # timestamp; the backtest passes the replayed snapshot's recorded_at.
+    marked_at: float = 0.0
 
 
 @dataclass(frozen=True)

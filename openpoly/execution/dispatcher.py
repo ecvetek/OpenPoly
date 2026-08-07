@@ -28,7 +28,15 @@ class _PaperLike(Protocol):
     def configure(self, portfolio: PortfolioStore) -> None: ...
     @property
     def portfolio(self) -> PortfolioStore | None: ...
-    def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult: ...
+    def execute_buy(
+        self,
+        intent: OrderIntent,
+        *,
+        news_id: str | None,
+        ts: float,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> ExecResult: ...
     def execute_sell(
         self,
         position: HeldPosition,
@@ -41,7 +49,15 @@ class _PaperLike(Protocol):
 
 
 class _LiveLike(Protocol):
-    def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult: ...
+    def execute_buy(
+        self,
+        intent: OrderIntent,
+        *,
+        news_id: str | None,
+        ts: float,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> ExecResult: ...
     def execute_sell(
         self,
         position: HeldPosition,
@@ -106,13 +122,28 @@ class ExecutorDispatcher:
             return None
         return self._live.get_collateral_balance_raw()
 
-    def execute_buy(self, intent: OrderIntent, *, news_id: str | None, ts: float) -> ExecResult:
+    def execute_buy(
+        self,
+        intent: OrderIntent,
+        *,
+        news_id: str | None,
+        ts: float,
+        p_model: float | None = None,
+        confidence: str | None = None,
+    ) -> ExecResult:
+        """``p_model`` / ``confidence`` are the analyzer's numbers for this
+        decision, passed straight through so the executor can snapshot them
+        onto the news-confluence signal it records."""
         if runtime_state.exec_mode == "live":
             if self._live is None:
                 logger.warning("dispatch buy: live mode but live executor unconfigured")
                 return ExecResult.skip("live_not_ready")
-            return self._live.execute_buy(intent, news_id=news_id, ts=ts)
-        return self._paper.execute_buy(intent, news_id=news_id, ts=ts)
+            return self._live.execute_buy(
+                intent, news_id=news_id, ts=ts, p_model=p_model, confidence=confidence
+            )
+        return self._paper.execute_buy(
+            intent, news_id=news_id, ts=ts, p_model=p_model, confidence=confidence
+        )
 
     def execute_sell(
         self,
