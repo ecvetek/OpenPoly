@@ -38,6 +38,11 @@ import type {
   PricePoint,
 } from '../../routes/activity/orderBookClient'
 import type { CloseAllResult } from '../../setting/walletStore'
+import type { DbStatus, OrderBookRow, WriterStats } from '../../sections/database/inspectStore'
+import type {
+  InspectMarket,
+  MarketsResponse,
+} from '../../sections/market_source/inspectStore'
 import type { WalletBalance } from '../../routes/activity/walletClient'
 import type { HealthDetailResponse } from '../../routes/health/healthClient'
 // The canvas StatusIndicators read the FULL log envelope (counters / last_at /
@@ -321,6 +326,68 @@ function round3(n: number): number {
   return Math.round(n * 1000) / 1000
 }
 
+// ---- database inspector tab (canvas Database section, Tables sub-tab) -----
+
+function writerStats(written: number): WriterStats {
+  return { written, dropped: 0, pending: 0 }
+}
+
+const dbStatus: DbStatus = {
+  tables: {
+    order_book_snapshot: 48_210,
+    news_item: 214,
+    fill: 6,
+    position: 4,
+    entry_decision: 9,
+    exit_decision: 3,
+    settlement_decision: 0,
+    market_catalog: 4,
+  },
+  writers: {
+    order_book: writerStats(48_210),
+    news: writerStats(214),
+  },
+}
+
+const orderBookRows: OrderBookRow[] = [
+  { id: 4001, token_id: 'tok-101-yes', recorded_at: NOW - 40, bids: [[0.51, 120], [0.5, 240]], asks: [[0.53, 110], [0.54, 220]] },
+  { id: 4000, token_id: 'tok-102-no', recorded_at: NOW - 42, bids: [[0.61, 95], [0.6, 200]], asks: [[0.63, 88], [0.64, 180]] },
+  { id: 3999, token_id: 'tok-103-yes', recorded_at: NOW - 38, bids: [[0.68, 140], [0.67, 260]], asks: [[0.7, 130], [0.71, 250]] },
+  { id: 3998, token_id: 'tok-104-no', recorded_at: NOW - 44, bids: [[0.44, 100], [0.43, 210]], asks: [[0.46, 96], [0.47, 190]] },
+]
+
+// ---- market_source inspector tab (canvas Market Source section) -----------
+
+const inspectMarketsResponse: MarketsResponse = {
+  catalog_size: 4,
+  order_book_count: 4,
+  last_poll: {
+    ts: NOW - 45,
+    fetched: 420,
+    kept: 4,
+    reason_counts: { thin_liquidity: 380, near_expiry: 36 },
+  },
+  markets: positions
+    .filter((p, i, arr) => arr.findIndex((q) => q.market_id === p.market_id) === i)
+    .map(
+      (p, i): InspectMarket => ({
+        market_id: p.market_id,
+        question: p.market_question ?? p.market_id,
+        yes_token_id: p.side === 'yes' ? p.token_id : `tok-${101 + i}-yes`,
+        volume_24h: 96_000 + i * 43_000,
+        liquidity: 28_000 + i * 15_000,
+        tags: [],
+        fee: 0,
+        end_date: null,
+        best_bid: round3(p.avg_entry_price - 0.01),
+        best_ask: round3(p.avg_entry_price + 0.01),
+        mid: p.avg_entry_price,
+        spread: 0.02,
+        price_ts: NOW - 40 - i * 2,
+      }),
+    ),
+}
+
 // ---- position price history (Position detail — unified CLOB-style line) --
 
 // Mirrors the real backend's post-fix shape: a single continuous price path
@@ -595,6 +662,23 @@ export const activityRoutes: MockRoute[] = [
   {
     pattern: /^\/api\/inspect\/order-books\/([^/]+)$/,
     handler: (ctx) => buildOrderBook(decodeURIComponent(ctx.params[1])),
+  },
+  // Order book snapshot list + database status (canvas Database section) and
+  // the market catalog (canvas Market Source section) — the same routes the
+  // real backend's inspector tabs read. Without these the canvas's default
+  // Database/Markets tabs fell through to the mock server's empty-200
+  // fallback, which crashed the Tables sub-tab (status.tables was undefined).
+  {
+    pattern: /^\/api\/inspect\/order-books$/,
+    handler: () => ({ count: orderBookRows.length, order_books: orderBookRows }),
+  },
+  {
+    pattern: /^\/api\/inspect\/db-status$/,
+    handler: () => dbStatus,
+  },
+  {
+    pattern: /^\/api\/inspect\/markets$/,
+    handler: () => inspectMarketsResponse,
   },
 
   // Position price history — spans open through close and on to expiry

@@ -55,13 +55,13 @@ export function DatabaseTablesTab() {
       <div className="rounded border border-neutral-800 px-3 py-2 flex flex-col gap-1.5 text-[11px]">
         <StatusRow
           name="order_book_snapshot"
-          rows={status?.tables.order_book_snapshot ?? 0}
-          writer={status?.writers.order_book ?? null}
+          rows={status?.tables?.order_book_snapshot ?? 0}
+          writer={status?.writers?.order_book ?? null}
         />
         <StatusRow
           name="news_item"
-          rows={status?.tables.news_item ?? 0}
-          writer={status?.writers.news ?? null}
+          rows={status?.tables?.news_item ?? 0}
+          writer={status?.writers?.news ?? null}
         />
       </div>
 

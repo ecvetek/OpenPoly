@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { ErrorBoundary } from './ErrorBoundary'
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   [
@@ -84,7 +85,11 @@ export function AppShell() {
         )}
       </header>
       <main className="flex-1 min-h-0">
-        <Outlet />
+        {/* Keyed on pathname so a route change remounts a fresh boundary
+            instead of carrying a previous page's crashed state forward. */}
+        <ErrorBoundary key={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   )
