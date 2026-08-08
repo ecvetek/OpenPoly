@@ -32,15 +32,47 @@ persisted table. Only a market_id that was *never* captured by any poll —
 e.g. malformed Gamma data that failed normalization — is still genuinely
 unresolvable; the caller (``engine.py``) counts that case, it does not
 silently drop it.
+
+``get_by_condition`` / ``snapshot`` / ``snapshot_ids`` are also overridden,
+unlike the write methods (``replace`` / ``union`` / ``set_order_books``)
+which stay inherited/inert on purpose (see above). These three are *read*
+paths reachable from outside the replay itself — ``portfolio_routes.py`` /
+``statistics_routes.py`` look up a position's market by ``condition_id``,
+``/api/inspect/markets`` reads ``snapshot()``, and
+``embedding.manager.refresh()``'s periodic warm cycle also reads
+``snapshot()`` — any live HTTP request or background task that touches
+``market_source_manager.store`` while it's swapped for a replay. Left
+inherited (as they were before), they'd silently return empty against the
+never-populated ``_catalog`` dict: blanking market data on those pages
+during a backtest, and — worse — the embedding warm cycle would rebuild its
+vector cache from that empty catalog and wipe out live news-matching until
+the next successful cycle. Backed by ``self._markets``, the same frozen
+live-catalog snapshot ``get()`` already uses, so these reads see real data
+during a replay instead of a false "no markets" — the same fix, applied to
+the same isolation problem.
+
+All access to ``self._session`` (a single SQLAlchemy ``Session`` shared for
+the whole replay, for query-volume reasons — see ``engine.py``) goes through
+``self._session_lock``. A ``Session`` isn't safe for concurrent use, and
+this store is reachable from more than one thread at once: the replay's own
+thread, plus any of the live read paths above, which run in FastAPI's sync
+thread pool. The lock only serializes the handful of DB-fallback queries
+(the common case, live catalog hits, never touches the session at all); it
+does not make those callers wait for the whole replay.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 
 from sqlalchemy.orm import Session
 
-from openpoly.db.history_query import market_catalog_row, order_book_at_or_before
+from openpoly.db.history_query import (
+    market_catalog_row,
+    market_catalog_row_by_condition_id,
+    order_book_at_or_before,
+)
 from openpoly.db.tables import MarketCatalogRow
 from openpoly.markets.models import Market, OrderBook
 from openpoly.markets.store import MarketStore
@@ -88,6 +120,7 @@ class HistoricalMarketStore(MarketStore):
     def __init__(self, session: Session, markets: dict[str, Market]) -> None:
         super().__init__()
         self._session = session
+        self._session_lock = threading.Lock()
         self._markets = markets
         # Per-run cache for the DB fallback below — a market_id can be
         # looked up once per analyzer-call row plus once per exit-replay
@@ -95,6 +128,7 @@ class HistoricalMarketStore(MarketStore):
         # cached too (a confirmed miss), so a genuinely-unresolvable
         # market_id doesn't re-query on every subsequent lookup.
         self._db_cache: dict[str, Market | None] = {}
+        self._db_cache_by_condition: dict[str, Market | None] = {}
         # The replay clock — callers advance this (via set_clock) to the
         # timestamp of whatever historical event is being evaluated next, so
         # get_order_book resolves to "the book as of that moment", not "now".
@@ -109,13 +143,38 @@ class HistoricalMarketStore(MarketStore):
             return live
         if market_id in self._db_cache:
             return self._db_cache[market_id]
-        row = market_catalog_row(self._session, market_id)
+        with self._session_lock:
+            row = market_catalog_row(self._session, market_id)
         resolved = _market_from_catalog_row(row) if row is not None else None
         self._db_cache[market_id] = resolved
         return resolved
 
+    def get_by_condition(self, condition_id: str) -> Market | None:
+        """Same two-tier resolution as ``get()`` (frozen live snapshot, then
+        the persisted catalog), keyed by on-chain ``condition_id`` instead of
+        ``market_id`` — what ``PositionRecord`` stores, and what
+        ``portfolio_routes.py`` / ``statistics_routes.py`` look positions up
+        by."""
+        for m in self._markets.values():
+            if m.condition_id == condition_id:
+                return m
+        if condition_id in self._db_cache_by_condition:
+            return self._db_cache_by_condition[condition_id]
+        with self._session_lock:
+            row = market_catalog_row_by_condition_id(self._session, condition_id)
+        resolved = _market_from_catalog_row(row) if row is not None else None
+        self._db_cache_by_condition[condition_id] = resolved
+        return resolved
+
+    def snapshot(self) -> list[Market]:
+        return list(self._markets.values())
+
+    def snapshot_ids(self) -> set[str]:
+        return set(self._markets.keys())
+
     def get_order_book(self, token_id: str) -> OrderBook | None:
-        row = order_book_at_or_before(self._session, token_id, self._clock)
+        with self._session_lock:
+            row = order_book_at_or_before(self._session, token_id, self._clock)
         if row is None:
             return None
         try:

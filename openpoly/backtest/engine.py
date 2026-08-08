@@ -47,7 +47,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from openpoly.backtest.guard import backtest_active, set_backtest_active
+from openpoly.backtest.guard import backtest_run
 from openpoly.backtest.historical_store import HistoricalMarketStore
 from openpoly.backtest.portfolio import BacktestPortfolio
 from openpoly.db.history_query import analyzer_calls_in_range, order_book_snapshots_for_token
@@ -105,12 +105,11 @@ def run_backtest(
     ``guard.py``'s module docstring for why) — they check that flag and skip
     their own decision paths for the duration instead, so a real trading
     decision can never be made off the swapped historical store. Raises
-    ``RuntimeError`` if a backtest is already in progress (the guard, and
-    the module-global store swap, aren't reentrant).
+    ``guard.BacktestAlreadyRunning`` (a ``RuntimeError``) if a backtest is
+    already in progress — ``backtest_run()`` claims the slot atomically, so
+    two concurrent callers can never both proceed into the store swap below
+    (the module-global swap itself isn't reentrant).
     """
-    if backtest_active():
-        raise RuntimeError("a backtest is already in progress")
-
     start = time.monotonic()
 
     entry_cls = resolve_impl("entry", request.entry_module, request.entry_name)
@@ -127,30 +126,33 @@ def run_backtest(
     except TypeError:
         entry_section = entry_cls(entry_config)
     exit_section = exit_cls(exit_config)
-
-    live_markets = {m.market_id: m for m in market_source_manager.store.snapshot()}
-
-    original_store = market_source_manager.store
-    original_recent_move = {mod: mod.recent_move for mod in _VETO_PATCH_TARGETS}
     executor = PaperExecutor(backtest_portfolio)
-    set_backtest_active(True)
-    with session_factory() as session:
-        historical_store = HistoricalMarketStore(session, live_markets)
-        market_source_manager.store = historical_store
-        for mod in _VETO_PATCH_TARGETS:
-            mod.recent_move = lambda token_id, *, window_min: None
-        try:
-            replayed, skipped = _replay_entries(
-                session, request, entry_section, executor, historical_store
-            )
-            _replay_exits(
-                session, request, exit_section, executor, backtest_portfolio, historical_store
-            )
-        finally:
-            market_source_manager.store = original_store
-            for mod, fn in original_recent_move.items():
-                mod.recent_move = fn
-            set_backtest_active(False)
+
+    # Everything that touches the module-global `market_source_manager.store`
+    # — capturing it, swapping it, and restoring it — lives inside
+    # `backtest_run()`'s lock, not just the swap-and-restore. Capturing
+    # `live_markets`/`original_store` outside the lock would let a second
+    # call race the capture itself against another replay's own swap/restore.
+    with backtest_run():
+        live_markets = {m.market_id: m for m in market_source_manager.store.snapshot()}
+        original_store = market_source_manager.store
+        original_recent_move = {mod: mod.recent_move for mod in _VETO_PATCH_TARGETS}
+        with session_factory() as session:
+            historical_store = HistoricalMarketStore(session, live_markets)
+            market_source_manager.store = historical_store
+            for mod in _VETO_PATCH_TARGETS:
+                mod.recent_move = lambda token_id, *, window_min: None
+            try:
+                replayed, skipped = _replay_entries(
+                    session, request, entry_section, executor, historical_store
+                )
+                _replay_exits(
+                    session, request, exit_section, executor, backtest_portfolio, historical_store
+                )
+            finally:
+                market_source_manager.store = original_store
+                for mod, fn in original_recent_move.items():
+                    mod.recent_move = fn
 
     closed = backtest_portfolio.all_closed_ascending()
     still_open = len(backtest_portfolio.get_open_positions())

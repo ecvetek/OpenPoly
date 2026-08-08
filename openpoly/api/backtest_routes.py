@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.backtest.engine import BacktestRequest as ReplayRequest
 from openpoly.backtest.engine import run_backtest
-from openpoly.backtest.guard import backtest_active
+from openpoly.backtest.guard import BacktestAlreadyRunning, backtest_active
 from openpoly.db.engine import get_session_factory
 from openpoly.db.history_query import market_catalog_row_by_condition_id
 from openpoly.markets.manager import manager as market_source_manager
@@ -112,6 +112,18 @@ def run(
             ),
             factory,
         )
+    except BacktestAlreadyRunning as exc:
+        # The pre-check above is a fast path only — it isn't atomic with
+        # run_backtest's own slot claim, so a genuine race between two
+        # concurrent requests still has to be caught here to get the same
+        # 409 (not the config-error 400 below).
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "backtest_in_progress",
+                "message": "another backtest is already running — try again shortly",
+            },
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — a bad impl/config choice must surface as 400, not a raw 500
         logger.exception("backtest run failed")
         raise HTTPException(

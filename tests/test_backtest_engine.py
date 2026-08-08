@@ -213,14 +213,14 @@ def test_backtest_restores_guard_even_on_exception(sf, monkeypatch) -> None:
 
 
 def test_backtest_raises_when_already_active(sf) -> None:
-    from openpoly.backtest.guard import set_backtest_active
+    from openpoly.backtest.guard import backtest_run
 
-    set_backtest_active(True)
-    try:
+    # Simulates real contention by actually holding the slot backtest_run()
+    # itself claims (not just the derived `backtest_active()` flag) — this
+    # is what makes the guard atomic instead of a racy check-then-set.
+    with backtest_run():
         with pytest.raises(RuntimeError, match="already in progress"):
             run_backtest(_default_request(), sf)
-    finally:
-        set_backtest_active(False)
 
 
 def test_backtest_leaves_position_open_when_no_exit_trigger_fires(sf) -> None:

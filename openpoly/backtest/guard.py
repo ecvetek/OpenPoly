@@ -25,14 +25,25 @@ The fix: a simple flag, held only for the (typically brief) duration of a
 replay, that the live decision paths check and skip on — fail-safe (treated
 as "no decision this tick"), not an error, mirroring how those paths already
 treat "no order book" / "no position upstream" as an ordinary skip.
+
+``backtest_run()`` below closes a narrower race the flag alone can't: two
+concurrent requests can both observe ``backtest_active()`` as False before
+either sets it True, then both proceed into ``engine.run_backtest``'s
+non-reentrant module-global store swap at the same time. A plain flag is
+fine for the live decision paths above (they only ever read it), but the
+one path that *claims* the slot needs the check-and-set to be a single
+atomic step, not a check then a separate set with a window in between.
 """
 
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 _lock = threading.Lock()
 _active = False
+_run_lock = threading.Lock()
 
 
 def set_backtest_active(active: bool) -> None:
@@ -44,3 +55,27 @@ def set_backtest_active(active: bool) -> None:
 def backtest_active() -> bool:
     with _lock:
         return _active
+
+
+class BacktestAlreadyRunning(RuntimeError):
+    """Raised by ``backtest_run()`` when another replay already holds the
+    slot. A ``RuntimeError`` subclass so existing ``pytest.raises
+    (RuntimeError, match="already in progress")`` call sites keep matching
+    unchanged."""
+
+
+@contextmanager
+def backtest_run() -> Iterator[None]:
+    """Atomically claim the backtest slot for the caller's duration and hold
+    ``backtest_active()`` True for it. Never blocks — raises
+    ``BacktestAlreadyRunning`` immediately if another replay already holds
+    the slot, since callers run in FastAPI's sync thread pool and must not
+    tie up a worker thread waiting on another (possibly long) replay."""
+    if not _run_lock.acquire(blocking=False):
+        raise BacktestAlreadyRunning("a backtest is already in progress")
+    try:
+        set_backtest_active(True)
+        yield
+    finally:
+        set_backtest_active(False)
+        _run_lock.release()
