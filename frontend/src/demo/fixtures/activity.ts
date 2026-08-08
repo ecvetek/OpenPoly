@@ -6,7 +6,6 @@
  *   - Positions → GET /api/positions, /api/fills
  *               → GET /api/positions/{id}      (detail)
  *               → POST /api/positions/close-all (mutation → toast)
- *               → GET /api/inspect/order-books/{token_id} (Inspector debug page)
  *               → GET /api/positions/{id}/price-history (detail chart)
  *   - News      → GET /api/inspect/news + the 4 section logs (pipeline join)
  *
@@ -31,12 +30,7 @@ import type {
   EntryDecision,
   NewsItem,
 } from '../../routes/activity/newsTypes'
-import type {
-  OrderBookHistory,
-  OrderBookSnapshot,
-  PositionPriceHistory,
-  PricePoint,
-} from '../../routes/activity/orderBookClient'
+import type { PositionPriceHistory, PricePoint } from '../../routes/activity/orderBookClient'
 import type { CloseAllResult } from '../../setting/walletStore'
 import type { DbStatus, OrderBookRow, WriterStats } from '../../sections/database/inspectStore'
 import type {
@@ -292,34 +286,6 @@ const healthDetail: HealthDetailResponse = {
     embedding: { status: 'ok', detail: { state: 'running' } },
     reconciliation: { status: 'disabled', detail: { reason: 'monitor not wired' } },
   },
-}
-
-// ---- order book history (Position detail) --------------------------------
-
-const OB_N = 16
-const OB_STEP = 1200
-
-function buildOrderBook(tokenId: string): OrderBookHistory {
-  const snapshots: OrderBookSnapshot[] = []
-  for (let i = 0; i < OB_N; i++) {
-    const recorded_at = NOW - (OB_N - 1 - i) * OB_STEP
-    const t = i / (OB_N - 1)
-    const mid = 0.42 + 0.19 * t + Math.sin(i / 2.5) * 0.012
-    const bid = round3(mid - 0.01)
-    const ask = round3(mid + 0.01)
-    snapshots.push({
-      recorded_at,
-      bids: [
-        [bid, 120 + i * 4],
-        [round3(bid - 0.01), 240],
-      ],
-      asks: [
-        [ask, 110 + i * 3],
-        [round3(ask + 0.01), 220],
-      ],
-    })
-  }
-  return { token_id: tokenId, count: snapshots.length, snapshots }
 }
 
 function round3(n: number): number {
@@ -658,11 +624,6 @@ export const activityRoutes: MockRoute[] = [
     },
   },
 
-  // Order book history for the detail chart (any token → same shaped curve).
-  {
-    pattern: /^\/api\/inspect\/order-books\/([^/]+)$/,
-    handler: (ctx) => buildOrderBook(decodeURIComponent(ctx.params[1])),
-  },
   // Order book snapshot list + database status (canvas Database section) and
   // the market catalog (canvas Market Source section) — the same routes the
   // real backend's inspector tabs read. Without these the canvas's default
