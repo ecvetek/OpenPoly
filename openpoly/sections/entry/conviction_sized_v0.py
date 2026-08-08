@@ -44,6 +44,7 @@ from openpoly.sections.entry.edge_threshold_v0 import OrderIntent
 
 if TYPE_CHECKING:
     from openpoly.portfolio import PortfolioStore
+    from openpoly.portfolio.models import PositionRecord
 
 
 Side = Literal["yes", "no"]
@@ -260,18 +261,39 @@ class ConvictionSizedEntryV0:
                             },
                         )
 
-                kill_skip = _kill_switch_check(portfolio, self.config, now=None)
-                if kill_skip is not None:
-                    reason, signals = kill_skip
-                    return SectionOutput(
-                        payload=None,
-                        verdict="skip",
-                        reason=reason,
-                        signals={"side": side, **signals},
-                    )
+                # Kill switches + lockout/cooldown all read the same
+                # list_positions(limit=500) slice — fetch it at most once per
+                # decision, and only when at least one of them is actually
+                # configured (a config with everything at its 0/off default
+                # shouldn't pay for a 500-row scan it has no use for).
+                kill_configured = (
+                    self.config.kill_max_consecutive_losses > 0
+                    or self.config.kill_daily_loss_usd > 0
+                    or self.config.kill_max_drawdown_usd > 0
+                )
+                lockout_configured = (
+                    self.config.same_market_lifetime_lockout
+                    or self.config.same_market_cooldown_minutes > 0
+                )
+                positions = (
+                    portfolio.list_positions(limit=500)
+                    if kill_configured or lockout_configured
+                    else []
+                )
+
+                if kill_configured:
+                    kill_skip = _kill_switch_check(positions, self.config, now=None)
+                    if kill_skip is not None:
+                        reason, signals = kill_skip
+                        return SectionOutput(
+                            payload=None,
+                            verdict="skip",
+                            reason=reason,
+                            signals={"side": side, **signals},
+                        )
 
                 if self.config.same_market_lifetime_lockout:
-                    if _market_side_has_history(portfolio, res.market_id, side):
+                    if _market_side_has_history(positions, res.market_id, side):
                         return SectionOutput(
                             payload=None,
                             verdict="skip",
@@ -280,7 +302,7 @@ class ConvictionSizedEntryV0:
                         )
                 elif self.config.same_market_cooldown_minutes > 0:
                     cooldown_min = self.config.same_market_cooldown_minutes
-                    if _in_cooldown(portfolio, res.market_id, side, cooldown_min):
+                    if _in_cooldown(positions, res.market_id, side, cooldown_min):
                         return SectionOutput(
                             payload=None,
                             verdict="skip",
@@ -384,17 +406,20 @@ def _multiplier_for(config: ConvictionSizedConfig, confidence: str) -> float:
 
 
 def _in_cooldown(
-    portfolio: "PortfolioStore",
+    positions: "list[PositionRecord]",
     market_id: str,
     side: Side,
     cooldown_minutes: int,
     now: float | None = None,
 ) -> bool:
     """True iff the most recent position on (market_id, side) was opened OR
-    closed within ``cooldown_minutes``. See edge_threshold_v0._in_cooldown for
-    the full scan-every-match rationale (duplicated here, not shared)."""
+    closed within ``cooldown_minutes``. ``positions`` is the caller's
+    already-fetched bounded slice (newest 500), shared with
+    ``_kill_switch_check``/``_market_side_has_history`` for the same
+    decision — see ``run()``. See edge_threshold_v0._in_cooldown for the
+    full scan-every-match rationale (duplicated here, not shared)."""
     cutoff_ts = (now if now is not None else time.time()) - cooldown_minutes * 60
-    for pos in portfolio.list_positions(limit=500):
+    for pos in positions:
         if pos.market_id != market_id or pos.side != side:
             continue
         ref_ts = pos.closed_at if pos.closed_at is not None else pos.opened_at
@@ -404,27 +429,31 @@ def _in_cooldown(
 
 
 def _market_side_has_history(
-    portfolio: "PortfolioStore",
+    positions: "list[PositionRecord]",
     market_id: str,
     side: Side,
 ) -> bool:
-    """True iff any prior position on (market_id, side) exists — open or
-    closed, no time window. Backs ``same_market_lifetime_lockout``."""
-    for pos in portfolio.list_positions(limit=500):
+    """True iff any prior position on (market_id, side) exists in
+    ``positions`` — open or closed, no time window. Backs
+    ``same_market_lifetime_lockout``. ``positions`` is the caller's
+    already-fetched bounded slice (newest 500), same as ``_in_cooldown``."""
+    for pos in positions:
         if pos.market_id == market_id and pos.side == side:
             return True
     return False
 
 
 def _kill_switch_check(
-    portfolio: "PortfolioStore",
+    positions: "list[PositionRecord]",
     config: "ConvictionSizedConfig",
     *,
     now: float | None = None,
 ) -> tuple[str, dict] | None:
     """A4 portfolio-wide circuit breakers — see edge_threshold_v0's version
-    for the full precedence rationale (consecutive → daily → drawdown)."""
-    positions = portfolio.list_positions(limit=500)
+    for the full precedence rationale (consecutive → daily → drawdown).
+    ``positions`` is the caller's already-fetched bounded slice (newest 500),
+    fetched at most once per decision and only when at least one gate
+    (kill switch or lockout/cooldown) is actually configured."""
     closed = [p for p in positions if p.closed_at is not None and p.realized_pnl is not None]
     if not closed:
         return None
