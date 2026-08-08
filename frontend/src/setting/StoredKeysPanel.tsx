@@ -6,6 +6,7 @@
  */
 import { useState } from 'react'
 
+import { isValidSecretName } from '../lib/refUtils'
 import { Card, GhostButton, PrimaryButton, inputCls, labelCls } from './atoms'
 import { useSecretsStore } from './secretsStore'
 
@@ -138,7 +139,8 @@ export function AddKeyModal({
   const [busy, setBusy] = useState(false)
 
   const trimmedName = name.trim()
-  const canSubmit = trimmedName !== '' && value !== '' && !busy
+  const nameValid = trimmedName === '' || isValidSecretName(trimmedName)
+  const canSubmit = trimmedName !== '' && nameValid && value !== '' && !busy
 
   async function submit() {
     if (!canSubmit) return
@@ -177,10 +179,17 @@ export function AddKeyModal({
             onChange={(e) => setName(e.target.value)}
             autoFocus
           />
-          <span className="text-[11px] text-neutral-500">
-            Allowed chars: letters, digits, <code>_</code>, <code>-</code>,{' '}
-            <code>/</code>.
-          </span>
+          {nameValid ? (
+            <span className="text-[11px] text-neutral-500">
+              Allowed chars: letters, digits, <code>_</code>, <code>-</code>,{' '}
+              <code>/</code>.
+            </span>
+          ) : (
+            <span className="text-[11px] text-red-300">
+              Only letters, digits, <code>_</code>, <code>-</code>, and{' '}
+              <code>/</code>-separated segments are allowed.
+            </span>
+          )}
         </label>
 
         <label className={labelCls}>
