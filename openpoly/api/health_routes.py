@@ -16,6 +16,7 @@ throughout ``wallet_routes.py`` and the source managers' own poll loops.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Callable
 
@@ -340,7 +341,12 @@ async def health_detail(
 ) -> HealthDetailResponse:
     checks = {
         "app": _safe_check(_check_app),
-        "database": _safe_check(lambda: _check_database(db_manager)),
+        # The only check backed by real DB I/O (ten COUNT(*) queries via
+        # DatabaseManager.status()) — offloaded to a worker thread so it
+        # can't block the event loop (and every other concurrent request)
+        # for its duration, same discipline as this file's own
+        # _check_market_access below.
+        "database": await asyncio.to_thread(_safe_check, lambda: _check_database(db_manager)),
         "market_feed": _safe_check(lambda: _check_market_feed(market_mgr)),
         "news_feed": _safe_check(lambda: _check_news_feed(news_mgr)),
         "pipeline": _safe_check(lambda: _check_pipeline(orchestrator)),
