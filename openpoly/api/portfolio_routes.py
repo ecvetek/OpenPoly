@@ -29,8 +29,9 @@ from openpoly.db.tables import (
     NewsItemRow,
 )
 from openpoly.execution import executor
+from openpoly.markets.catalog_lookup import lookup_market_identity
 from openpoly.markets.manager import manager as market_source_manager
-from openpoly.markets.models import Market, normalize_gamma_market, polymarket_url, resolved_side
+from openpoly.markets.models import Market, normalize_gamma_market, resolved_side
 from openpoly.markets.polymarket_api import (
     fetch_market_by_id,
     fetch_markets_by_condition_id,
@@ -78,9 +79,12 @@ def list_positions(
     ``news_id`` and ``analyzer_decisions`` are resolved via two bulk queries
     up front (not per-row) — this used to be up to 2 extra DB sessions per
     row (``news_id_for_position`` + a per-position analyzer_call lookup),
-    ~1000 short-lived sessions at ``limit=500``. market_question/
-    polymarket_url/unrealized_pnl stay per-row since those only touch the
-    live in-memory catalog, not the DB.
+    ~1000 short-lived sessions at ``limit=500``. ``market_question`` /
+    ``polymarket_url`` / ``market_end_date`` check the live in-memory catalog
+    first, falling back to the persisted ``market_catalog`` table (one shared
+    session for the whole loop, not one per row) for a market that's since
+    left live discovery — ``market_end_date`` stays ``None`` on that
+    fallback (not persisted); ``unrealized_pnl`` stays live-catalog-only.
     """
     rows = store.list_positions(_clamp(limit))
     news_by_position = store.news_ids_for_positions([r.id for r in rows])
@@ -90,22 +94,24 @@ def list_positions(
     signals_by_position = store.signals_for_positions([r.id for r in rows])
     now = time.time()
     positions: list[dict[str, Any]] = []
-    for record in rows:
-        body = asdict(record)
-        market = _lookup_market(record.condition_id)
-        body["market_question"] = market.question if market is not None else None
-        body["polymarket_url"] = polymarket_url(market)
-        body["market_end_date"] = (
-            market.end_date.timestamp() if market is not None and market.end_date else None
-        )
-        news_id = news_by_position.get(record.id)
-        body["news_id"] = news_id
-        body["analyzer_decisions"] = decisions_by_news.get(news_id, []) if news_id else []
-        body["unrealized_pnl"] = _unrealized_pnl(record)
-        signals = signals_by_position.get(record.id, [])
-        body["confluence"] = _confluence_for(record, signals, now)
-        body["news_signal_count"] = len(signals)
-        positions.append(body)
+    with factory() as session:
+        for record in rows:
+            body = asdict(record)
+            identity = lookup_market_identity(session, record.condition_id)
+            market = identity.market
+            body["market_question"] = identity.question
+            body["polymarket_url"] = identity.polymarket_url
+            body["market_end_date"] = (
+                market.end_date.timestamp() if market is not None and market.end_date else None
+            )
+            news_id = news_by_position.get(record.id)
+            body["news_id"] = news_id
+            body["analyzer_decisions"] = decisions_by_news.get(news_id, []) if news_id else []
+            body["unrealized_pnl"] = _unrealized_pnl(record)
+            signals = signals_by_position.get(record.id, [])
+            body["confluence"] = _confluence_for(record, signals, now)
+            body["news_signal_count"] = len(signals)
+            positions.append(body)
     return {"positions": positions}
 
 
@@ -213,10 +219,16 @@ def get_position_by_id(
     Augments the raw PositionRecord with several best-effort lookups so the
     PositionDetail UI doesn't have to fan out to additional endpoints:
 
-    - ``market_question`` / ``polymarket_url`` / ``market_end_date``: catalog
-      lookup by condition_id. All ``None`` when the market is no longer
-      catalogued (filtered out or resolved). UI falls back to displaying the
-      condition_id / a plain (non-link) label, and omits the expiry.
+    - ``market_question`` / ``polymarket_url``: live catalog lookup by
+      condition_id, falling back to the persisted ``market_catalog`` table
+      for a market that's since left live discovery (filtered out or
+      resolved) — ``None`` only if the market was never captured by any
+      poll. UI falls back to displaying the condition_id / a plain
+      (non-link) label.
+    - ``market_end_date``: same live-catalog lookup, but with no persisted
+      fallback (not a ``market_catalog`` column) — ``None`` whenever the
+      market has left live discovery, even if ``market_question`` resolved.
+      UI omits the expiry in that case.
     - ``news_id`` / ``news``: the news item that triggered this position.
       ``news_id`` is ``None`` for a paper/manual position with no news
       linkage. ``news`` (content/urgency/sentiment/published_at) is
@@ -259,9 +271,11 @@ def get_position_by_id(
     if record is None:
         raise HTTPException(status_code=404, detail="position not found")
     body = asdict(record)
-    market = _lookup_market(record.condition_id)
-    body["market_question"] = market.question if market is not None else None
-    body["polymarket_url"] = polymarket_url(market)
+    with factory() as session:
+        identity = lookup_market_identity(session, record.condition_id)
+    market = identity.market
+    body["market_question"] = identity.question
+    body["polymarket_url"] = identity.polymarket_url
     body["market_end_date"] = (
         market.end_date.timestamp() if market is not None and market.end_date else None
     )
@@ -296,9 +310,11 @@ async def _lookup_market_durable(market_id: str, condition_id: str) -> Market | 
     """Resolve a position's market even after it has fallen out of the live
     discovery catalog (near-expiry filtered, or resolved).
 
-    ``_lookup_market`` (below) only sees markets currently in the in-memory
-    catalog, which evicts a market well before expiry once a position closes
-    on it. This instead calls Gamma directly:
+    ``lookup_market_identity`` (``openpoly.markets.catalog_lookup``) only
+    checks the in-memory catalog and the persisted ``market_catalog``
+    identity table — sufficient for ``market_question``/``polymarket_url``,
+    but this endpoint also needs ``market_end_date``/resolution/winning
+    side, which aren't persisted there. This instead calls Gamma directly:
 
     1. ``fetch_market_by_id`` (bypasses the ``/events`` top-100 window, same
        call the holding-sync hook uses to keep open positions catalogued) —
@@ -523,15 +539,6 @@ async def get_position_price_history(
         "market_resolved": market_resolved,
         "winning_side": winning_side,
     }
-
-
-def _lookup_market(condition_id: str) -> Market | None:
-    """Resolve PositionRecord.condition_id → Market via the live catalog.
-    Best-effort: returns ``None`` when the market is no longer catalogued
-    (filtered or resolved). Callers derive ``market_question`` /
-    ``polymarket_url`` from this; frontend renders condition_id truncation
-    as fallback."""
-    return market_source_manager.store.get_by_condition(condition_id)
 
 
 def _lookup_analyzer_decisions(

@@ -137,3 +137,40 @@ def test_statistics_closed_positions_market_question_null_when_not_catalogued(en
     finally:
         msm.store = saved_store
     assert body["closed_positions"][0]["market_question"] is None
+
+
+def test_statistics_closed_positions_market_question_from_persisted_catalog_when_evicted(
+    env,
+) -> None:
+    """Market left the live catalog but was captured by an earlier poll
+    (persisted to market_catalog) → market_question still resolves via that
+    fallback, same as backtest results and /api/positions."""
+    from openpoly.db.market_catalog_store import upsert_market_catalog_row
+    from openpoly.markets.manager import manager as msm
+    from openpoly.markets.models import normalize_gamma_market
+    from openpoly.markets.store import MarketStore
+
+    store, client, factory = env
+    h = _open(store, "m1", ts=100.0)  # _open uses condition_id="0xm1"
+    store.close_position(h.position_id, sell_price=0.55, ts=200.0, close_reason="take_profit")
+    raw = {
+        "id": "m1",
+        "conditionId": "0xm1",
+        "question": "Will the U.S. invade Iran before 2027?",
+        "slug": "iran-2027",
+        "clobTokenIds": json.dumps(["yes-tok", "no-tok"]),
+    }
+    market = normalize_gamma_market(raw, event={"id": "e", "title": "E"})
+    with factory() as session:
+        upsert_market_catalog_row(session, market, now=1.0)
+        session.commit()
+
+    saved_store = msm.store
+    try:
+        msm.store = MarketStore()  # evicted from the live catalog
+        body = client.get("/api/statistics").json()
+    finally:
+        msm.store = saved_store
+    assert (
+        body["closed_positions"][0]["market_question"] == "Will the U.S. invade Iran before 2027?"
+    )

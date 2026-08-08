@@ -26,28 +26,11 @@ from openpoly.backtest.engine import BacktestRequest as ReplayRequest
 from openpoly.backtest.engine import run_backtest
 from openpoly.backtest.guard import BacktestAlreadyRunning, backtest_active
 from openpoly.db.engine import get_session_factory
-from openpoly.db.history_query import market_catalog_row_by_condition_id
-from openpoly.markets.manager import manager as market_source_manager
+from openpoly.markets.catalog_lookup import lookup_market_identity
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
-
-
-def _lookup_market_question(session: Session, condition_id: str) -> str | None:
-    """Live catalog first (same pattern as statistics_routes.py's own
-    duplicate of portfolio_routes._lookup_market — module-private, so not
-    imported across route modules), falling back to the persisted
-    market_catalog table. A backtest position can reference a market that's
-    no longer live (that's the whole point of the persisted-catalog
-    fallback in historical_store.py) — without this fallback here too, its
-    question would silently go missing from the results table even though
-    the replay itself resolved it correctly."""
-    live = market_source_manager.store.get_by_condition(condition_id)
-    if live is not None:
-        return live.question
-    row = market_catalog_row_by_condition_id(session, condition_id)
-    return row.question if row is not None else None
 
 
 # A backtest walks indexed point-queries over persisted history — cheap per
@@ -136,7 +119,7 @@ def run(
     with factory() as session:
         for record in stats.closed_positions:
             row = asdict(record)
-            row["market_question"] = _lookup_market_question(session, record.condition_id)
+            row["market_question"] = lookup_market_identity(session, record.condition_id).question
             closed_positions.append(row)
     return {
         "since": stats.since,
