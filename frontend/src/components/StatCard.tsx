@@ -4,7 +4,6 @@ export function StatCard({
   tone,
   sub,
   pctValue,
-  pctTone,
   size = 'default',
 }: {
   label: string
@@ -16,7 +15,6 @@ export function StatCard({
   // Separate from `sub`, which is muted/uncolored and used for plain
   // context text ("opened in range").
   pctValue?: string
-  pctTone?: string
   // 'lg' bumps the value/label type up a notch for glance-from-a-distance
   // contexts (the Live TV dashboard's hero row). Defaults to the original
   // sizing so every existing call site is unaffected.
@@ -34,7 +32,7 @@ export function StatCard({
       >
         {value}
         {pctValue !== undefined && (
-          <span className={`ml-1.5 text-xs font-mono ${pctTone ?? tone}`}>
+          <span className={`ml-1.5 text-xs font-mono ${tone}`}>
             ({pctValue})
           </span>
         )}
