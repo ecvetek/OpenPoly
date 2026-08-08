@@ -129,3 +129,62 @@ def test_ensure_entry_decision_live_columns_migrates_old_db(tmp_path) -> None:
     with engine.begin() as conn:
         cols = {r[1] for r in conn.execute(text("PRAGMA table_info(entry_decision)")).fetchall()}
     assert "signals_json" in cols
+
+
+def test_ensure_indexes_migrates_old_db(tmp_path) -> None:
+    """Old DB with only the pre-migration schema (market_catalog.condition_id
+    unindexed, order_book_snapshot indexed on token_id alone): migration adds
+    the condition_id index, replaces the standalone token_id index with the
+    composite (token_id, recorded_at) one, and is idempotent."""
+    from sqlalchemy import inspect
+    from openpoly.db.manager import _ensure_indexes
+
+    engine = make_engine(f"sqlite:///{tmp_path}/x.db")
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+            CREATE TABLE market_catalog (
+                market_id VARCHAR PRIMARY KEY,
+                condition_id VARCHAR NOT NULL,
+                question VARCHAR NOT NULL,
+                slug VARCHAR NOT NULL,
+                yes_token_id VARCHAR NOT NULL,
+                no_token_id VARCHAR,
+                neg_risk BOOLEAN NOT NULL,
+                first_seen_at FLOAT NOT NULL,
+                last_seen_at FLOAT NOT NULL
+            )
+        """)
+        )
+        conn.execute(
+            text("""
+            CREATE TABLE order_book_snapshot (
+                id INTEGER PRIMARY KEY,
+                token_id VARCHAR NOT NULL,
+                recorded_at FLOAT NOT NULL,
+                bids_json TEXT NOT NULL,
+                asks_json TEXT NOT NULL
+            )
+        """)
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_order_book_snapshot_token_id "
+                "ON order_book_snapshot (token_id)"
+            )
+        )
+
+    def index_names(table: str) -> set[str]:
+        return {idx["name"] for idx in inspect(engine).get_indexes(table)}
+
+    assert index_names("market_catalog") == set()
+    assert index_names("order_book_snapshot") == {"ix_order_book_snapshot_token_id"}
+
+    _ensure_indexes(engine)
+    assert index_names("market_catalog") == {"ix_market_catalog_condition_id"}
+    assert index_names("order_book_snapshot") == {"ix_order_book_snapshot_token_recorded"}
+
+    # Second run is a no-op, not an error.
+    _ensure_indexes(engine)
+    assert index_names("market_catalog") == {"ix_market_catalog_condition_id"}
+    assert index_names("order_book_snapshot") == {"ix_order_book_snapshot_token_recorded"}

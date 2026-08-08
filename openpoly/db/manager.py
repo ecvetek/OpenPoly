@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 from typing import Any
 
 from pydantic import BaseModel
@@ -93,6 +94,38 @@ def _ensure_analyzer_call_live_columns(engine: Engine) -> None:
             logger.info("migration: added analyzer_call.self_check")
 
 
+def _ensure_indexes(engine: Engine) -> None:
+    """Idempotent migration: add/replace indexes for older DBs (new DBs get
+    the current schema via init_db()'s create_all and skip this entirely).
+    SQLite's CREATE/DROP INDEX IF EXISTS make this safe to re-run every
+    startup, same discipline as the _ensure_*_live_columns migrations above.
+
+    - market_catalog.condition_id: was unindexed, so every persisted-catalog
+      fallback lookup (backtest_routes.py / portfolio_routes.py /
+      statistics_routes.py, via market_catalog_row_by_condition_id) was a
+      full-table scan against a table documented to grow unboundedly.
+    - order_book_snapshot: replaces the old standalone token_id index with a
+      composite (token_id, recorded_at) index matching the actual filter
+      shape of every real query against this table (token_id equality +
+      recorded_at comparison/order) — the standalone index is superseded via
+      the leftmost-prefix rule, not just left redundant.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_market_catalog_condition_id "
+                "ON market_catalog (condition_id)"
+            )
+        )
+        conn.execute(text("DROP INDEX IF EXISTS ix_order_book_snapshot_token_id"))
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_order_book_snapshot_token_recorded "
+                "ON order_book_snapshot (token_id, recorded_at)"
+            )
+        )
+
+
 class DatabaseConfig(BaseModel):
     """Config for the ``database`` section.
 
@@ -108,6 +141,12 @@ class DatabaseManager:
     ``database`` section; ``status`` powers its inspector.
     """
 
+    # status() is polled by both /api/inspect/db-status (Tables tab, every
+    # 5s) and /api/health/detail — a short TTL cache on the ten-COUNT(*)
+    # scan avoids paying for it twice when both land close together, without
+    # meaningfully staling numbers that are themselves just a display.
+    _TABLE_COUNTS_CACHE_TTL_SECONDS = 5.0
+
     def __init__(self) -> None:
         self._engine: Engine | None = None
         self._book_writer: WriteBehindWriter | None = None
@@ -118,6 +157,8 @@ class DatabaseManager:
         self._exit_decision_writer: WriteBehindWriter | None = None
         self._settlement_decision_writer: WriteBehindWriter | None = None
         self._market_catalog_writer: WriteBehindWriter | None = None
+        self._table_counts_cache: dict[str, int] | None = None
+        self._table_counts_cached_at: float = 0.0
 
     # ---------- lifecycle ----------
 
@@ -131,6 +172,7 @@ class DatabaseManager:
         _ensure_fill_live_columns(self._engine)
         _ensure_entry_decision_live_columns(self._engine)
         _ensure_analyzer_call_live_columns(self._engine)
+        _ensure_indexes(self._engine)
         factory = make_session_factory(self._engine)
         self._book_writer = WriteBehindWriter(make_order_book_sink(factory))
         self._news_writer = WriteBehindWriter(make_news_sink(factory))
@@ -249,6 +291,18 @@ class DatabaseManager:
     def _table_counts(self) -> dict[str, int]:
         if self._engine is None:
             return {}
+        now = time.monotonic()
+        if (
+            self._table_counts_cache is not None
+            and now - self._table_counts_cached_at < self._TABLE_COUNTS_CACHE_TTL_SECONDS
+        ):
+            return self._table_counts_cache
+        counts = self._query_table_counts()
+        self._table_counts_cache = counts
+        self._table_counts_cached_at = now
+        return counts
+
+    def _query_table_counts(self) -> dict[str, int]:
         with make_session_factory(self._engine)() as session:
             return {
                 "order_book_snapshot": session.execute(

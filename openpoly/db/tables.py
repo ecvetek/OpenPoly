@@ -35,7 +35,12 @@ class MarketCatalogRow(Base):
     __tablename__ = "market_catalog"
 
     market_id: Mapped[str] = mapped_column(primary_key=True)
-    condition_id: Mapped[str]
+    # Indexed: market_catalog_row_by_condition_id (db/history_query.py) is
+    # the persisted-catalog fallback backtest_routes.py / portfolio_routes.py
+    # / statistics_routes.py all resolve a position's market through — an
+    # unindexed lookup here is a full-table scan on every one of those calls,
+    # against a table that's documented above as growing unboundedly.
+    condition_id: Mapped[str] = mapped_column(index=True)
     question: Mapped[str]
     slug: Mapped[str]
     yes_token_id: Mapped[str]
@@ -54,9 +59,20 @@ class OrderBookSnapshot(Base):
     """
 
     __tablename__ = "order_book_snapshot"
+    __table_args__ = (
+        # Every real query against this table (order_book_at_or_before,
+        # order_book_snapshots_for_token, the inspect route's per-token
+        # history) filters token_id equality + a recorded_at comparison or
+        # order — the ideal shape for one composite index, which also serves
+        # a bare token_id filter via the leftmost-prefix rule. Supersedes a
+        # standalone index on token_id alone (removed below), highest-volume,
+        # never-pruned table (order_book history persists forever) and now
+        # also the backtest replay's hot path.
+        Index("ix_order_book_snapshot_token_recorded", "token_id", "recorded_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    token_id: Mapped[str] = mapped_column(index=True)
+    token_id: Mapped[str]
     recorded_at: Mapped[float]  # epoch seconds, UTC (the OrderBook.ts)
     bids_json: Mapped[str]
     asks_json: Mapped[str]
