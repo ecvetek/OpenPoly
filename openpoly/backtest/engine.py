@@ -53,6 +53,7 @@ from openpoly.backtest.portfolio import BacktestPortfolio
 from openpoly.db.history_query import analyzer_calls_in_range, order_book_snapshots_for_token
 from openpoly.execution.executor import PaperExecutor
 from openpoly.markets.manager import manager as market_source_manager
+from openpoly.portfolio.models import QTY_EPS
 from openpoly.portfolio.statistics import StatisticsResult, aggregate_closed_positions
 from openpoly.sections._base import SectionInput
 from openpoly.sections._registry import resolve_impl
@@ -60,8 +61,6 @@ from openpoly.sections.analyzer.llm_v0 import AnalysisResult
 from openpoly.sections.entry import conviction_sized_v0, edge_threshold_v0
 from openpoly.sections.entry.edge_threshold_v0 import OrderIntent
 from openpoly.sections.exit.threshold_v0 import CloseIntent, MarkedPosition
-
-_QTY_EPS = 1e-6  # mirrors portfolio.store._QTY_EPS / runtime.exit_monitor._QTY_EPS
 
 # The late-buy veto's recent_move is a raw Polymarket API call, not routed
 # through MarketStore — swapping the store global doesn't intercept it.
@@ -284,7 +283,7 @@ def _replay_exits(
                 qty=intent.qty,
             )
             if result.filled and result.qty is not None:
-                position_closed = result.qty >= held.qty - _QTY_EPS
+                position_closed = result.qty >= held.qty - QTY_EPS
                 if position_closed:
                     peaks.pop(held.position_id, None)
                     scaled_out.pop(held.position_id, None)

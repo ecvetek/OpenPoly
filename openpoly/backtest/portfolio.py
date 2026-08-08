@@ -10,10 +10,15 @@ real gating logic and the real ``PaperExecutor`` fill model, not a second
 hand-rolled approximation of either.
 
 Mirrors ``PortfolioStore.record_sell``'s exact close-or-reduce semantics
-(same epsilon, same realized-PnL accrual) — duplicated rather than imported,
-matching this codebase's existing convention for keeping a read-side/
-simulation module independent of the live store's internals (see
-``portfolio/statistics.py``'s own duplicated ``_to_record``).
+(same realized-PnL accrual) — duplicated rather than imported, matching this
+codebase's existing convention for keeping a read-side/simulation module
+independent of the live store's internals (see ``portfolio/statistics.py``'s
+own duplicated ``_to_record``). The close-or-reduce epsilon itself
+(``QTY_EPS``) is imported from ``portfolio.models`` rather than
+re-duplicated — that's the shared domain-constants module this file already
+depends on for ``Side``/``CloseReason``/etc., not the live store's
+internals, so importing it doesn't reintroduce the coupling this module is
+otherwise built to avoid.
 
 Synthetic position ids start at -1 and count down, so they can never collide
 with a real ``PositionRow.id`` (SQLite autoincrement starts at 1) even if a
@@ -26,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from openpoly.portfolio.models import (
+    QTY_EPS,
     CloseReason,
     HeldPosition,
     PositionRecord,
@@ -33,8 +39,6 @@ from openpoly.portfolio.models import (
     Relation,
     Side,
 )
-
-_QTY_EPS = 1e-6  # mirrors portfolio.store._QTY_EPS
 
 
 @dataclass
@@ -107,7 +111,7 @@ class BacktestPortfolio:
             raise ValueError(f"position {position_id} is {pos.status}, not open")
         sold = min(sold_qty, pos.qty)
         pos.realized_pnl = (pos.realized_pnl or 0.0) + (sell_price - pos.avg_entry_price) * sold
-        if pos.qty - sold <= _QTY_EPS:
+        if pos.qty - sold <= QTY_EPS:
             pos.status = "closed"
             pos.closed_at = ts
             pos.close_reason = close_reason

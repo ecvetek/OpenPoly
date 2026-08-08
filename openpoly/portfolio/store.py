@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from openpoly.db.tables import FillRow, PositionRow, PositionSignalRow
 from openpoly.portfolio.models import (
+    QTY_EPS,
     CloseReason,
     Fill,
     HeldPosition,
@@ -25,10 +26,6 @@ from openpoly.portfolio.models import (
     Relation,
     Side,
 )
-
-# A residual qty at or below this (Polymarket sizes are ≤6 decimals) counts as
-# fully sold — closes the position rather than leaving a dust remainder open.
-_QTY_EPS = 1e-6
 
 
 def _to_held(row: PositionRow) -> HeldPosition:
@@ -244,7 +241,7 @@ class PortfolioStore:
                 )
             )
             pos.realized_pnl = (pos.realized_pnl or 0.0) + (sell_price - pos.avg_entry_price) * sold
-            if pos.qty - sold <= _QTY_EPS:
+            if pos.qty - sold <= QTY_EPS:
                 pos.status = "closed"
                 pos.closed_at = ts
                 pos.close_reason = close_reason

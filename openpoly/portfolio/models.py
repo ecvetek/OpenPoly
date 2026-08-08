@@ -14,6 +14,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+# A residual qty at or below this (Polymarket sizes are ≤6 decimals) counts as
+# fully sold/closed rather than leaving a dust remainder open — the single
+# "close vs. reduce" threshold every close-vs-partial comparison in the
+# codebase must agree on. Previously four independently-defined copies
+# (portfolio.store, backtest.portfolio, backtest.engine,
+# runtime.exit_monitor) that a future tuning change could silently diverge.
+QTY_EPS = 1e-6
+
 Side = Literal["yes", "no"]
 Action = Literal["buy", "sell"]
 Status = Literal["open", "closed"]

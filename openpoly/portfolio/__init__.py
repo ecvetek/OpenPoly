@@ -2,6 +2,7 @@
 and the synchronous transactional store over them."""
 
 from openpoly.portfolio.models import (
+    QTY_EPS,
     Action,
     CloseReason,
     ConfluenceState,
@@ -16,6 +17,7 @@ from openpoly.portfolio.models import (
 from openpoly.portfolio.store import PortfolioStore
 
 __all__ = [
+    "QTY_EPS",
     "Action",
     "CloseReason",
     "ConfluenceState",

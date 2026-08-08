@@ -41,7 +41,7 @@ from openpoly.execution import ExecResult
 from openpoly.execution import executor as _executor_singleton
 from openpoly.markets.manager import manager as market_source_manager
 from openpoly.markets.store import MarketStore
-from openpoly.portfolio import HeldPosition, PortfolioStore, PositionSignal
+from openpoly.portfolio import QTY_EPS, HeldPosition, PortfolioStore, PositionSignal
 from openpoly.runtime.section_log import ExitDecision, exit_log
 from openpoly.sections._base import SectionInput, SectionOutput
 from openpoly.sections.exit.threshold_v0 import (
@@ -55,10 +55,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TICK_INTERVAL_SECONDS = 30  # matches ThresholdExitConfig's own default
 TICK_EVENT_RING_MAXLEN = 200  # mirrors markets.manager.EVENT_RING_MAXLEN
-# Mirrors portfolio.store._QTY_EPS — same "close vs. reduce" epsilon
-# record_sell uses, applied here to decide whether a fill actually closed
-# the position (drop tracked state) or just reduced it (keep tracking).
-_QTY_EPS = 1e-6
 
 State = Literal["stopped", "running"]
 
@@ -479,7 +475,7 @@ class ExitMonitor:
             # it's ACTUALLY gone; popping peak/scaled_out on a still-open
             # remainder would lose exactly the state the post-scale-out phase
             # needs, and re-arm a scale-out that already fired.
-            position_closed = filled_qty >= held.qty - _QTY_EPS
+            position_closed = filled_qty >= held.qty - QTY_EPS
             if position_closed:
                 self._peak.pop(held.position_id, None)
                 self._scaled_out.pop(held.position_id, None)
