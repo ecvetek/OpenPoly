@@ -118,7 +118,7 @@ def get_wallet_config() -> WalletConfigResponse:
     else:
         try:
             signer = _derive_signer_address(pk)
-        except (ValueError, Exception) as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.warning("signer derivation failed during GET: %s", exc)
             err = "bad_private_key"
     return WalletConfigResponse(
