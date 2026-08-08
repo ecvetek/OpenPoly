@@ -23,9 +23,16 @@ async function fetchJSON<T>(url: string): Promise<T> {
   return (await r.json()) as T
 }
 
+// LIMIT_MAX on GET /api/positions (openpoly/api/portfolio_routes.py) — the
+// route returns open+closed newest-first, unbounded by `limit` otherwise
+// defaults to 100, so an open position older than the 100 most recent rows
+// overall could silently drop off this page's Open tab without this. Same
+// fix as routes/live/liveClient.ts's POSITIONS_LIMIT.
+const POSITIONS_LIMIT = 500
+
 async function fetchPositionsData(): Promise<PositionsData> {
   const [p, f] = await Promise.all([
-    fetchJSON<{ positions: PositionRecord[] }>('/api/positions'),
+    fetchJSON<{ positions: PositionRecord[] }>(`/api/positions?limit=${POSITIONS_LIMIT}`),
     fetchJSON<{ fills: Fill[] }>('/api/fills'),
   ])
   return { positions: p.positions, fills: f.fills }
