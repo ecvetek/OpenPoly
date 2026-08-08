@@ -63,7 +63,12 @@ class ConvictionSizedConfig(BaseModel):
         default=0.02,
         ge=0.0,
         le=0.2,
-        description="Reserved — dormant under the level-1 fill model (v1).",
+        description=(
+            "How far the book may move against this decision before fill "
+            "time (fraction of price). Paper rejects the fill if the "
+            "current ask exceeds price * (1 + this); live widens its limit "
+            "order by the same amount so it can still cross a moved book."
+        ),
     )
     side_lock: bool = Field(
         default=False,
@@ -349,7 +354,13 @@ class ConvictionSizedEntryV0:
         signals["confidence"] = res.confidence
         signals["size_multiplier"] = multiplier
         qty = (self.config.order_size_usd * multiplier) / held_price
-        intent = OrderIntent(market_id=res.market_id, side=side, price=held_price, qty=qty)
+        intent = OrderIntent(
+            market_id=res.market_id,
+            side=side,
+            price=held_price,
+            qty=qty,
+            slippage_tolerance=self.config.slippage_tolerance,
+        )
         return SectionOutput(payload=intent, verdict="ok", signals=signals)
 
     @staticmethod

@@ -61,12 +61,22 @@ class OrderIntent:
 
     ``price`` is the level-1 ask the section saw; the executor re-reads the live
     book at fill time and is authoritative on the actual fill price / qty.
+
+    ``slippage_tolerance`` bounds how far the book is allowed to have moved
+    against this decision by fill time (fraction of ``price``, e.g. ``0.02``
+    = 2%) — ``PaperExecutor`` rejects the fill outright if the current ask
+    exceeds ``price * (1 + slippage_tolerance)``; ``LiveExecutor`` submits its
+    limit order at that widened price instead of bare ``price``, so a GTC
+    order crossing the spread can still fill a book that moved slightly since
+    the decision, without risking an unbounded worse price. Defaults to 0.0
+    (no tolerance — reject/never-widen) for any caller that doesn't set it.
     """
 
     market_id: str
     side: Side
     price: float
     qty: float
+    slippage_tolerance: float = 0.0
 
 
 class EdgeThresholdConfig(BaseModel):
@@ -77,7 +87,12 @@ class EdgeThresholdConfig(BaseModel):
         default=0.02,
         ge=0.0,
         le=0.2,
-        description="Reserved — dormant under the level-1 fill model (v1).",
+        description=(
+            "How far the book may move against this decision before fill "
+            "time (fraction of price). Paper rejects the fill if the "
+            "current ask exceeds price * (1 + this); live widens its limit "
+            "order by the same amount so it can still cross a moved book."
+        ),
     )
     side_lock: bool = Field(
         default=False,
@@ -382,7 +397,13 @@ class EdgeThresholdEntryV0:
                     )
 
         qty = self.config.order_size_usd / held_price
-        intent = OrderIntent(market_id=res.market_id, side=side, price=held_price, qty=qty)
+        intent = OrderIntent(
+            market_id=res.market_id,
+            side=side,
+            price=held_price,
+            qty=qty,
+            slippage_tolerance=self.config.slippage_tolerance,
+        )
         return SectionOutput(payload=intent, verdict="ok", signals=signals)
 
     @staticmethod

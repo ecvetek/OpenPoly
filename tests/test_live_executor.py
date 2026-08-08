@@ -125,8 +125,10 @@ def _populate(market, *books: OrderBook) -> None:
     s.set_order_books(list(books))
 
 
-def _intent(market_id="m1", side="yes", price=0.5, qty=10.0) -> OrderIntent:
-    return OrderIntent(market_id=market_id, side=side, price=price, qty=qty)
+def _intent(market_id="m1", side="yes", price=0.5, qty=10.0, slippage_tolerance=0.0) -> OrderIntent:
+    return OrderIntent(
+        market_id=market_id, side=side, price=price, qty=qty, slippage_tolerance=slippage_tolerance
+    )
 
 
 # ---------- execute_buy ----------
@@ -187,6 +189,42 @@ def test_buy_quantizes_fractional_qty_down(store) -> None:
     le = LiveExecutor(portfolio=store, clob_client=clob)
     le.execute_buy(_intent(qty=5.56, price=0.50), news_id="n", ts=1.0)
     assert clob.posted[0]["order_args"].size == 5.0
+
+
+def test_buy_widens_limit_price_by_slippage_tolerance(store) -> None:
+    """price=0.50 with a 2% tolerance submits a limit order at 0.51, not the
+    bare decision price — gives a GTC order room to cross a book that moved
+    slightly since the entry section decided, without an unbounded worse
+    price. Quantization/notional and a lost-response fallback all use the
+    same widened price, not the original."""
+    m = _market("m1")
+    _populate(m)
+    clob = _FakeClob(
+        order_response={
+            "success": True,
+            "orderID": "0xORDER",
+            "status": "matched",
+            "makingAmount": "5.1",
+            "takingAmount": "10.0",
+            "transactionsHashes": ["0xTX"],
+        }
+    )
+    le = LiveExecutor(portfolio=store, clob_client=clob)
+    le.execute_buy(_intent(price=0.50, qty=10.0, slippage_tolerance=0.02), news_id="n", ts=1.0)
+    assert clob.posted[0]["order_args"].price == pytest.approx(0.51)
+
+
+def test_buy_zero_tolerance_submits_bare_price(store) -> None:
+    """slippage_tolerance defaults to 0.0 — matches every other call site in
+    this file that doesn't pass it, and existing single-value assertions
+    throughout this module depend on the limit price equaling intent.price
+    unchanged when tolerance is 0."""
+    m = _market("m1")
+    _populate(m)
+    clob = _FakeClob()
+    le = LiveExecutor(portfolio=store, clob_client=clob)
+    le.execute_buy(_intent(price=0.50, qty=10.0), news_id="n", ts=1.0)
+    assert clob.posted[0]["order_args"].price == 0.50
 
 
 def test_buy_market_not_in_catalog_skips(store) -> None:

@@ -67,8 +67,10 @@ def _populate(market, *books: OrderBook) -> None:
     s.set_order_books(list(books))
 
 
-def _intent(market_id: str = "m1", side: str = "yes", qty: float = 20.0) -> OrderIntent:
-    return OrderIntent(market_id=market_id, side=side, price=0.42, qty=qty)
+def _intent(
+    market_id: str = "m1", side: str = "yes", qty: float = 20.0, price: float = 0.42
+) -> OrderIntent:
+    return OrderIntent(market_id=market_id, side=side, price=price, qty=qty)
 
 
 # ---------- execute_buy ----------
@@ -97,6 +99,29 @@ def test_buy_dust_skip(store) -> None:
     r = Executor(store).execute_buy(_intent(qty=1.0), news_id="n1", ts=1.0)
     assert not r.filled
     assert r.skip_reason == "dust"
+
+
+def test_buy_rejects_when_ask_moved_beyond_slippage_tolerance(store) -> None:
+    """The book moved to 0.50 since the section's decision at 0.42; a 2%
+    tolerance (max acceptable ask 0.4284) doesn't cover that — reject rather
+    than fill at a materially worse price than the section decided on."""
+    _populate(_market(), _book("yes-m1", ask=0.50))
+    intent = OrderIntent(market_id="m1", side="yes", price=0.42, qty=20.0, slippage_tolerance=0.02)
+    r = Executor(store).execute_buy(intent, news_id="n1", ts=1.0)
+    assert not r.filled
+    assert r.skip_reason == "slippage_exceeded"
+    assert store.get_open_position("m1", "yes") is None
+
+
+def test_buy_fills_within_slippage_tolerance_at_actual_ask(store) -> None:
+    """Book moved from 0.42 to 0.43 — within a 5% tolerance (max 0.441) — so
+    the fill proceeds, still priced at the real current ask (0.43), not the
+    stale decision price."""
+    _populate(_market(), _book("yes-m1", ask=0.43))
+    intent = OrderIntent(market_id="m1", side="yes", price=0.42, qty=20.0, slippage_tolerance=0.05)
+    r = Executor(store).execute_buy(intent, news_id="n1", ts=1.0)
+    assert r.filled
+    assert r.price == 0.43
 
 
 def test_buy_position_exists_skip(store) -> None:
@@ -230,7 +255,9 @@ def test_buy_no_token_skip(store) -> None:
 
 def test_buy_no_side_reads_no_token_book(store) -> None:
     _populate(_market(), _book("yes-m1", ask=0.42), _book("no-m1", ask=0.55))
-    r = Executor(store).execute_buy(_intent(side="no", qty=20.0), news_id="n1", ts=1.0)
+    r = Executor(store).execute_buy(
+        _intent(side="no", qty=20.0, price=0.55), news_id="n1", ts=1.0
+    )
     assert r.filled
     assert r.price == 0.55  # the NO token's own book, not a flipped YES book
     held = store.get_open_position("m1", "no")

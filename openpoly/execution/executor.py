@@ -4,9 +4,11 @@ A fixed system service (not a pluggable section): it turns an entry
 ``OrderIntent`` or an exit close decision into an actual fill, recorded through
 ``PortfolioStore``. The fill model is deliberately crude — it takes the order
 book's level-1 price (BUY at the best ask, SELL at the best bid) and caps a buy
-by that level's depth. No walk-book, no slippage model, no fees (zero-fee
-rule). At micro-stakes ($5-$50) an order rarely walks past level 1, so this is
-not worth more.
+by that level's depth. No walk-book, no fees (zero-fee rule). At micro-stakes
+($5-$50) an order rarely walks past level 1, so this is not worth more. The
+one exception is ``OrderIntent.slippage_tolerance`` — a buy is rejected
+outright (not filled at a worse price) if the current ask has moved beyond
+that tolerance since the entry section's decision; see ``execute_buy``.
 
 Entry and exit share this one executor so their accounting is symmetric. It
 reads the live ``MarketStore`` singleton directly (same pattern as the
@@ -73,7 +75,10 @@ class PaperExecutor:
 
         Skips (nothing opened) when a position on this market is already open —
         on either side — when the market / order book / ask liquidity is
-        missing, or when the fill notional rounds to dust.
+        missing, when the current ask has moved beyond
+        ``intent.slippage_tolerance`` of ``intent.price`` (``slippage_exceeded``
+        — never fills at a worse price than the entry section tolerated), or
+        when the fill notional rounds to dust.
 
         A skip on an existing position is not a dead end: the decision is
         attached to that position as a news-confluence signal (``reinforce``
@@ -135,6 +140,8 @@ class PaperExecutor:
             return ExecResult.skip("no_ask_liquidity")
 
         ask_price, ask_size = book.asks[0]
+        if ask_price > intent.price * (1 + intent.slippage_tolerance):
+            return ExecResult.skip("slippage_exceeded")
         qty = min(intent.qty, ask_size)
         if qty * ask_price < MIN_FILL_USD:
             return ExecResult.skip("dust")

@@ -281,11 +281,21 @@ class LiveExecutor:
         if token_id is None:
             return ExecResult.skip("no_token")
 
+        # Widen the limit by the entry section's tolerance rather than
+        # submitting bare intent.price: the book can move between the
+        # section's decision and this order reaching the exchange (real
+        # latency — orchestration hops, balance-allowance refresh below), and
+        # a GTC order at the stale price would simply sit unfilled instead of
+        # crossing a slightly-moved spread. Still bounded — never worse than
+        # intent.price * (1 + slippage_tolerance), same tolerance
+        # PaperExecutor.execute_buy rejects a fill beyond.
+        limit_price = intent.price * (1 + intent.slippage_tolerance)
+
         # Quantize qty + check min notional against server rules verified
         # 2026-05-24. Both are pre-flight: cheaper to skip locally than to
         # eat a 400 round-trip + clutter logs with rejections.
-        size = _quantize_buy_size(intent.qty, intent.price)
-        notional = size * intent.price
+        size = _quantize_buy_size(intent.qty, limit_price)
+        notional = size * limit_price
         if notional < _MIN_NOTIONAL_PUSD:
             return ExecResult.skip("min_notional_below_floor")
 
@@ -311,7 +321,7 @@ class LiveExecutor:
             resp = self._clob.create_and_post_order(
                 order_args=OrderArgs(
                     token_id=token_id,
-                    price=intent.price,
+                    price=limit_price,
                     size=size,
                     side=Side.BUY,
                 ),
@@ -335,14 +345,14 @@ class LiveExecutor:
                     "recording fill at limit price %.4f",
                     type(exc).__name__,
                     actual_qty,
-                    intent.price,
+                    limit_price,
                 )
                 return self._persist_buy(
                     market_id=intent.market_id,
                     side=intent.side,
                     token_id=token_id,
                     condition_id=market.condition_id,
-                    price=intent.price,
+                    price=limit_price,
                     qty=actual_qty,
                     ts=ts,
                     news_id=news_id,
