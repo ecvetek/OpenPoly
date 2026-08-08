@@ -21,6 +21,15 @@ runs. The hard one-position-per-(market, side) invariant is still enforced by
 the executor + the DB partial unique index; the cooldown is the *soft* gate
 that also catches recently-closed positions.
 
+All of the portfolio-risk gates (``side_lock``, ``heat_cap_usd``, the A4 kill
+switches, ``same_market_cooldown_minutes`` / ``same_market_lifetime_lockout``)
+are bypassed when this market already has an open position on either side —
+see the "News-confluence bypass" comment in ``run()``. Those gates protect
+against deploying NEW capital; an already-open position means no new capital
+is at stake, and the decision needs to reach the executor regardless so it can
+attach to that position's news-confluence ledger
+(``openpoly.portfolio.confluence``) as a reinforce/contradict signal.
+
 When ``veto_enabled``, ``run()`` also does a late-buy veto — a CLOB
 ``/prices-history`` fetch — so the orchestrator offloads it to a worker thread.
 """
@@ -70,7 +79,14 @@ class EdgeThresholdConfig(BaseModel):
         le=0.2,
         description="Reserved — dormant under the level-1 fill model (v1).",
     )
-    side_lock: bool = Field(default=False, description="Lock to YES only; never buy NO.")
+    side_lock: bool = Field(
+        default=False,
+        description=(
+            "Lock to YES only; never buy NO. Bypassed when this market "
+            "already has an open position (either side) — see the module "
+            "docstring's News-confluence bypass note."
+        ),
+    )
     veto_enabled: bool = Field(
         default=False,
         description=(
@@ -102,7 +118,8 @@ class EdgeThresholdConfig(BaseModel):
             "opened or closed within this many minutes. 0 disables the "
             "check. Targets the repeated-loss-on-same-market pattern. "
             "Superseded by ``same_market_lifetime_lockout`` when that is "
-            "True."
+            "True. Bypassed when this market already has an open position "
+            "on either side — see the module docstring."
         ),
     )
     same_market_lifetime_lockout: bool = Field(
@@ -111,7 +128,9 @@ class EdgeThresholdConfig(BaseModel):
             "Strict mode: skip if ANY prior position exists on (market, "
             "side), regardless of when. One-shot-per-(market, side) "
             "across the lifetime of the strategy. When True, "
-            "``same_market_cooldown_minutes`` is ignored."
+            "``same_market_cooldown_minutes`` is ignored. Bypassed when "
+            "this market already has an open position on either side — "
+            "see the module docstring."
         ),
     )
     heat_cap_usd: float = Field(
@@ -123,7 +142,10 @@ class EdgeThresholdConfig(BaseModel):
             "all currently-open positions is at or above this dollar "
             "amount. 0 disables the check. Caps total exposure during "
             "regimes where the analyzer's signal goes one-sided "
-            "(cross-market correlated losses)."
+            "(cross-market correlated losses). Bypassed when this market "
+            "already has an open position on either side — blocking that "
+            "decision would only starve the position's news-confluence "
+            "ledger, not reduce exposure."
         ),
     )
 
@@ -131,7 +153,9 @@ class EdgeThresholdConfig(BaseModel):
     # All three default to 0 (disabled). Operator opts in via canvas config.
     # Trips are entry-only: open positions keep running their normal exit
     # logic (manual close + ExitMonitor still work). The brakes share the
-    # same list_positions(500) read the cooldown gate already does.
+    # same list_positions(500) read the cooldown gate already does. Also
+    # bypassed, same as heat_cap, when this market already has an open
+    # position on either side — see the module docstring.
     kill_max_consecutive_losses: int = Field(
         default=0,
         ge=0,
@@ -190,14 +214,15 @@ class EdgeThresholdEntryV0:
             return SectionOutput(payload=None, verdict="skip", reason="no analysis upstream")
 
         side: Side = "yes" if res.p_model >= 0.5 else "no"
-        if self.config.side_lock and side != "yes":
-            return SectionOutput(payload=None, verdict="skip", reason="side_lock active")
 
         # Portfolio-aware gates — cheapest first. Only fetch the portfolio
         # when at least one gate is enabled (keeps the default config from
-        # touching the DB at all, which contract tests rely on).
+        # touching the DB at all, which contract tests rely on). side_lock is
+        # included here now too, even though it needs no portfolio data of
+        # its own — it needs the confluence bypass below, which does.
         needs_portfolio = (
-            self.config.heat_cap_usd > 0
+            self.config.side_lock
+            or self.config.heat_cap_usd > 0
             or self.config.same_market_lifetime_lockout
             or self.config.same_market_cooldown_minutes > 0
             or self.config.kill_max_consecutive_losses > 0
@@ -207,61 +232,87 @@ class EdgeThresholdEntryV0:
         portfolio = (
             self._portfolio_provider() if needs_portfolio and self._portfolio_provider else None
         )
+
+        # News-confluence bypass: an open position on this market — either
+        # side — means no NEW capital is at stake in this decision, so none
+        # of side_lock / heat_cap / the kill switches / cooldown-lockout
+        # apply. The executor's own position_exists / opposite_position_exists
+        # check (openpoly.execution.executor) guarantees no fill happens
+        # regardless; all a bypass here does is let the OrderIntent reach
+        # that check so the decision attaches to the ledger
+        # (openpoly.portfolio.confluence) as a reinforce/contradict signal.
+        # Without this, a heat-capped or kill-switched account — which is
+        # exactly the account with the MOST open risk — would silently never
+        # learn whether fresh news still agrees with positions it already
+        # holds, the opposite of what those positions need most.
+        has_existing = False
         if portfolio is not None:
-            # heat_cap: portfolio-wide ceiling. One get_open_positions call,
-            # only sums the currently-open set, returns fast.
-            cap_usd = self.config.heat_cap_usd
-            if cap_usd > 0:
-                opens = portfolio.get_open_positions()
-                open_cost = sum(h.qty * h.avg_entry_price for h in opens)
-                if open_cost >= cap_usd:
+            opposite: Side = "no" if side == "yes" else "yes"
+            has_existing = (
+                portfolio.get_open_position(res.market_id, side) is not None
+                or portfolio.get_open_position(res.market_id, opposite) is not None
+            )
+
+        if not has_existing:
+            if self.config.side_lock and side != "yes":
+                return SectionOutput(payload=None, verdict="skip", reason="side_lock active")
+
+            if portfolio is not None:
+                # heat_cap: portfolio-wide ceiling. One get_open_positions
+                # call, only sums the currently-open set, returns fast.
+                cap_usd = self.config.heat_cap_usd
+                if cap_usd > 0:
+                    opens = portfolio.get_open_positions()
+                    open_cost = sum(h.qty * h.avg_entry_price for h in opens)
+                    if open_cost >= cap_usd:
+                        return SectionOutput(
+                            payload=None,
+                            verdict="skip",
+                            reason="heat_cap",
+                            signals={
+                                "side": side,
+                                "open_cost": round(open_cost, 2),
+                                "heat_cap_usd": cap_usd,
+                                "open_position_count": len(opens),
+                            },
+                        )
+
+                # A4 kill switch: portfolio-wide circuit breakers from
+                # realized PnL history. Fires before per-market lockout
+                # because a tripped brake is a system-level stop — no need
+                # to scan further.
+                kill_skip = _kill_switch_check(portfolio, self.config, now=None)
+                if kill_skip is not None:
+                    reason, signals = kill_skip
                     return SectionOutput(
                         payload=None,
                         verdict="skip",
-                        reason="heat_cap",
-                        signals={
-                            "side": side,
-                            "open_cost": round(open_cost, 2),
-                            "heat_cap_usd": cap_usd,
-                            "open_position_count": len(opens),
-                        },
+                        reason=reason,
+                        signals={"side": side, **signals},
                     )
 
-            # A4 kill switch: portfolio-wide circuit breakers from realized
-            # PnL history. Fires before per-market lockout because a tripped
-            # brake is a system-level stop — no need to scan further.
-            kill_skip = _kill_switch_check(portfolio, self.config, now=None)
-            if kill_skip is not None:
-                reason, signals = kill_skip
-                return SectionOutput(
-                    payload=None,
-                    verdict="skip",
-                    reason=reason,
-                    signals={"side": side, **signals},
-                )
-
-            # Lockout / cooldown: per-(market, side) gate. Lifetime lockout
-            # supersedes the time-window cooldown when enabled.
-            if self.config.same_market_lifetime_lockout:
-                if _market_side_has_history(portfolio, res.market_id, side):
-                    return SectionOutput(
-                        payload=None,
-                        verdict="skip",
-                        reason="same_market_lockout",
-                        signals={"side": side},
-                    )
-            elif self.config.same_market_cooldown_minutes > 0:
-                cooldown_min = self.config.same_market_cooldown_minutes
-                if _in_cooldown(portfolio, res.market_id, side, cooldown_min):
-                    return SectionOutput(
-                        payload=None,
-                        verdict="skip",
-                        reason="same_market_cooldown",
-                        signals={
-                            "side": side,
-                            "cooldown_minutes": cooldown_min,
-                        },
-                    )
+                # Lockout / cooldown: per-(market, side) gate. Lifetime
+                # lockout supersedes the time-window cooldown when enabled.
+                if self.config.same_market_lifetime_lockout:
+                    if _market_side_has_history(portfolio, res.market_id, side):
+                        return SectionOutput(
+                            payload=None,
+                            verdict="skip",
+                            reason="same_market_lockout",
+                            signals={"side": side},
+                        )
+                elif self.config.same_market_cooldown_minutes > 0:
+                    cooldown_min = self.config.same_market_cooldown_minutes
+                    if _in_cooldown(portfolio, res.market_id, side, cooldown_min):
+                        return SectionOutput(
+                            payload=None,
+                            verdict="skip",
+                            reason="same_market_cooldown",
+                            signals={
+                                "side": side,
+                                "cooldown_minutes": cooldown_min,
+                            },
+                        )
 
         catalog = market_source_manager.store
         market = catalog.get(res.market_id)

@@ -2,9 +2,11 @@
 
 A self-contained fork of ``edge_threshold_v0.EdgeThresholdEntryV0``: identical
 gating (edge/spread, late-buy veto, cooldown/lockout, heat cap, A4 kill
-switches — see that module's docstring for the full rationale on each), with
-exactly one change — position size scales with the analyzer's ``confidence``
-grade instead of a flat ``order_size_usd``::
+switches — see that module's docstring for the full rationale on each,
+including the news-confluence bypass: all of those gates defer to an
+already-open position on this market, either side), with exactly one
+change — position size scales with the analyzer's ``confidence`` grade
+instead of a flat ``order_size_usd``::
 
     qty = (order_size_usd * multiplier_for(confidence)) / held_price
 
@@ -63,7 +65,14 @@ class ConvictionSizedConfig(BaseModel):
         le=0.2,
         description="Reserved — dormant under the level-1 fill model (v1).",
     )
-    side_lock: bool = Field(default=False, description="Lock to YES only; never buy NO.")
+    side_lock: bool = Field(
+        default=False,
+        description=(
+            "Lock to YES only; never buy NO. Bypassed when this market "
+            "already has an open position (either side) — see "
+            "edge_threshold_v0.py's module docstring."
+        ),
+    )
     low_multiplier: float = Field(
         default=0.5,
         ge=0.1,
@@ -112,7 +121,8 @@ class ConvictionSizedConfig(BaseModel):
             "Skip the entry if a position on the same (market, side) was "
             "opened or closed within this many minutes. 0 disables the "
             "check. Superseded by ``same_market_lifetime_lockout`` when "
-            "that is True."
+            "that is True. Bypassed when this market already has an open "
+            "position on either side."
         ),
     )
     same_market_lifetime_lockout: bool = Field(
@@ -120,7 +130,8 @@ class ConvictionSizedConfig(BaseModel):
         description=(
             "Strict mode: skip if ANY prior position exists on (market, "
             "side), regardless of when. When True, "
-            "``same_market_cooldown_minutes`` is ignored."
+            "``same_market_cooldown_minutes`` is ignored. Bypassed when "
+            "this market already has an open position on either side."
         ),
     )
     heat_cap_usd: float = Field(
@@ -130,11 +141,14 @@ class ConvictionSizedConfig(BaseModel):
         description=(
             "Skip the entry if the sum of (qty × avg_entry_price) across "
             "all currently-open positions is at or above this dollar "
-            "amount. 0 disables the check."
+            "amount. 0 disables the check. Bypassed when this market "
+            "already has an open position on either side."
         ),
     )
 
     # ---- A4 kill switch (entry-side circuit breakers) ----
+    # Also bypassed, same as heat_cap, when this market already has an open
+    # position on either side.
     kill_max_consecutive_losses: int = Field(
         default=0,
         ge=0,
@@ -185,11 +199,15 @@ class ConvictionSizedEntryV0:
             return SectionOutput(payload=None, verdict="skip", reason="no analysis upstream")
 
         side: Side = "yes" if res.p_model >= 0.5 else "no"
-        if self.config.side_lock and side != "yes":
-            return SectionOutput(payload=None, verdict="skip", reason="side_lock active")
 
+        # Portfolio-aware gates — cheapest first. Only fetch the portfolio
+        # when at least one gate is enabled (keeps the default config from
+        # touching the DB at all, which contract tests rely on). side_lock is
+        # included here now too, even though it needs no portfolio data of
+        # its own — it needs the confluence bypass below, which does.
         needs_portfolio = (
-            self.config.heat_cap_usd > 0
+            self.config.side_lock
+            or self.config.heat_cap_usd > 0
             or self.config.same_market_lifetime_lockout
             or self.config.same_market_cooldown_minutes > 0
             or self.config.kill_max_consecutive_losses > 0
@@ -199,54 +217,74 @@ class ConvictionSizedEntryV0:
         portfolio = (
             self._portfolio_provider() if needs_portfolio and self._portfolio_provider else None
         )
+
+        # News-confluence bypass — see edge_threshold_v0.py's module
+        # docstring and its own copy of this comment for the full rationale.
+        # An open position on this market (either side) means no NEW capital
+        # is at stake, so side_lock / heat_cap / the kill switches /
+        # cooldown-lockout all defer to the executor's own
+        # position_exists / opposite_position_exists check instead of
+        # blocking the decision from ever reaching it.
+        has_existing = False
         if portfolio is not None:
-            cap_usd = self.config.heat_cap_usd
-            if cap_usd > 0:
-                opens = portfolio.get_open_positions()
-                open_cost = sum(h.qty * h.avg_entry_price for h in opens)
-                if open_cost >= cap_usd:
+            opposite: Side = "no" if side == "yes" else "yes"
+            has_existing = (
+                portfolio.get_open_position(res.market_id, side) is not None
+                or portfolio.get_open_position(res.market_id, opposite) is not None
+            )
+
+        if not has_existing:
+            if self.config.side_lock and side != "yes":
+                return SectionOutput(payload=None, verdict="skip", reason="side_lock active")
+
+            if portfolio is not None:
+                cap_usd = self.config.heat_cap_usd
+                if cap_usd > 0:
+                    opens = portfolio.get_open_positions()
+                    open_cost = sum(h.qty * h.avg_entry_price for h in opens)
+                    if open_cost >= cap_usd:
+                        return SectionOutput(
+                            payload=None,
+                            verdict="skip",
+                            reason="heat_cap",
+                            signals={
+                                "side": side,
+                                "open_cost": round(open_cost, 2),
+                                "heat_cap_usd": cap_usd,
+                                "open_position_count": len(opens),
+                            },
+                        )
+
+                kill_skip = _kill_switch_check(portfolio, self.config, now=None)
+                if kill_skip is not None:
+                    reason, signals = kill_skip
                     return SectionOutput(
                         payload=None,
                         verdict="skip",
-                        reason="heat_cap",
-                        signals={
-                            "side": side,
-                            "open_cost": round(open_cost, 2),
-                            "heat_cap_usd": cap_usd,
-                            "open_position_count": len(opens),
-                        },
+                        reason=reason,
+                        signals={"side": side, **signals},
                     )
 
-            kill_skip = _kill_switch_check(portfolio, self.config, now=None)
-            if kill_skip is not None:
-                reason, signals = kill_skip
-                return SectionOutput(
-                    payload=None,
-                    verdict="skip",
-                    reason=reason,
-                    signals={"side": side, **signals},
-                )
-
-            if self.config.same_market_lifetime_lockout:
-                if _market_side_has_history(portfolio, res.market_id, side):
-                    return SectionOutput(
-                        payload=None,
-                        verdict="skip",
-                        reason="same_market_lockout",
-                        signals={"side": side},
-                    )
-            elif self.config.same_market_cooldown_minutes > 0:
-                cooldown_min = self.config.same_market_cooldown_minutes
-                if _in_cooldown(portfolio, res.market_id, side, cooldown_min):
-                    return SectionOutput(
-                        payload=None,
-                        verdict="skip",
-                        reason="same_market_cooldown",
-                        signals={
-                            "side": side,
-                            "cooldown_minutes": cooldown_min,
-                        },
-                    )
+                if self.config.same_market_lifetime_lockout:
+                    if _market_side_has_history(portfolio, res.market_id, side):
+                        return SectionOutput(
+                            payload=None,
+                            verdict="skip",
+                            reason="same_market_lockout",
+                            signals={"side": side},
+                        )
+                elif self.config.same_market_cooldown_minutes > 0:
+                    cooldown_min = self.config.same_market_cooldown_minutes
+                    if _in_cooldown(portfolio, res.market_id, side, cooldown_min):
+                        return SectionOutput(
+                            payload=None,
+                            verdict="skip",
+                            reason="same_market_cooldown",
+                            signals={
+                                "side": side,
+                                "cooldown_minutes": cooldown_min,
+                            },
+                        )
 
         catalog = market_source_manager.store
         market = catalog.get(res.market_id)

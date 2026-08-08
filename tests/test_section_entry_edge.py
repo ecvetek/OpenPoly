@@ -271,6 +271,16 @@ class _FakePortfolio:
             if r.status == "open"
         ]
 
+    def get_open_position(self, market_id: str, side: str) -> HeldPosition | None:
+        # The news-confluence bypass: matches an open position on
+        # (market_id, side) exactly, same contract as PortfolioStore's own
+        # method — used to decide whether to skip the portfolio-risk gates
+        # below (heat_cap etc.) for this decision.
+        for h in self.get_open_positions():
+            if h.market_id == market_id and h.side == side:
+                return h
+        return None
+
 
 def _rec(
     market_id: str,
@@ -870,3 +880,132 @@ def test_kill_consecutive_runs_before_lockout() -> None:
     out = _run(inst, _ar(p_model=0.30))
     assert out.verdict == "skip"
     assert out.reason == "kill_consecutive_losses"
+
+
+# ---------- news-confluence bypass ----------
+#
+# An open position on this market — either side — means the decision carries
+# no new capital risk (the executor's own position_exists /
+# opposite_position_exists check guarantees no fill happens regardless), so
+# side_lock / heat_cap / the kill switches / cooldown-lockout must all defer
+# to it rather than silently dropping the decision before it can attach as a
+# reinforce/contradict signal (openpoly.portfolio.confluence). Each case below
+# pairs a gate that WOULD trip on its own with an existing position on "m1"
+# that should let the decision through anyway, with a real (non-placeholder)
+# OrderIntent so the executor still has a price to work with.
+
+
+def test_side_lock_bypassed_when_position_exists_on_this_market() -> None:
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    existing = _rec("m1", "no", opened_at=_time.time() - 60)
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(side_lock=True),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))  # side_lock alone would skip this (NO)
+    assert out.verdict == "ok"
+    assert isinstance(out.payload, OrderIntent)
+    assert out.payload.side == "no"
+    assert out.payload.price == 0.42  # real book price, not a placeholder
+
+
+def test_heat_cap_bypassed_when_same_side_position_already_open() -> None:
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    # Heat cap alone would trip: this one open position already costs $4,
+    # at or above a $1 cap.
+    existing = _rec("m1", "no", opened_at=_time.time() - 60)
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(heat_cap_usd=1.0),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok"
+    assert out.payload.side == "no"
+
+
+def test_heat_cap_bypassed_when_opposite_side_position_already_open() -> None:
+    """The decision wants NO; the market already holds YES. Still bypassed —
+    this is exactly the contradict case the confluence ledger exists for."""
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    existing = _rec("m1", "yes", opened_at=_time.time() - 60)
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(heat_cap_usd=1.0),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok"
+    assert out.payload.side == "no"
+
+
+def test_heat_cap_still_blocks_when_the_open_position_is_a_different_market() -> None:
+    """The bypass is per-market, not global — an unrelated open position must
+    not exempt a brand-new market from the cap."""
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    elsewhere = _rec("other", "no", opened_at=_time.time() - 60)
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(heat_cap_usd=1.0),
+        portfolio_provider=lambda: _FakePortfolio([elsewhere]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "skip"
+    assert out.reason == "heat_cap"
+
+
+def test_kill_switch_bypassed_when_position_exists_on_this_market() -> None:
+    now = _time.time()
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    records = [
+        _closed_rec(
+            market_id="other", side="no", closed_at=now - i * 600, realized_pnl=-0.50, position_id=i
+        )
+        for i in range(1, 4)  # would trip kill_max_consecutive_losses=2 on its own
+    ]
+    records.append(_rec("m1", "no", opened_at=now - 60))
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(kill_max_consecutive_losses=2),
+        portfolio_provider=lambda: _FakePortfolio(records),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok"
+
+
+def test_cooldown_bypassed_when_the_open_position_is_the_intended_side() -> None:
+    """The open position that WOULD trip cooldown (recently opened, same
+    market+side) is precisely the reinforce case — it must let the decision
+    through instead of skipping it."""
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    existing = _rec("m1", "no", opened_at=_time.time() - 60)
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(same_market_cooldown_minutes=30),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok"
+
+
+def test_lockout_bypassed_when_position_exists_on_this_market() -> None:
+    existing = _rec("m1", "no", opened_at=_time.time() - 60)
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(same_market_lifetime_lockout=True),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok"
+
+
+def test_bypass_does_not_short_circuit_pricing_gates() -> None:
+    """The bypass only skips the four portfolio-risk gates — min_edge is a
+    pricing/quality gate and must still apply normally even when a matching
+    open position exists."""
+    # ask 0.42, fair(no) = 1 - 0.30 = 0.70, edge = 0.28 — comfortably above
+    # the default 0.05 min_edge normally; set min_edge above that to force it.
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    existing = _rec("m1", "no", opened_at=_time.time() - 60)
+    inst = EdgeThresholdEntryV0(
+        EdgeThresholdConfig(heat_cap_usd=1.0, min_edge=0.90),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "skip"
+    assert out.reason == "edge below min_edge"

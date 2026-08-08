@@ -39,6 +39,17 @@ baseline `ThresholdExitV0` is untouched — this is a canvas-selectable variant,
 and the backtest harness can A/B the two over real history before it goes near
 a live run.
 
+Follow-up fix the same day: `side_lock`, `heat_cap_usd`, the A4 kill switches,
+and `same_market_cooldown_minutes` / `same_market_lifetime_lockout` were all
+returning `skip` inside the entry section *before* an `OrderIntent` was ever
+built — so on an account with any of those configured (heat_cap in
+particular, since it trips exactly when a strategy has the most open risk),
+repeat news on an already-held market never reached the executor and the
+confluence ledger silently never grew. None of those gates represent new
+capital risk when a position on that market already exists — the executor's
+own duplicate/opposite-side check guarantees no fill happens regardless — so
+they now defer to it instead.
+
 ## 06/01/2026 — The strategy canvas becomes the operating surface
 
 The canvas page was promoted from a configuration sketchpad to the actual

@@ -201,6 +201,15 @@ class _FakePortfolio:
             if r.status == "open"
         ]
 
+    def get_open_position(self, market_id: str, side: str) -> HeldPosition | None:
+        # The news-confluence bypass: matches an open position on
+        # (market_id, side) exactly, same contract as PortfolioStore's own
+        # method.
+        for h in self.get_open_positions():
+            if h.market_id == market_id and h.side == side:
+                return h
+        return None
+
 
 def _rec(
     market_id: str,
@@ -361,3 +370,56 @@ def test_kill_switch_disabled_by_default_no_portfolio_touch() -> None:
     out = _run(inst, _ar(p_model=0.30))
     assert out.verdict == "ok"
     assert called["count"] == 0
+
+
+# ---------- news-confluence bypass (copied logic, one case each) ----------
+#
+# See test_section_entry_edge.py's full matrix for the rationale — this file
+# only mirrors it, one representative case per gate, to confirm the copy
+# preserved this behavior exactly (same convention this file already uses
+# for edge/spread/cooldown/heat_cap/kill-switch above).
+
+
+def test_side_lock_bypassed_when_position_exists_on_this_market() -> None:
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    existing = _rec("m1", "no", opened_at=_time.time() - 60)
+    inst = ConvictionSizedEntryV0(
+        ConvictionSizedConfig(side_lock=True),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok"
+    assert out.payload.side == "no"
+
+
+def test_heat_cap_bypassed_when_opposite_side_position_already_open() -> None:
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    existing = _rec("m1", "yes", opened_at=_time.time() - 60)
+    inst = ConvictionSizedEntryV0(
+        ConvictionSizedConfig(heat_cap_usd=1.0),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok"
+
+
+def test_kill_switch_bypassed_when_position_exists_on_this_market() -> None:
+    existing = _rec("m1", "no", opened_at=_time.time() - 60)
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    inst = ConvictionSizedEntryV0(
+        ConvictionSizedConfig(kill_max_consecutive_losses=1),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok"
+
+
+def test_cooldown_bypassed_when_the_open_position_is_the_intended_side() -> None:
+    _populate(_market(), _book("no-m1", bid=0.40, ask=0.42))
+    existing = _rec("m1", "no", opened_at=_time.time() - 60)
+    inst = ConvictionSizedEntryV0(
+        ConvictionSizedConfig(same_market_cooldown_minutes=30),
+        portfolio_provider=lambda: _FakePortfolio([existing]),
+    )
+    out = _run(inst, _ar(p_model=0.30))
+    assert out.verdict == "ok"
