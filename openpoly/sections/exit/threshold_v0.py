@@ -83,6 +83,27 @@ class MarkedPosition:
     # timestamp; the backtest passes the replayed snapshot's recorded_at.
     marked_at: float = 0.0
 
+    def __post_init__(self) -> None:
+        # Defensive, not currently reachable through the audited construction
+        # sites (ExitMonitor._evaluate reads a real order-book bid; the
+        # backtest replay parses persisted snapshot JSON) — both should
+        # already guarantee valid values. Catching a violation here, loudly,
+        # beats every exit section silently computing nonsensical
+        # cost-basis/return math on it. ExitMonitor wraps each position's
+        # evaluation in its own try/except ("one bad position must not abort
+        # the sweep"), so a raise here degrades to a per-position error there,
+        # not a crash. The backtest replay loop has no equivalent per-row
+        # isolation for ANY exception today — a pre-existing gap, not one
+        # this guard introduces — so a violation there fails the whole
+        # backtest run, same as any other unexpected exception mid-replay
+        # already would.
+        if self.qty <= 0:
+            raise ValueError(f"MarkedPosition.qty must be positive, got {self.qty!r}")
+        if not 0 <= self.current_price <= 1:
+            raise ValueError(
+                f"MarkedPosition.current_price must be in [0, 1], got {self.current_price!r}"
+            )
+
 
 @dataclass(frozen=True)
 class CloseIntent:

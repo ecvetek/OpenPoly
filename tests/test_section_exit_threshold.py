@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from openpoly.sections._base import SectionInput
 from openpoly.sections._registry import scan
 from openpoly.sections.exit.threshold_v0 import (
@@ -76,6 +78,16 @@ def test_invalid_entry_price_skips() -> None:
     out = inst.run(SectionInput(tick_type="hard", payload=_pos(0.5, avg_entry_price=0.0)))
     assert out.verdict == "skip"
     assert out.reason == "invalid avg_entry_price"
+
+
+def test_marked_position_rejects_non_positive_qty() -> None:
+    with pytest.raises(ValueError, match="qty"):
+        _pos(0.5, qty=0.0)
+
+
+def test_marked_position_rejects_current_price_out_of_range() -> None:
+    with pytest.raises(ValueError, match="current_price"):
+        _pos(1.5)
 
 
 def test_custom_thresholds() -> None:
