@@ -53,45 +53,45 @@ from openpoly.runtime.section_log import (
 logger = logging.getLogger(__name__)
 
 
-def _ensure_fill_live_columns(engine: Engine) -> None:
-    """Idempotent migration: add order_id / tx_hash columns to fill table if
-    they are missing (older DBs predate slice C). New DBs get the columns
-    via init_db()'s create_all and skip this entirely.
+# Columns added to a table after its initial release, keyed by table name.
+# New DBs already get every column here via init_db()'s create_all; this
+# manifest only matters for upgrading an existing DB file that predates a
+# given column. Table/column/type here are fixed literals maintained in this
+# file, never external input, so building SQL from them (SQLite's DDL can't
+# bind identifiers as query parameters anyway) carries no injection risk.
+_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "fill": [("order_id", "VARCHAR"), ("tx_hash", "VARCHAR")],  # slice C
+    "entry_decision": [("signals_json", "TEXT")],  # entry-signals surfacing
+    "analyzer_call": [("self_check", "TEXT")],  # self-check surfacing
+}
 
-    SQLite's ALTER TABLE ADD COLUMN only fails if the column exists, so we
-    PRAGMA-check first instead of catching."""
+
+def _ensure_columns(engine: Engine) -> None:
+    """Idempotent migration: add any column in ``_COLUMN_MIGRATIONS`` missing
+    from an existing DB. SQLite's ALTER TABLE ADD COLUMN only fails if the
+    column already exists, so we PRAGMA-check first instead of catching.
+
+    Skips a manifest table that doesn't exist yet rather than erroring —
+    real production always runs ``init_db()``'s create_all first (so every
+    table in the manifest already exists by the time this runs), but a unit
+    test exercising this in isolation against a deliberately minimal schema
+    shouldn't have to stand up every table this manifest ever grows to
+    cover."""
     with engine.begin() as conn:
-        existing = {r[1] for r in conn.execute(text("PRAGMA table_info(fill)")).fetchall()}
-        if "order_id" not in existing:
-            conn.execute(text("ALTER TABLE fill ADD COLUMN order_id VARCHAR"))
-            logger.info("migration: added fill.order_id")
-        if "tx_hash" not in existing:
-            conn.execute(text("ALTER TABLE fill ADD COLUMN tx_hash VARCHAR"))
-            logger.info("migration: added fill.tx_hash")
-
-
-def _ensure_entry_decision_live_columns(engine: Engine) -> None:
-    """Idempotent migration: add the signals_json column to entry_decision if
-    missing (older DBs predate the entry-signals surfacing). New DBs get the
-    column via init_db()'s create_all and skip this entirely."""
-    with engine.begin() as conn:
-        existing = {
-            r[1] for r in conn.execute(text("PRAGMA table_info(entry_decision)")).fetchall()
+        tables_present = {
+            r[0]
+            for r in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'table'")
+            ).fetchall()
         }
-        if "signals_json" not in existing:
-            conn.execute(text("ALTER TABLE entry_decision ADD COLUMN signals_json TEXT"))
-            logger.info("migration: added entry_decision.signals_json")
-
-
-def _ensure_analyzer_call_live_columns(engine: Engine) -> None:
-    """Idempotent migration: add the self_check column to analyzer_call if
-    missing (older DBs predate the self-check surfacing). New DBs get the
-    column via init_db()'s create_all and skip this entirely."""
-    with engine.begin() as conn:
-        existing = {r[1] for r in conn.execute(text("PRAGMA table_info(analyzer_call)")).fetchall()}
-        if "self_check" not in existing:
-            conn.execute(text("ALTER TABLE analyzer_call ADD COLUMN self_check TEXT"))
-            logger.info("migration: added analyzer_call.self_check")
+        for table, columns in _COLUMN_MIGRATIONS.items():
+            if table not in tables_present:
+                continue
+            existing = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()}
+            for column, sql_type in columns:
+                if column not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
+                    logger.info("migration: added %s.%s", table, column)
 
 
 def _ensure_indexes(engine: Engine) -> None:
@@ -169,9 +169,7 @@ class DatabaseManager:
         """
         self._engine = engine or get_engine()
         init_db(self._engine)
-        _ensure_fill_live_columns(self._engine)
-        _ensure_entry_decision_live_columns(self._engine)
-        _ensure_analyzer_call_live_columns(self._engine)
+        _ensure_columns(self._engine)
         _ensure_indexes(self._engine)
         factory = make_session_factory(self._engine)
         self._book_writer = WriteBehindWriter(make_order_book_sink(factory))
