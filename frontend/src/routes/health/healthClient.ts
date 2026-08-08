@@ -14,8 +14,8 @@ export type HealthDetailResponse = {
   checks: Record<string, SubsystemCheck>
 }
 
-export async function fetchHealthDetail(): Promise<HealthDetailResponse> {
-  const r = await fetch('/api/health/detail')
+export async function fetchHealthDetail(signal?: AbortSignal): Promise<HealthDetailResponse> {
+  const r = await fetch('/api/health/detail', { signal })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return (await r.json()) as HealthDetailResponse
 }

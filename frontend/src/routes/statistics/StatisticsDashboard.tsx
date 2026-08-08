@@ -42,7 +42,7 @@ export function StatisticsDashboard() {
   const { since, until } = useMemo(() => resolveRange(range), [range])
 
   const { data, status, error, refetch } = usePoll<StatisticsResponse>(
-    () => fetchStatistics(since, until),
+    (signal) => fetchStatistics(since, until, signal),
     null, // no auto-refresh — fetch on mount + on range change only
     range,
   )

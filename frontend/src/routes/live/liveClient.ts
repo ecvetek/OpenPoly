@@ -60,8 +60,8 @@ const EMPTY_TOTALS: NewsPipelineTotals = { news: 0, embedding: 0, analyzer: 0, e
 // overall could silently drop off the Live page without this.
 const POSITIONS_LIMIT = 500
 
-async function fetchPositions(): Promise<PositionRecord[]> {
-  const r = await fetch(`/api/positions?limit=${POSITIONS_LIMIT}`)
+async function fetchPositions(signal?: AbortSignal): Promise<PositionRecord[]> {
+  const r = await fetch(`/api/positions?limit=${POSITIONS_LIMIT}`, { signal })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   const body = (await r.json()) as { positions: PositionRecord[] }
   return body.positions
@@ -75,16 +75,16 @@ async function settle<T>(p: Promise<T>): Promise<T | null> {
   }
 }
 
-export async function fetchLiveSnapshot(): Promise<LiveSnapshot> {
+export async function fetchLiveSnapshot(signal?: AbortSignal): Promise<LiveSnapshot> {
   const { since, hoursSinceMidnight } = todayRange()
 
   const [equity, wallet, statisticsToday, positions, newsPipeline, health] = await Promise.all([
-    settle(fetchEquity(equityWindowHours(hoursSinceMidnight))),
-    settle(fetchWalletBalance()),
-    settle(fetchStatistics(since, null)),
-    settle(fetchPositions()),
-    settle(fetchNewsPipelineSince(since, NEWS_TICKER_LIMIT)),
-    settle(fetchHealthDetail()),
+    settle(fetchEquity(equityWindowHours(hoursSinceMidnight), signal)),
+    settle(fetchWalletBalance(signal)),
+    settle(fetchStatistics(since, null, signal)),
+    settle(fetchPositions(signal)),
+    settle(fetchNewsPipelineSince(since, NEWS_TICKER_LIMIT, signal)),
+    settle(fetchHealthDetail(signal)),
   ])
 
   return {

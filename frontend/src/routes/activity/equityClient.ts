@@ -19,8 +19,11 @@ export type EquityResponse = {
   summary: EquitySummary
 }
 
-export async function fetchEquity(windowHours: number = 24): Promise<EquityResponse> {
-  const r = await fetch(`/api/portfolio/equity?window_hours=${windowHours}`)
+export async function fetchEquity(
+  windowHours: number = 24,
+  signal?: AbortSignal,
+): Promise<EquityResponse> {
+  const r = await fetch(`/api/portfolio/equity?window_hours=${windowHours}`, { signal })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return (await r.json()) as EquityResponse
 }

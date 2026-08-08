@@ -35,7 +35,7 @@ export type PollResult<T> = {
 }
 
 export function usePoll<T>(
-  fetcher: () => Promise<T>,
+  fetcher: (signal: AbortSignal) => Promise<T>,
   intervalMs: number | null = 3000,
   refreshKey?: unknown,
 ): PollResult<T> {
@@ -53,29 +53,40 @@ export function usePoll<T>(
     // Guards against overlapping fetches: if a slow response is still
     // in flight when the next interval tick or visibilitychange fires,
     // skip re-issuing rather than risk an older response landing after
-    // (and overwriting) a newer one.
+    // (and overwriting) a newer one. Also tracks the in-flight request's
+    // controller so cleanup (unmount, or a dependency change starting a
+    // fresh effect run) can actually abort it — `cancelled` alone only
+    // stopped the stale response from updating state, the underlying
+    // request kept running to completion regardless.
     let inflight = false
+    let controller: AbortController | null = null
     async function refresh() {
       if (inflight) return
       inflight = true
+      controller = new AbortController()
       try {
-        const result = await fetcherRef.current()
+        const result = await fetcherRef.current(controller.signal)
         if (cancelled) return
         setData(result)
         setStatus('ready')
         setError(null)
       } catch (e) {
+        // An aborted fetch throws here too, but `cancelled` is already true
+        // by the time abort() is ever called (see cleanup below), so this
+        // guard covers it — no separate AbortError check needed.
         if (cancelled) return
         setStatus('error')
         setError(e instanceof Error ? e.message : String(e))
       } finally {
         inflight = false
+        controller = null
       }
     }
     void refresh()
     if (intervalMs === null) {
       return () => {
         cancelled = true
+        controller?.abort()
       }
     }
     const maybeRefresh = () => {
@@ -85,6 +96,7 @@ export function usePoll<T>(
     document.addEventListener('visibilitychange', maybeRefresh)
     return () => {
       cancelled = true
+      controller?.abort()
       clearInterval(timer)
       document.removeEventListener('visibilitychange', maybeRefresh)
     }

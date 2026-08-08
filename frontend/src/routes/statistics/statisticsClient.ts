@@ -46,12 +46,13 @@ export type StatisticsResponse = {
 export async function fetchStatistics(
   since: number | null,
   until: number | null,
+  signal?: AbortSignal,
 ): Promise<StatisticsResponse> {
   const params = new URLSearchParams()
   if (since !== null) params.set('since', String(since))
   if (until !== null) params.set('until', String(until))
   const qs = params.toString()
-  const r = await fetch(`/api/statistics${qs ? `?${qs}` : ''}`)
+  const r = await fetch(`/api/statistics${qs ? `?${qs}` : ''}`, { signal })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return (await r.json()) as StatisticsResponse
 }

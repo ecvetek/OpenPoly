@@ -61,8 +61,8 @@ function formatUsdCompact(n: number): string {
   return `$${n.toFixed(0)}`
 }
 
-async function fetchPosition(id: string): Promise<PositionRecord | null> {
-  const r = await fetch(`/api/positions/${encodeURIComponent(id)}`)
+async function fetchPosition(id: string, signal?: AbortSignal): Promise<PositionRecord | null> {
+  const r = await fetch(`/api/positions/${encodeURIComponent(id)}`, { signal })
   if (r.status === 404) return null
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return (await r.json()) as PositionRecord
@@ -105,22 +105,22 @@ export function PositionDetail() {
   // the postmortem's refresh button would be a permanent no-op.
   const bypassFreezeRef = useRef(false)
   const { data, status, error, refetch } = usePoll<DetailData>(
-    async () => {
+    async (signal) => {
       const pid = positionId ?? ''
       const key = `${pid}:${chartWindow}`
       if (frozenRef.current.has(key) && !bypassFreezeRef.current) {
         return frozenRef.current.get(key)!
       }
       bypassFreezeRef.current = false
-      const position = await fetchPosition(pid)
+      const position = await fetchPosition(pid, signal)
       if (position === null) return { position: null, history: null, allHistory: null }
-      const history = await fetchPositionPriceHistory(position.id, chartWindow)
+      const history = await fetchPositionPriceHistory(position.id, chartWindow, signal)
       const allHistory =
         position.status !== 'closed'
           ? null
           : chartWindow === 'all'
             ? history
-            : await fetchPositionPriceHistory(position.id, 'all')
+            : await fetchPositionPriceHistory(position.id, 'all', signal)
       const result: DetailData = { position, history, allHistory }
       // Freeze only once the market has actually resolved — a closed
       // position keeps polling past `closed_at` (the backend keeps

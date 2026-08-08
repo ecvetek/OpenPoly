@@ -50,7 +50,7 @@ export function OverviewTab() {
   // would pick up the new window silently, only visible on the next
   // scheduled poll (which, with refresh off, is never).
   const { data, status, error, refetch } = usePoll<EquityResponse>(
-    () => fetchEquity(windowHours),
+    (signal) => fetchEquity(windowHours, signal),
     refreshMs,
     windowHours,
   )

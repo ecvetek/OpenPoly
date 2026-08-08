@@ -22,8 +22,9 @@ export type PositionPriceHistory = {
 export async function fetchPositionPriceHistory(
   positionId: number,
   window: PriceHistoryWindow = 'all',
+  signal?: AbortSignal,
 ): Promise<PositionPriceHistory> {
-  const r = await fetch(`/api/positions/${positionId}/price-history?window=${window}`)
+  const r = await fetch(`/api/positions/${positionId}/price-history?window=${window}`, { signal })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return (await r.json()) as PositionPriceHistory
 }
