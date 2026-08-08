@@ -398,11 +398,18 @@ class ConvictionSizedEntryV0:
 
 
 def _multiplier_for(config: ConvictionSizedConfig, confidence: str) -> float:
+    """Today's only analyzer impl (llm_v0.py) validates confidence into
+    exactly "low"/"medium"/"high" before ever constructing an AnalysisResult,
+    so this can't miss in practice — but AnalysisResult is a plain
+    @dataclass, not a Pydantic model, so nothing stops a third-party
+    user_sections/ analyzer from returning an out-of-range value. Falls back
+    to the medium multiplier rather than a bare KeyError crashing the
+    section on an untrusted analyzer's output."""
     return {
         "low": config.low_multiplier,
         "medium": config.medium_multiplier,
         "high": config.high_multiplier,
-    }[confidence]
+    }.get(confidence, config.medium_multiplier)
 
 
 def _in_cooldown(

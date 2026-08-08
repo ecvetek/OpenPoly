@@ -126,6 +126,20 @@ def test_custom_multipliers_are_respected() -> None:
     assert out.payload.qty == pytest.approx(10.0 * 2.5 / 0.42)
 
 
+def test_out_of_range_confidence_falls_back_to_medium_multiplier() -> None:
+    """AnalysisResult is a plain dataclass — Confidence's Literal type isn't
+    runtime-enforced, so a non-conforming third-party analyzer (anything
+    other than today's built-in llm_v0, which does validate) can hand this
+    section a confidence value outside "low"/"medium"/"high". Must not
+    KeyError; falls back to the medium multiplier."""
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42))
+    inst = ConvictionSizedEntryV0(ConvictionSizedConfig(order_size_usd=20.0))
+    out = _run(inst, _ar(p_model=0.7, confidence="very_high"))
+    assert out.verdict == "ok"
+    assert out.payload.qty == pytest.approx(20.0 * 1.0 / 0.42)
+    assert out.signals["size_multiplier"] == pytest.approx(1.0)
+
+
 # ---------- edge / spread gates (copied logic, one case each) ----------
 
 
