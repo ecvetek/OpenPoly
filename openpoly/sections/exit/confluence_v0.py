@@ -53,7 +53,7 @@ from pydantic import BaseModel, Field
 
 from openpoly.portfolio.confluence import evaluate
 from openpoly.sections._base import SectionInput, SectionOutput
-from openpoly.sections.exit.threshold_v0 import CloseIntent, MarkedPosition, Trigger
+from openpoly.sections.exit.threshold_v0 import CloseIntent, MarkedPosition, Trigger, peak_drawdown
 
 
 class ConfluenceExitConfig(BaseModel):
@@ -194,17 +194,11 @@ class ConfluenceExitV0:
 
         return_pct = (pos.current_price - pos.avg_entry_price) / pos.avg_entry_price
 
-        cost_basis = pos.avg_entry_price * pos.qty
-        peak_gain_usd = (pos.peak_price - pos.avg_entry_price) * pos.qty
-        floor = max(
-            self.config.peak_meaningful_floor_usd,
-            self.config.peak_meaningful_floor_pct * cost_basis,
+        peak_meaningful, peak_dd = peak_drawdown(
+            pos,
+            floor_usd=self.config.peak_meaningful_floor_usd,
+            floor_pct=self.config.peak_meaningful_floor_pct,
         )
-        peak_meaningful = pos.peak_price > pos.avg_entry_price and peak_gain_usd >= floor
-        if peak_meaningful:
-            peak_dd = (pos.peak_price - pos.current_price) / (pos.peak_price - pos.avg_entry_price)
-        else:
-            peak_dd = 0.0
 
         dd_limit = self._peak_drawdown_pct(conf.state)
 

@@ -96,6 +96,33 @@ class CloseIntent:
     trigger: Trigger
 
 
+def peak_drawdown(pos: MarkedPosition, *, floor_usd: float, floor_pct: float) -> tuple[bool, float]:
+    """Whether ``pos``'s peak gain clears the "meaningful" floor (the larger
+    of ``floor_usd`` and ``floor_pct`` of cost basis — guards against a
+    two-cent bounce off entry reading as a real peak on a tiny position),
+    and if so how far it has retraced from that peak (0.0 = still at peak,
+    1.0 = fully back to entry).
+
+    Shared by every exit section that gates on peak drawdown — ``threshold``
+    (baseline), ``scale_out``, ``confluence`` — imported from here rather
+    than each reimplementing it, same as they already import
+    ``MarkedPosition``/``CloseIntent``/``Trigger`` from this module instead
+    of redefining them.
+
+    Returns ``(False, 0.0)`` when the floor isn't cleared — callers must gate
+    on the first element before using the second; ``0.0`` there is "not a
+    meaningful peak," not "no drawdown."
+    """
+    cost_basis = pos.avg_entry_price * pos.qty
+    peak_gain_usd = (pos.peak_price - pos.avg_entry_price) * pos.qty
+    floor = max(floor_usd, floor_pct * cost_basis)
+    peak_meaningful = pos.peak_price > pos.avg_entry_price and peak_gain_usd >= floor
+    if not peak_meaningful:
+        return False, 0.0
+    peak_dd = (pos.peak_price - pos.current_price) / (pos.peak_price - pos.avg_entry_price)
+    return True, peak_dd
+
+
 class ThresholdExitConfig(BaseModel):
     take_profit_pct: float = Field(
         default=0.20,
@@ -152,17 +179,11 @@ class ThresholdExitV0:
 
         return_pct = (pos.current_price - pos.avg_entry_price) / pos.avg_entry_price
 
-        cost_basis = pos.avg_entry_price * pos.qty
-        peak_gain_usd = (pos.peak_price - pos.avg_entry_price) * pos.qty
-        floor = max(
-            self.config.peak_meaningful_floor_usd,
-            self.config.peak_meaningful_floor_pct * cost_basis,
+        peak_meaningful, peak_dd = peak_drawdown(
+            pos,
+            floor_usd=self.config.peak_meaningful_floor_usd,
+            floor_pct=self.config.peak_meaningful_floor_pct,
         )
-        peak_meaningful = pos.peak_price > pos.avg_entry_price and peak_gain_usd >= floor
-        if peak_meaningful:
-            peak_dd = (pos.peak_price - pos.current_price) / (pos.peak_price - pos.avg_entry_price)
-        else:
-            peak_dd = 0.0
 
         trigger: Trigger | None
         if return_pct <= -self.config.stop_loss_pct:

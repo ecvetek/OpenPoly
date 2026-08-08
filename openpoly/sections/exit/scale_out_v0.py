@@ -38,7 +38,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from openpoly.sections._base import SectionInput, SectionOutput
-from openpoly.sections.exit.threshold_v0 import CloseIntent, MarkedPosition, Trigger
+from openpoly.sections.exit.threshold_v0 import CloseIntent, MarkedPosition, Trigger, peak_drawdown
 
 
 class ScaleOutExitConfig(BaseModel):
@@ -123,17 +123,11 @@ class ScaleOutExitV0:
 
         return_pct = (pos.current_price - pos.avg_entry_price) / pos.avg_entry_price
 
-        cost_basis = pos.avg_entry_price * pos.qty
-        peak_gain_usd = (pos.peak_price - pos.avg_entry_price) * pos.qty
-        floor = max(
-            self.config.peak_meaningful_floor_usd,
-            self.config.peak_meaningful_floor_pct * cost_basis,
+        peak_meaningful, peak_dd = peak_drawdown(
+            pos,
+            floor_usd=self.config.peak_meaningful_floor_usd,
+            floor_pct=self.config.peak_meaningful_floor_pct,
         )
-        peak_meaningful = pos.peak_price > pos.avg_entry_price and peak_gain_usd >= floor
-        if peak_meaningful:
-            peak_dd = (pos.peak_price - pos.current_price) / (pos.peak_price - pos.avg_entry_price)
-        else:
-            peak_dd = 0.0
 
         signals: dict[str, object] = {
             "return_pct": round(return_pct, 4),
