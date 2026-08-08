@@ -1516,6 +1516,64 @@ def test_price_history_cache_expires_after_ttl(env, monkeypatch) -> None:
     assert calls["n"] == 2
 
 
+def test_prune_stale_cache_entries_removes_only_expired() -> None:
+    import openpoly.api.portfolio_routes as routes
+
+    now = 1_000.0
+    cache = {
+        "fresh": (now - 5.0, "keep"),
+        "stale": (now - 30.0, "drop"),
+        "boundary": (now - 30.0, "drop"),  # now - ts == ttl counts as stale
+    }
+    routes._prune_stale_cache_entries(cache, now, ttl=30.0)
+    assert cache == {"fresh": (now - 5.0, "keep")}
+
+
+def test_price_history_cache_prunes_stale_entries_on_write(env, monkeypatch) -> None:
+    """Beyond just refetching a stale key (test_price_history_cache_expires_
+    after_ttl above), a stale entry for a DIFFERENT key must actually be
+    removed from the dict on the next write — otherwise the cache grows for
+    the life of the process instead of staying bounded by "recently active
+    keys"."""
+    import time as _time
+
+    import openpoly.api.portfolio_routes as routes
+
+    store, client, _factory = env
+    now = _time.time()
+    h1 = _open(store, "m1", "yes", "ty1", ts=now - 100)
+    h2 = _open(store, "m2", "yes", "ty2", ts=now - 100)
+
+    async def fake_fetch_market_by_id(market_id, **kwargs):
+        return _market(closed=False)
+
+    def fake_price_history_range(*args, **kwargs):
+        return [(now - 50, 0.5)]
+
+    class _FakeTime:
+        def __init__(self, t: float) -> None:
+            self.t = t
+
+        def time(self) -> float:
+            return self.t
+
+    fake_time = _FakeTime(now)
+    monkeypatch.setattr(routes, "time", fake_time)
+    monkeypatch.setattr(routes, "_market_lookup_cache", {})
+    monkeypatch.setattr(routes, "_price_history_cache", {})
+    monkeypatch.setattr(routes, "fetch_market_by_id", fake_fetch_market_by_id)
+    monkeypatch.setattr(routes, "fetch_price_history_range", fake_price_history_range)
+
+    client.get(f"/api/positions/{h1.position_id}/price-history?window=all")
+    assert len(routes._price_history_cache) == 1
+
+    fake_time.t = now + routes._PRICE_HISTORY_PRUNE_TTL_SECONDS + 1
+    client.get(f"/api/positions/{h2.position_id}/price-history?window=all")
+    # h1's entry aged past the prune TTL and h2's write swept it — the dict
+    # holds only the fresh entry, not both.
+    assert len(routes._price_history_cache) == 1
+
+
 def test_price_history_clob_failure_returns_empty_without_500(env, monkeypatch) -> None:
     import time as _time
 

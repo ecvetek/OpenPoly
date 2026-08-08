@@ -306,6 +306,20 @@ MARKET_LOOKUP_CACHE_TTL_SECONDS = 30
 _market_lookup_cache: dict[str, tuple[float, Market | None]] = {}
 
 
+def _prune_stale_cache_entries(cache: dict[Any, tuple[float, Any]], now: float, ttl: float) -> None:
+    """Drop entries whose cached timestamp is at least ``ttl`` old. Both
+    module-level caches below are TTL-checked on read but were never
+    otherwise pruned, so they grew for the life of the process — bounded by
+    "every distinct key ever looked up", not by anything that actually
+    shrinks. Called opportunistically on write (not every read); cardinality
+    here is low enough (micro-stakes trade volume) that an O(n) sweep per
+    write is cheap, so no throttling/amortization is worth the complexity.
+    """
+    stale = [key for key, (ts, _) in cache.items() if now - ts >= ttl]
+    for key in stale:
+        del cache[key]
+
+
 async def _lookup_market_durable(market_id: str, condition_id: str) -> Market | None:
     """Resolve a position's market even after it has fallen out of the live
     discovery catalog (near-expiry filtered, or resolved).
@@ -343,6 +357,7 @@ async def _lookup_market_durable(market_id: str, condition_id: str) -> Market | 
                 market = resolved_market
 
     _market_lookup_cache[condition_id] = (now, market)
+    _prune_stale_cache_entries(_market_lookup_cache, now, MARKET_LOOKUP_CACHE_TTL_SECONDS)
     return market
 
 
@@ -391,6 +406,14 @@ PRICE_HISTORY_CACHE_TTL_SECONDS: dict[str, int] = {
     "all": 60,
 }
 PRICE_HISTORY_CACHE_TTL_DEFAULT_SECONDS = 60
+# Upper bound across every per-window TTL above — used only for pruning.
+# _price_history_cache mixes entries with different per-window TTLs, so a
+# single sweep can't apply each entry's own TTL cheaply; an entry older than
+# the longest possible TTL is stale under every window, so it's always safe
+# to drop, even if slightly later than that entry's own (shorter) TTL would.
+_PRICE_HISTORY_PRUNE_TTL_SECONDS = max(
+    *PRICE_HISTORY_CACHE_TTL_SECONDS.values(), PRICE_HISTORY_CACHE_TTL_DEFAULT_SECONDS
+)
 
 # Keyed on (token_id, window, fidelity, until_bucket) — `until` advances every
 # poll (tracks wall-clock "now" for an unresolved market), so it's bucketed to
@@ -478,6 +501,7 @@ async def _cached_price_history(
     raw = await asyncio.to_thread(_fetch_price_history_chunked, token_id, since, until, fidelity)
     points = [[ts, price] for ts, price in raw]
     _price_history_cache[key] = (now, points)  # cache empty/failed results too
+    _prune_stale_cache_entries(_price_history_cache, now, _PRICE_HISTORY_PRUNE_TTL_SECONDS)
     return points
 
 
