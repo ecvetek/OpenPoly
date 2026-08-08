@@ -332,7 +332,11 @@ def test_sell_partial_qty_capped_by_position_qty(store) -> None:
     assert store.get_open_position("m1", "yes") is None
 
 
-def test_sell_skips_when_bid_depth_is_dust(store) -> None:
+def test_sell_fills_below_the_buy_dollar_floor(store) -> None:
+    """Unlike execute_buy, execute_sell has no $1 notional floor — the real
+    Polymarket CLOB enforces a minimum only on marketable BUYs, so a paper
+    sell must fill a thin remainder live mode would also fill, not skip it
+    as dust (see execute_sell's own docstring)."""
     _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=100.0))
     ex = Executor(store)
     ex.execute_buy(_intent(qty=20.0), news_id="n1", ts=1.0)
@@ -341,6 +345,19 @@ def test_sell_skips_when_bid_depth_is_dust(store) -> None:
 
     _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=0.5))  # $0.20
     r = ex.execute_sell(held, close_reason="manual", ts=2.0)
+    assert r.filled
+    assert r.qty == 0.5
+    assert r.price == 0.40
+
+
+def test_sell_skips_as_dust_when_requested_qty_is_zero(store) -> None:
+    _populate(_market(), _book("yes-m1", bid=0.40, ask=0.42, bid_size=100.0))
+    ex = Executor(store)
+    ex.execute_buy(_intent(qty=20.0), news_id="n1", ts=1.0)
+    held = store.get_open_position("m1", "yes")
+    assert held is not None
+
+    r = ex.execute_sell(held, close_reason="manual", ts=2.0, qty=0.0)
     assert not r.filled
     assert r.skip_reason == "dust"
     assert store.get_open_position("m1", "yes") is not None

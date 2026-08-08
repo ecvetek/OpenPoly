@@ -26,7 +26,11 @@ from openpoly.sections.entry.edge_threshold_v0 import OrderIntent
 
 logger = logging.getLogger(__name__)
 
-# A fill below this notional (USD) is not worth recording.
+# A BUY fill below this notional (USD) is not worth recording — mirrors the
+# real Polymarket CLOB's own $1 marketable-BUY minimum (see
+# LiveExecutor's _MIN_NOTIONAL_PUSD). SELL has no equivalent: the exchange
+# enforces no minimum notional on the taker side, only a decimal-precision
+# rule (see execute_sell below) — so this constant is BUY-only.
 MIN_FILL_USD = 1.0
 
 
@@ -193,6 +197,15 @@ class PaperExecutor:
         its results weren't comparable to a live run. A partial goes through
         ``record_sell``, which keeps the position open with the remainder for
         the next exit tick, exactly as the live path does.
+
+        No dollar-notional floor, unlike ``execute_buy`` — the real Polymarket
+        CLOB enforces a $1 minimum on marketable BUYs but not on SELLs (see
+        ``LiveExecutor.execute_sell``'s own module comment, "verified by live
+        smoke"), so a paper/backtest floor here would refuse fills live mode
+        would actually execute (a thin scale-out remainder or stop-loss dust),
+        making simulated results diverge from what live would really do. Still
+        skipped as "dust" if the fill would be zero or negative (e.g. a caller
+        requesting ``qty=0``) — not a real fill either way.
         """
         book = market_source_manager.store.get_order_book(position.token_id)
         if book is None:
@@ -203,7 +216,7 @@ class PaperExecutor:
         bid_price, bid_size = book.bids[0]
         requested = min(qty, position.qty) if qty is not None else position.qty
         fill_qty = min(requested, bid_size)
-        if fill_qty * bid_price < MIN_FILL_USD:
+        if fill_qty <= 0:
             return ExecResult.skip("dust")
 
         self._store.record_sell(

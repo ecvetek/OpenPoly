@@ -116,7 +116,7 @@ def _quantize_sell_size(qty: float) -> float:
     any qty below 1 share straight to 0, so a position left with
     fractional-share dust (the normal case after a partial fill or a
     partial close) could never be sold again — ``execute_sell`` would skip
-    ``min_notional_below_floor`` forever, permanently stranding it, even
+    ``sell_qty_rounds_to_zero`` forever, permanently stranding it, even
     though the server's actual SELL rule has no problem with a fractional
     size at all.
     """
@@ -414,10 +414,13 @@ class LiveExecutor:
         # SELL uses its own (finer, 4-decimal) precision rule — see
         # _quantize_sell_size's docstring for why reusing the BUY quantizer
         # here was a real bug (permanently stranded fractional-share dust).
+        # No dollar-notional floor on this side (unlike BUY's
+        # _MIN_NOTIONAL_PUSD check above) — the server has none for SELL —
+        # so this skip reason names the actual check, not a notional one.
         requested = min(qty, position.qty) if qty is not None else position.qty
         size = _quantize_sell_size(requested)
         if size <= 0:
-            return ExecResult.skip("min_notional_below_floor")
+            return ExecResult.skip("sell_qty_rounds_to_zero")
 
         # Poll CTF balance — handles cache lag when SELL fires shortly after
         # BUY (live smoke testing saw ~3-5s lag). update_balance_allowance is

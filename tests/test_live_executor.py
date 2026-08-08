@@ -521,7 +521,7 @@ def test_sell_below_4_decimal_floor_skips(store) -> None:
     clob = _FakeClob()
     le = LiveExecutor(portfolio=store, clob_client=clob)
     r = le.execute_sell(held, close_reason="take_profit", ts=200.0)
-    assert r.skip_reason == "min_notional_below_floor"
+    assert r.skip_reason == "sell_qty_rounds_to_zero"
     assert clob.posted == []
 
 
